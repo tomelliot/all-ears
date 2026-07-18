@@ -122,6 +122,19 @@ let package = Package(
       ]
     ),
 
+    // The native ASR backend shim (`docs/product/specs/model-interface.md`'s
+    // "Backend 1 -- native"): NVIDIA Parakeet TDT via FluidAudio's Core ML/ANE
+    // pipeline, behind the `Transcriber` protocol. Kept as thin as possible
+    // per the tier-2 rule in `docs/engineering-practices.md` -- only this
+    // target touches FluidAudio/Core ML directly.
+    .target(
+      name: "EarsTranscribeKit",
+      dependencies: [
+        "EarsCore",
+        .product(name: "FluidAudio", package: "FluidAudio"),
+      ]
+    ),
+
     // MARK: - Executables
 
     .executableTarget(
@@ -235,6 +248,10 @@ let package = Package(
     .testTarget(
       name: "EarsDaemonKitTests",
       dependencies: ["EarsDaemonKit", "EarsCoreTestSupport"]
+    ),
+    .testTarget(
+      name: "EarsTranscribeKitTests",
+      dependencies: ["EarsTranscribeKit", "EarsCoreTestSupport"]
     ),
   ]
 )
