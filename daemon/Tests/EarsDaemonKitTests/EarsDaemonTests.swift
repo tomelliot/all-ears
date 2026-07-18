@@ -107,6 +107,66 @@ struct EarsDaemonTests {
     await daemon.stop()
   }
 
+  @Test("writes meta.toml for each configured source at construction time")
+  func writesSourceMetaTomlAtConstruction() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 5_000))
+
+    let configuration = EarsDaemonConfiguration(
+      sources: [makeDescriptor(id: "mic", sourceClass: .mic)],
+      dataRoot: dataRoot,
+      socketPath: tempSocketPath()
+    )
+
+    _ = try EarsDaemon(
+      configuration: configuration,
+      backendFactory: { descriptor in
+        SyntheticCaptureBackend(source: descriptor.id, buffers: [])
+      },
+      clock: clock
+    )
+
+    let written = try SourceMetaStore.read(sourceID: "mic", dataRoot: dataRoot)
+    #expect(written.id == "mic")
+    #expect(written.sourceClass == .mic)
+    #expect(written.nativeSampleRate == nativeRate)
+    #expect(written.asrSampleRate == asrRate)
+    #expect(written.timeCapSeconds == 7_200)
+    #expect(written.created == Instant(secondsSinceEpoch: 1_000))
+  }
+
+  @Test(
+    "reconstructing the daemon preserves an existing meta.toml's created timestamp while updating its other fields to match the current config"
+  )
+  func preservesExistingMetaTomlCreatedOnRestart() async throws {
+    let dataRoot = try makeDataRoot()
+    let originalCreated = Instant(secondsSinceEpoch: 500)
+    var preExisting = makeDescriptor(id: "mic", sourceClass: .mic)
+    preExisting.created = originalCreated
+    preExisting.timeCapSeconds = 3_600
+    try SourceMetaStore.write(preExisting, dataRoot: dataRoot)
+
+    let configuration = EarsDaemonConfiguration(
+      // A fresh config-resolution pass stamps `created` with "now" and may
+      // have a different `time_cap_seconds` than what's already on disk.
+      sources: [makeDescriptor(id: "mic", sourceClass: .mic)],
+      dataRoot: dataRoot,
+      socketPath: tempSocketPath()
+    )
+
+    _ = try EarsDaemon(
+      configuration: configuration,
+      backendFactory: { descriptor in
+        SyntheticCaptureBackend(source: descriptor.id, buffers: [])
+      },
+      clock: ManualClock(Instant(secondsSinceEpoch: 9_000))
+    )
+
+    let written = try SourceMetaStore.read(sourceID: "mic", dataRoot: dataRoot)
+    #expect(written.created == originalCreated)
+    #expect(written.timeCapSeconds == 7_200)
+  }
+
   @Test("starts every source, serves status over a real control socket, and stops cleanly")
   func endToEndSyntheticCapture() async throws {
     let dataRoot = try makeDataRoot()

@@ -97,6 +97,8 @@ public actor EarsDaemon {
       try FileManager.default.createDirectory(
         at: sourceDirectory, withIntermediateDirectories: true)
 
+      try Self.writeSourceMeta(descriptor, dataRoot: configuration.dataRoot)
+
       let indexAppender = IndexAppender(
         fileURL: DataStoreLayout.indexFile(
           dataRoot: configuration.dataRoot, sourceID: descriptor.id))
@@ -123,6 +125,33 @@ public actor EarsDaemon {
         eventSink: eventSink)
     }
     self.captureActors = actors
+  }
+
+  /// Persists `descriptor` to `<data-root>/sources/<id>/meta.toml` via
+  /// ``SourceMetaStore``, so every source `earsd` actually runs has a real
+  /// `meta.toml` on disk from the start -- ``SegmentedAudioReader`` (and
+  /// anything else resolving a source's ASR rate) depends on
+  /// ``SourceMetaStore/read(sourceID:dataRoot:)`` finding one.
+  ///
+  /// Idempotent and non-clobbering across restarts: a fresh config-resolution
+  /// pass stamps every descriptor's `created` with the current daemon-start
+  /// instant (`docs/data-formats.md`'s "always present" descriptor, not
+  /// "always freshly created"), so writing `descriptor` verbatim on every
+  /// restart would reset a source's true creation time each time `earsd`
+  /// restarts. When a `meta.toml` already exists, this keeps its `created`
+  /// and writes everything else from `descriptor` -- so config edits (e.g. a
+  /// changed `time_cap_seconds`) still take effect on restart, without
+  /// clobbering the one field that records history.
+  private static func writeSourceMeta(_ descriptor: SourceDescriptor, dataRoot: URL) throws {
+    var toWrite = descriptor
+    do {
+      let existing = try SourceMetaStore.read(sourceID: descriptor.id, dataRoot: dataRoot)
+      toWrite.created = existing.created
+    } catch DataStoreError.sourceMetaNotFound {
+      // First time this source has been seen: write `descriptor` as-is,
+      // `created` and all.
+    }
+    try SourceMetaStore.write(toWrite, dataRoot: dataRoot)
   }
 
   /// Starts every configured source, then the control socket and power
