@@ -1,0 +1,447 @@
+<meta charset="utf-8">
+<title>All Ears — Brand Guidelines</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400&display=swap" rel="stylesheet">
+
+<style>
+:root{
+  --ink:#1c1b1a; --paper:#f7f4ee; --paper-2:#efe9df;
+  --fg:#1c1b1a; --bg:#f7f4ee; --bg-2:#efe9df; --line:#ded7ca; --muted:#7c766c; --card:#fffdf8;
+  --accent:#e0a03c;               /* Amber — the primary accent */
+  --terracotta:#c26a4a; --coral:#e2725b; --ink-navy:#24303f;
+  color-scheme:light;
+}
+:root[data-theme="dark"]{
+  --fg:#f2efe8; --bg:#151413; --bg-2:#1e1c1a; --line:#312e2a; --muted:#948d81; --card:#1c1a18;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--bg); color:var(--fg);
+  font-family:-apple-system,"SF Pro Text",system-ui,sans-serif;
+  font-size:15px; line-height:1.6; letter-spacing:.1px; -webkit-font-smoothing:antialiased;
+}
+
+/* ---- top bar ---- */
+.topbar{position:sticky; top:0; z-index:50; display:flex; align-items:center; gap:14px;
+  padding:13px 30px; background:color-mix(in srgb,var(--bg) 86%,transparent);
+  backdrop-filter:saturate(140%) blur(14px); border-bottom:1px solid var(--line)}
+.topbar .brand{display:flex; align-items:center; gap:11px; margin-right:auto}
+.topbar .brand svg{width:30px; height:30px; display:block; color:var(--fg)}
+.topbar .brand b{font-family:"Fraunces",serif; font-weight:600; font-size:19px; letter-spacing:.2px}
+.topbar .brand b .dot{color:var(--accent)}
+.topbar .tag{color:var(--muted); font-size:12px}
+.seg{display:flex; border:1px solid var(--line); border-radius:9px; overflow:hidden; background:var(--card)}
+.seg button{padding:6px 13px; border:0; background:transparent; font:inherit; font-size:12.5px; cursor:pointer; color:var(--fg)}
+.seg button[aria-pressed="true"]{background:var(--fg); color:var(--bg)}
+
+/* ---- layout ---- */
+main{max-width:920px; margin:0 auto; padding:0 30px 120px}
+section{padding:46px 0; border-bottom:1px solid var(--line)}
+section:last-child{border-bottom:0}
+h1{font-family:"Fraunces",serif; font-weight:600; font-size:44px; line-height:1.08; letter-spacing:.2px; margin:0 0 .3em}
+h2{font-family:"Fraunces",serif; font-weight:600; font-size:26px; margin:0 0 .1em; letter-spacing:.2px}
+h3{font-size:13px; text-transform:uppercase; letter-spacing:1.1px; color:var(--muted); margin:30px 0 12px; font-weight:700}
+.sec-no{font-family:"Bricolage Grotesque",sans-serif; font-weight:700; color:var(--accent); font-size:13px; letter-spacing:1px; display:block; margin-bottom:8px}
+p{max-width:66ch; margin:.6em 0}
+.lede{font-size:18px; color:var(--fg)}
+.muted{color:var(--muted)}
+strong{font-weight:650}
+a{color:inherit}
+code{font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:.88em; background:var(--bg-2); padding:1px 6px; border-radius:5px}
+
+/* ---- hero ---- */
+.hero{padding-top:64px}
+.hero .mark-xl{width:132px; height:132px; margin-bottom:26px}
+.hero .mark-xl svg{width:100%; height:100%; color:var(--fg)}
+.hero .accent-line{width:52px; height:4px; background:var(--accent); border-radius:2px; margin:26px 0}
+
+/* ---- grids & cards ---- */
+.grid{display:grid; gap:18px}
+.g2{grid-template-columns:1fr}
+.g3{grid-template-columns:1fr 1fr}
+@media(min-width:720px){.g2{grid-template-columns:1fr 1fr} .g3{grid-template-columns:1fr 1fr 1fr}}
+.card{border:1px solid var(--line); border-radius:16px; background:var(--card); padding:20px}
+.card h4{margin:0 0 4px; font-size:15px; font-weight:650}
+.card p{margin:.2em 0; font-size:13.5px}
+
+/* ---- logo showcases ---- */
+.logo-stage{display:flex; align-items:center; justify-content:center; gap:22px; min-height:150px;
+  border:1px solid var(--line); border-radius:16px; padding:26px; background:var(--card)}
+.logo-stage.dark{background:#151413; color:#f2efe8}
+.logo-stage.paper{background:var(--paper-2)}
+.logo-stage svg.mark{width:64px; height:64px; display:block}
+.wm{font-family:"Bricolage Grotesque",sans-serif; font-weight:700; font-size:34px; letter-spacing:-.4px; white-space:nowrap}
+.wm .dot{color:var(--accent)}
+.stack{flex-direction:column; gap:14px}
+.stack .wm{font-size:26px}
+.cap{font-size:11px; text-transform:uppercase; letter-spacing:.8px; color:var(--muted); margin-top:9px; text-align:center}
+
+/* clear space */
+.clearspace{position:relative; display:inline-block; padding:44px; background:
+  linear-gradient(var(--accent),var(--accent)) top left/100% 1px no-repeat,
+  linear-gradient(var(--accent),var(--accent)) bottom left/100% 1px no-repeat,
+  linear-gradient(var(--accent),var(--accent)) top left/1px 100% no-repeat,
+  linear-gradient(var(--accent),var(--accent)) top right/1px 100% no-repeat;
+  opacity:1}
+.clearspace svg{width:92px; height:92px; display:block; color:var(--fg)}
+.csbox{border:1px dashed color-mix(in srgb,var(--accent) 55%,transparent); border-radius:8px; padding:0}
+
+/* sizing ladder */
+.sizes{display:flex; align-items:flex-end; gap:26px; flex-wrap:wrap}
+.sizes .item{text-align:center}
+.sizes svg{display:block; color:var(--fg); margin:0 auto}
+
+/* ---- colour ---- */
+.swatches{display:grid; gap:14px; grid-template-columns:1fr 1fr}
+@media(min-width:720px){.swatches{grid-template-columns:repeat(3,1fr)}}
+.sw{border:1px solid var(--line); border-radius:14px; overflow:hidden; background:var(--card)}
+.sw .chip{height:88px}
+.sw .meta{padding:12px 14px}
+.sw .meta b{font-size:14px}
+.sw .meta div{font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:11.5px; color:var(--muted)}
+.accent-row{display:flex; gap:10px; flex-wrap:wrap; margin-top:6px}
+.accent-row .a{display:flex; align-items:center; gap:8px; border:1px solid var(--line); border-radius:20px; padding:5px 12px 5px 6px; font-size:12.5px}
+.accent-row .a i{width:18px; height:18px; border-radius:50%; display:block}
+
+/* ---- type specimens ---- */
+.spec{border:1px solid var(--line); border-radius:16px; background:var(--card); padding:22px 24px; margin:14px 0}
+.spec .name{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:14px}
+.spec .name b{font-size:15px} .spec .name span{font-size:12px; color:var(--muted)}
+.spec .ag{font-size:64px; line-height:1; margin:0}
+.serif{font-family:"Fraunces",serif}
+.grot{font-family:"Bricolage Grotesque",sans-serif}
+.scale div{margin:8px 0; line-height:1.1}
+
+/* ---- do / don't ---- */
+.dd{display:grid; gap:16px; grid-template-columns:1fr}
+@media(min-width:720px){.dd{grid-template-columns:1fr 1fr}}
+.dd .box{border:1px solid var(--line); border-radius:14px; overflow:hidden; background:var(--card)}
+.dd .stagearea{height:118px; display:flex; align-items:center; justify-content:center; background:var(--paper-2)}
+:root[data-theme="dark"] .dd .stagearea{background:#232120}
+.dd .stagearea svg{width:60px; height:60px; color:var(--ink)}
+:root[data-theme="dark"] .dd .stagearea svg{color:var(--paper)}
+.dd .lab{padding:11px 15px; font-size:13px; display:flex; gap:9px; align-items:flex-start}
+.dd .yes{color:#4a7c59} .dd .no{color:#c0503a}
+:root[data-theme="dark"] .dd .yes{color:#8fce9e} :root[data-theme="dark"] .dd .no{color:#e58a72}
+.dd .lab .m{font-weight:700; flex:none}
+
+/* ---- applications ---- */
+.menubar{height:24px; width:max-content; border-radius:6px; display:flex; align-items:center; gap:9px;
+  padding:0 9px; font-size:11px; box-shadow:0 1px 3px rgba(0,0,0,.18)}
+.menubar.light{background:#e9e6df; color:#1c1b1a}
+.menubar.dark{background:#26262b; color:#f2f0ea}
+.menubar .glyph{width:18px; height:18px} .menubar .glyph svg{width:100%; height:100%; display:block}
+.menubar .clock{font-variant-numeric:tabular-nums; opacity:.85} .menubar .sep{width:1px;height:12px;background:currentColor;opacity:.2}
+.tile{width:104px; height:104px; border-radius:24px; overflow:hidden;
+  box-shadow:0 8px 22px -10px rgba(0,0,0,.5)}
+.tile svg{width:100%; height:100%; display:block}
+
+/* voice table */
+table{border-collapse:collapse; width:100%; margin:14px 0; font-size:14px}
+th,td{text-align:left; padding:11px 14px; border-bottom:1px solid var(--line); vertical-align:top}
+th{font-size:11.5px; text-transform:uppercase; letter-spacing:.8px; color:var(--muted); font-weight:700}
+td.k{font-weight:600; white-space:nowrap}
+.two-col{display:grid; gap:0 30px; grid-template-columns:1fr}
+@media(min-width:640px){.two-col{grid-template-columns:1fr 1fr}}
+
+.foot{color:var(--muted); font-size:12.5px; padding:34px 0 0}
+.toc{columns:2; column-gap:34px; font-size:14px; margin:20px 0 0}
+.toc a{display:block; padding:5px 0; color:var(--fg); text-decoration:none; border-bottom:1px solid transparent}
+.toc a:hover{border-bottom-color:var(--accent)}
+.toc a b{color:var(--accent); font-family:"Bricolage Grotesque",sans-serif; margin-right:8px}
+</style>
+
+<!-- ============ shared SVG defs (squircle + tiles) ============ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <clipPath id="sqClip" clipPathUnits="userSpaceOnUse"><path id="sqClipPath"/></clipPath>
+  <linearGradient id="tileLight" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fdfbf6"/><stop offset="1" stop-color="#ece5d8"/></linearGradient>
+  <linearGradient id="tileDark" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a2825"/><stop offset="1" stop-color="#100f0e"/></linearGradient>
+</defs></svg>
+
+<div class="topbar">
+  <div class="brand"><svg viewBox="0 0 100 100" id="navmark"></svg><b>All<span class="dot">·</span>Ears</b></div>
+  <span class="tag">Brand Guidelines · v1.0</span>
+  <div class="seg" id="themeSeg">
+    <button data-theme="light" aria-pressed="true">Light</button>
+    <button data-theme="dark" aria-pressed="false">Dark</button>
+  </div>
+</div>
+
+<main>
+  <!-- ============ HERO ============ -->
+  <section class="hero">
+    <div class="mark-xl"><svg viewBox="0 0 100 100" id="heromark"></svg></div>
+    <h1>All Ears</h1>
+    <p class="lede">Records and transcribes meetings, calls, and audio — a lightweight, privacy-forward macOS app that lives in the menu bar. The name plays on “I’m all ears”: attentive, active listening.</p>
+    <div class="accent-line"></div>
+    <div class="toc">
+      <a href="#overview"><b>01</b> Brand Overview</a>
+      <a href="#logo"><b>02</b> The Mark &amp; Logo</a>
+      <a href="#clearspace"><b>03</b> Clear Space &amp; Sizing</a>
+      <a href="#color"><b>04</b> Colour</a>
+      <a href="#type"><b>05</b> Typography</a>
+      <a href="#donts"><b>06</b> Logo Don’ts</a>
+      <a href="#applications"><b>07</b> Applications</a>
+      <a href="#voice"><b>08</b> Voice &amp; Tone</a>
+    </div>
+  </section>
+
+  <!-- ============ 01 OVERVIEW ============ -->
+  <section id="overview">
+    <span class="sec-no">01</span><h2>Brand Overview</h2>
+    <p><strong>Mission.</strong> Capture every conversation faithfully, on the user’s own machine, so nothing worth remembering is lost.</p>
+    <p><strong>Vision.</strong> Listening software that earns trust by staying quiet, local, and out of the way.</p>
+    <h3>Values</h3>
+    <div class="grid g3">
+      <div class="card"><h4>Attentive</h4><p class="muted">Present and accurate. The product listens closely so the user doesn’t have to take notes.</p></div>
+      <div class="card"><h4>Private by default</h4><p class="muted">Local-first. Data belongs to the user; the brand never trades on surveillance.</p></div>
+      <div class="card"><h4>Quietly premium</h4><p class="muted">Restrained, native, well-made. Craft over noise — a tool, not a platform.</p></div>
+    </div>
+    <h3>Personality</h3>
+    <p>Attentive · Understated · Warm · Precise · Native. All Ears is the calm colleague who caught every word — not a chatty assistant, not a corporate SaaS.</p>
+    <h3>Audience</h3>
+    <p><strong>Primary:</strong> founders, consultants, researchers, and engineers who live in back-to-back calls and value privacy. <strong>Secondary:</strong> journalists and knowledge workers who record interviews and need reliable, local transcripts.</p>
+  </section>
+
+  <!-- ============ 02 LOGO ============ -->
+  <section id="logo">
+    <span class="sec-no">02</span><h2>The Mark &amp; Logo</h2>
+    <p>The mark is a single warm stroke — a cupped ear that doubles as a quotation mark, with an accent dot for the earlobe. Captured speech, made quiet. It is drawn once and used everywhere; do not redraw or substitute it.</p>
+
+    <h3>Primary lockup</h3>
+    <div class="logo-stage"><svg class="mark" viewBox="0 0 100 100" data-mark="full"></svg>
+      <span class="wm">All<span class="dot">·</span>Ears</span></div>
+    <p class="muted" style="font-size:13px">Horizontal lockup — the default. Mark height equals the cap height of the wordmark; the gap between them equals one mark-width.</p>
+
+    <h3>Variations</h3>
+    <div class="grid g3" style="margin-top:4px">
+      <div><div class="logo-stage stack"><svg class="mark" viewBox="0 0 100 100" data-mark="full" style="width:56px;height:56px"></svg><span class="wm">All<span class="dot">·</span>Ears</span></div><div class="cap">Stacked</div></div>
+      <div><div class="logo-stage"><svg class="mark" viewBox="0 0 100 100" data-mark="full"></svg></div><div class="cap">Mark only</div></div>
+      <div><div class="logo-stage dark"><svg class="mark" viewBox="0 0 100 100" data-mark="full"></svg><span class="wm">All<span class="dot">·</span>Ears</span></div><div class="cap">Reversed (dark)</div></div>
+    </div>
+
+    <h3>Colourways</h3>
+    <div class="grid g3" style="margin-top:4px">
+      <div><div class="logo-stage paper"><svg class="mark" viewBox="0 0 100 100" data-mark="full"></svg></div><div class="cap">Ink + accent on paper</div></div>
+      <div><div class="logo-stage dark"><svg class="mark" viewBox="0 0 100 100" data-mark="full"></svg></div><div class="cap">Paper + accent on ink</div></div>
+      <div><div class="logo-stage"><svg class="mark" viewBox="0 0 100 100" data-mark="mono"></svg></div><div class="cap">Monochrome (1-colour)</div></div>
+    </div>
+    <p class="muted" style="font-size:13px">Two colours maximum: ink (or paper, reversed) plus one accent. The accent lives only in the earlobe dot. When one colour is required — engraving, favicon, template menu-bar icon — use the monochrome version, where the dot becomes a solid ink bulb.</p>
+  </section>
+
+  <!-- ============ 03 CLEAR SPACE ============ -->
+  <section id="clearspace">
+    <span class="sec-no">03</span><h2>Clear Space &amp; Sizing</h2>
+    <p>Give the mark room. Minimum clear space on all sides equals the diameter of the earlobe dot (<code>d</code>). Keep this margin free of type, edges, and other marks.</p>
+    <div class="csbox" style="display:inline-block; margin:8px 0 4px">
+      <div class="clearspace"><svg viewBox="0 0 100 100" data-mark="full"></svg></div>
+    </div>
+
+    <h3>Minimum sizes</h3>
+    <div class="sizes card" style="margin-top:4px">
+      <div class="item"><svg viewBox="0 0 100 100" data-mark="full" width="72" height="72"></svg><div class="cap">Icon / app</div></div>
+      <div class="item"><svg viewBox="0 0 100 100" data-mark="full" width="44" height="44"></svg><div class="cap">24px min · UI</div></div>
+      <div class="item"><svg viewBox="0 0 100 100" data-mark="mono" width="24" height="24"></svg><div class="cap">18px · menu bar</div></div>
+      <div class="item"><svg viewBox="0 0 100 100" data-mark="mono" width="16" height="16"></svg><div class="cap">16px · floor</div></div>
+    </div>
+    <p class="muted" style="font-size:13px">Digital floor is <strong>16px</strong> using the monochrome version. Below that, detail collapses — don’t use the mark; use the wordmark or a single accent dot. The full-colour mark should not appear below 24px.</p>
+  </section>
+
+  <!-- ============ 04 COLOUR ============ -->
+  <section id="color">
+    <span class="sec-no">04</span><h2>Colour</h2>
+    <p>Ink and paper are the base. The palette is warm and earthy — deliberately clear of “AI blue”, blue→purple gradients, and acid lime. Accent is used sparingly, most often only inside the mark.</p>
+
+    <h3>Core</h3>
+    <div class="swatches">
+      <div class="sw"><div class="chip" style="background:#1c1b1a"></div><div class="meta"><b>Ink</b><div>#1C1B1A · rgb(28,27,26)</div><div>Text, marks, UI foreground</div></div></div>
+      <div class="sw"><div class="chip" style="background:#f7f4ee; border-bottom:1px solid var(--line)"></div><div class="meta"><b>Paper</b><div>#F7F4EE · rgb(247,244,238)</div><div>Primary canvas</div></div></div>
+      <div class="sw"><div class="chip" style="background:#efe9df"></div><div class="meta"><b>Paper 2</b><div>#EFE9DF · rgb(239,233,223)</div><div>Depth, cards, fills</div></div></div>
+    </div>
+
+    <h3>Accent — Amber is primary</h3>
+    <div class="swatches">
+      <div class="sw"><div class="chip" style="background:#e0a03c"></div><div class="meta"><b>Amber <span style="color:var(--muted);font-weight:400">· primary</span></b><div>#E0A03C · rgb(224,160,60)</div><div>The earlobe dot, links, active states</div></div></div>
+      <div class="sw"><div class="chip" style="background:#c26a4a"></div><div class="meta"><b>Terracotta</b><div>#C26A4A · rgb(194,106,74)</div><div>Alt accent</div></div></div>
+      <div class="sw"><div class="chip" style="background:#e2725b"></div><div class="meta"><b>Coral</b><div>#E2725B · rgb(226,114,91)</div><div>Alt accent</div></div></div>
+      <div class="sw"><div class="chip" style="background:#24303f"></div><div class="meta"><b>Ink Navy</b><div>#24303F · rgb(36,48,63)</div><div>“Quiet gravitas” alt</div></div></div>
+    </div>
+    <p class="muted" style="font-size:13px"><strong>Usage.</strong> One accent per surface. Amber is the default; terracotta and coral are seasonal / campaign alternates; ink-navy is the restrained alternate for formal contexts. Never mix two accents in one composition.</p>
+
+    <h3>Accessibility</h3>
+    <p class="muted" style="font-size:13px">Ink on paper clears WCAG AA comfortably (≈15:1). Amber is a graphic accent, not a text colour — don’t set body copy in amber on paper. For accent text, darken to ≥4.5:1 or reserve amber for fills and marks.</p>
+  </section>
+
+  <!-- ============ 05 TYPE ============ -->
+  <section id="type">
+    <span class="sec-no">05</span><h2>Typography</h2>
+    <p>Two faces carry the brand: a warm serif for expression and a characterful humanist grotesque for structure. System UI text stays native. No Inter, no Poppins.</p>
+
+    <div class="spec">
+      <div class="name"><b>Fraunces</b><span>Display / editorial · Google Fonts</span></div>
+      <p class="ag serif" style="font-weight:600">Aa Ææ</p>
+      <div class="scale serif">
+        <div style="font-size:30px;font-weight:600">All ears, on your Mac.</div>
+        <div style="font-size:19px;font-weight:400;font-style:italic" class="muted">A warm serif with optical sizing — used for headlines and moments of voice.</div>
+      </div>
+    </div>
+
+    <div class="spec">
+      <div class="name"><b>Bricolage Grotesque</b><span>UI / functional · Google Fonts</span></div>
+      <p class="ag grot" style="font-weight:700">Aa Ææ</p>
+      <div class="scale grot">
+        <div style="font-size:30px;font-weight:700;letter-spacing:-.4px">All<span style="color:var(--accent)">·</span>Ears</div>
+        <div style="font-size:16px;font-weight:400" class="muted">Humanist grotesque for the wordmark, labels, and interface chrome.</div>
+      </div>
+    </div>
+
+    <h3>Signature detail</h3>
+    <p>The wordmark carries a small amber mid-dot — <span class="grot" style="font-weight:700;font-size:17px">All<span style="color:var(--accent)">·</span>Ears</span> — echoing the earlobe dot in the mark. This dot is the one memorable flourish; keep it, and keep it amber.</p>
+
+    <h3>Hierarchy</h3>
+    <table>
+      <tr><th>Role</th><th>Face</th><th>Weight / size</th></tr>
+      <tr><td class="k">Display / H1</td><td>Fraunces</td><td>600 · 40–48px · line 1.1</td></tr>
+      <tr><td class="k">Section / H2</td><td>Fraunces</td><td>600 · 24–28px</td></tr>
+      <tr><td class="k">Label / eyebrow</td><td>Bricolage</td><td>700 · 12–13px · tracked +1px, uppercase</td></tr>
+      <tr><td class="k">Body</td><td>SF&nbsp;Pro / system</td><td>400 · 15–16px · line 1.6</td></tr>
+      <tr><td class="k">UI / in-product</td><td><code>-apple-system, system-ui</code></td><td>400–600 · native</td></tr>
+    </table>
+  </section>
+
+  <!-- ============ 06 DON'TS ============ -->
+  <section id="donts">
+    <span class="sec-no">06</span><h2>Logo Don’ts</h2>
+    <p>The mark is a fixed drawing. Protect its proportions and its single-stroke clarity.</p>
+    <div class="dd">
+      <div class="box"><div class="stagearea"><svg viewBox="0 0 100 100" data-mark="mono"></svg></div><div class="lab yes"><span class="m">✓</span><span>Correct — single warm stroke, amber earlobe, upright.</span></div></div>
+      <div class="box"><div class="stagearea"><svg viewBox="0 0 100 100" data-mark="mono" style="transform:scaleX(1.5)"></svg></div><div class="lab no"><span class="m">✕</span><span>Don’t stretch, condense, or distort proportions.</span></div></div>
+      <div class="box"><div class="stagearea"><svg viewBox="0 0 100 100" data-mark="mono" style="transform:rotate(30deg)"></svg></div><div class="lab no"><span class="m">✕</span><span>Don’t rotate or flip beyond the approved variants.</span></div></div>
+      <div class="box"><div class="stagearea"><svg viewBox="0 0 100 100" data-mark="mono" style="filter:drop-shadow(3px 4px 2px rgba(0,0,0,.5))"></svg></div><div class="lab no"><span class="m">✕</span><span>Don’t add shadows, glows, gradients, or bevels.</span></div></div>
+      <div class="box"><div class="stagearea" style="background:#2d5fe0"><svg viewBox="0 0 100 100" data-mark="mono" style="color:#fff"></svg></div><div class="lab no"><span class="m">✕</span><span>Don’t recolour to AI-blue or any off-brand hue.</span></div></div>
+      <div class="box"><div class="stagearea"><svg viewBox="0 0 100 100" data-mark="mono" style="stroke-width:0"></svg><span class="grot" style="font-size:34px;font-weight:800;color:var(--ink)">((</span></div><div class="lab no"><span class="m">✕</span><span>Don’t swap the mark for plain brackets or emoji.</span></div></div>
+    </div>
+  </section>
+
+  <!-- ============ 07 APPLICATIONS ============ -->
+  <section id="applications">
+    <span class="sec-no">07</span><h2>Applications</h2>
+
+    <h3>App icon — squircle</h3>
+    <div class="grid g2">
+      <div class="card" style="display:flex;align-items:center;gap:20px">
+        <div class="tile"><svg viewBox="0 0 100 100" data-tile="light"></svg></div>
+        <div><b>Light tile</b><p class="muted" style="font-size:13px">Ink mark, amber lobe, warm paper superellipse. One idea, subtle depth.</p></div>
+      </div>
+      <div class="card" style="display:flex;align-items:center;gap:20px">
+        <div class="tile"><svg viewBox="0 0 100 100" data-tile="dark"></svg></div>
+        <div><b>Dark tile</b><p class="muted" style="font-size:13px">Paper mark on graphite. Same drawing, no busy illustration.</p></div>
+      </div>
+    </div>
+
+    <h3>Menu-bar glyph — true size (18px)</h3>
+    <div class="grid g2">
+      <div class="card"><div class="menubar light"><span class="glyph"><svg viewBox="0 0 100 100" data-mark="mono"></svg></span><span class="sep"></span><span class="clock">9:41</span></div><p class="muted" style="font-size:13px;margin-top:12px">Template / single-colour glyph. Auto-adapts to the light menu bar via <code>currentColor</code>.</p></div>
+      <div class="card"><div class="menubar dark"><span class="glyph"><svg viewBox="0 0 100 100" data-mark="mono"></svg></span><span class="sep"></span><span class="clock">9:41</span></div><p class="muted" style="font-size:13px;margin-top:12px">Same glyph, dark menu bar. Recording state may tint the lobe amber.</p></div>
+    </div>
+
+    <h3>Email signature</h3>
+    <div class="card grot" style="max-width:340px">
+      <div style="display:flex;align-items:center;gap:10px"><svg viewBox="0 0 100 100" data-mark="full" style="width:34px;height:34px"></svg><b style="font-family:Fraunces,serif;font-size:18px">All<span style="color:var(--accent)">·</span>Ears</b></div>
+      <div style="font-size:13px;margin-top:9px;line-height:1.5" class="muted">Jordan Lee · Founder<br>jordan@allears.app · allears.app</div>
+    </div>
+  </section>
+
+  <!-- ============ 08 VOICE ============ -->
+  <section id="voice">
+    <span class="sec-no">08</span><h2>Voice &amp; Tone</h2>
+    <p>Write the way the product listens: closely, plainly, without performing. State things once. Never oversell privacy — demonstrate it.</p>
+
+    <div class="two-col">
+      <div>
+        <h3>We are</h3>
+        <table>
+          <tr><td class="k">Attentive</td><td class="muted">not eager</td></tr>
+          <tr><td class="k">Plain</td><td class="muted">not dumbed-down</td></tr>
+          <tr><td class="k">Calm</td><td class="muted">not cold</td></tr>
+          <tr><td class="k">Precise</td><td class="muted">not jargony</td></tr>
+        </table>
+      </div>
+      <div>
+        <h3>Principles</h3>
+        <table>
+          <tr><td class="muted">Lead with the noun; assert claims as facts.</td></tr>
+          <tr><td class="muted">Short sentences. Active voice.</td></tr>
+          <tr><td class="muted">Say “on your Mac”, not “powered by AI”.</td></tr>
+          <tr><td class="muted">Respect the user’s attention — no urgency tricks.</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <h3>Tone by context</h3>
+    <table>
+      <tr><th>Context</th><th>Tone</th><th>Example</th></tr>
+      <tr><td class="k">Marketing</td><td>Confident, quiet</td><td>“Every meeting, transcribed. Nothing leaves your Mac.”</td></tr>
+      <tr><td class="k">Onboarding</td><td>Reassuring</td><td>“Recording stays local. You control what’s kept.”</td></tr>
+      <tr><td class="k">Errors</td><td>Plain, helpful</td><td>“Couldn’t reach the microphone. Check Sound settings.”</td></tr>
+      <tr><td class="k">Recording state</td><td>Minimal</td><td>“Listening…”</td></tr>
+    </table>
+
+    <h3>The name</h3>
+    <p><strong>“All Ears”</strong> — two words, both capitalised. The wordmark sets it with an amber mid-dot: <span class="grot" style="font-weight:700">All<span style="color:var(--accent)">·</span>Ears</span>. In running text, write “All Ears” (no dot). Never “Allears”, “AllEars”, or “all ears” mid-sentence when referring to the product.</p>
+  </section>
+
+  <div class="foot">
+    All Ears — Brand Guidelines v1.0 · Primary mark: <b>B5</b> (open-quote cup, flipped — cup opens downward, amber earlobe).
+    Self-contained reference; every mark on this page is the live production SVG using <code>currentColor</code> + CSS variables.
+    Companion: <a href="index.html">index.html</a> (full exploration gallery).
+  </div>
+</main>
+
+<script>
+/* ---- superellipse squircle (macOS) ---- */
+function squirclePath(size,n){const a=size/2,steps=160;let d='';
+  for(let i=0;i<=steps;i++){const t=i/steps*2*Math.PI,c=Math.cos(t),s=Math.sin(t);
+    const x=a+Math.sign(c)*Math.pow(Math.abs(c),2/n)*a, y=a+Math.sign(s)*Math.pow(Math.abs(s),2/n)*a;
+    d+=(i?'L':'M')+x.toFixed(2)+','+y.toFixed(2);} return d+'Z';}
+const SQ=squirclePath(100,4.5);
+document.getElementById('sqClipPath').setAttribute('d',SQ);
+
+/* ---- THE LOCKED MARK · B5 (open-quote cup, flipped) ---- */
+const S='stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"';
+const MARK={
+  full:`<g transform="matrix(1 0 0 -1 0 100)">
+      <path ${S} stroke-width="12" d="M62,33 C43,31 29,43 29,54 C29,68 43,79 62,81"/>
+      <circle cx="61" cy="20" r="7" fill="var(--accent)"/></g>`,
+  mono:`<g transform="matrix(1 0 0 -1 0 100)">
+      <path ${S} stroke-width="14" d="M62,33 C43,31 29,43 29,54 C29,68 43,79 62,81"/>
+      <circle cx="61" cy="20" r="7.5" fill="currentColor"/></g>`
+};
+const MS=0.74; // icon inset
+function wrap(inner){return `<g transform="translate(50,50) scale(${MS}) translate(-50,-50)">${inner}</g>`;}
+
+/* inject marks */
+document.getElementById('heromark').innerHTML=MARK.full;
+document.getElementById('navmark').innerHTML=MARK.full;
+document.querySelectorAll('[data-mark]').forEach(s=>{ s.innerHTML=MARK[s.dataset.mark]; });
+
+/* app tiles */
+document.querySelectorAll('[data-tile]').forEach(s=>{
+  const dark=s.dataset.tile==='dark';
+  s.style.color=dark?'var(--paper)':'var(--ink)';
+  s.innerHTML=`<path d="${SQ}" fill="url(#${dark?'tileDark':'tileLight'})"/>
+    <g clip-path="url(#sqClip)">${wrap(MARK.full)}</g>
+    <path d="${SQ}" fill="none" stroke="${dark?'rgba(255,255,255,.09)':'rgba(0,0,0,.10)'}" stroke-width="1"/>`;
+});
+
+/* theme toggle */
+document.getElementById('themeSeg').addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b)return;
+  document.documentElement.setAttribute('data-theme',b.dataset.theme);
+  [...e.currentTarget.children].forEach(x=>x.setAttribute('aria-pressed',x===b));
+});
+</script>
