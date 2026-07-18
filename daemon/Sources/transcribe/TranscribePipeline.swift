@@ -1,0 +1,229 @@
+import EarsCore
+import EarsDataStore
+import EarsTranscribeKit
+import Foundation
+
+/// `transcribe`'s actual pipeline, per `docs/specs/transcribe.md`'s
+/// "Behaviour" section: resolve the requested range and sources, read each
+/// source's real ring-buffer audio into decoded, natural-pause-segmented
+/// slices (``SegmentedAudioReader``, the composition root already merged on
+/// this base -- it resolves each source's `meta.toml` for the ASR sample
+/// rate and reads the real, codec-decoded `asr/` chunk files itself), run
+/// each slice through a ``Transcriber``, merge the results onto one shared
+/// timeline (``TranscriptAssembly``), and write the Markdown transcript +
+/// JSON sidecar atomically.
+///
+/// Deliberately takes `dataRoot`/`outputRoot`/`backendName` as plain,
+/// already-resolved values rather than reading config/environment itself --
+/// that resolution is ``TranscribeRuntime``'s job (the thin, tier-2/3 glue
+/// layer that reads `ProcessInfo.environment`/the home directory/the real
+/// config file). Splitting it this way means this type -- everything from
+/// "have a data root and an output root" onward, which is most of
+/// `transcribe`'s actual behaviour -- is directly unit-testable against a
+/// fixture data root and an injected fake ``Transcriber`` with no
+/// environment-variable or config-file setup at all, per
+/// `docs/engineering-practices.md`'s tier-1 "fixture ring buffer on disk"
+/// strategy.
+enum TranscribePipeline {
+  /// Everything real production code has to fake to test this type: the
+  /// wall clock and which ``Transcriber`` to run. `log` is a side-channel
+  /// for non-fatal, human-readable notices (the final run summary) --
+  /// separate from the hard-failure `writeStderr` path, which always
+  /// accompanies a non-zero exit code.
+  struct Dependencies: Sendable {
+    var clock: any NowProviding
+    var transcriberFactory: @Sendable () throws -> any Transcriber
+    var loadOptions: LoadOptions
+    var log: @Sendable (String) -> Void
+    var writeStderr: @Sendable (String) -> Void
+
+    /// The real backend: ``ParakeetTranscriber``, FluidAudio-backed Parakeet
+    /// on the ANE/Metal (`docs/product/specs/model-interface.md`'s "Backend
+    /// 1 -- native"), loaded once per run in ``TranscribePipeline/run``
+    /// below with `loadOptions` resolved from `[transcribe].model`/`compute`
+    /// config (``TranscribeRuntime``).
+    static func production(loadOptions: LoadOptions = LoadOptions()) -> Dependencies {
+      Dependencies(
+        clock: SystemClock(),
+        transcriberFactory: { ParakeetTranscriber() },
+        loadOptions: loadOptions,
+        log: { message in
+          FileHandle.standardError.write(Data(("transcribe: " + message + "\n").utf8))
+        },
+        writeStderr: { line in
+          FileHandle.standardError.write(Data((line + "\n").utf8))
+        }
+      )
+    }
+  }
+
+  struct Inputs: Sendable {
+    var last: String?
+    var sourceIDs: [String]
+    var out: String?
+  }
+
+  static func run(
+    inputs: Inputs,
+    dataRoot: URL,
+    outputRoot: URL,
+    backendName: String,
+    dependencies: Dependencies
+  ) async -> Int32 {
+    guard !inputs.sourceIDs.isEmpty else {
+      dependencies.writeStderr("error: at least one --source is required")
+      return 1
+    }
+    let sourceIDs = inputs.sourceIDs.map { SourceID($0) }
+
+    let now = dependencies.clock.now()
+    let requestedRange: TimeRange
+    switch TranscribeRangeResolution.resolve(last: inputs.last, now: now) {
+    case .success(let range): requestedRange = range
+    case .failure(let error):
+      dependencies.writeStderr("error: \(error.description)")
+      return 1
+    }
+
+    // Fail fast on an unknown source before loading the (expensive) ASR
+    // model or reading any audio, per docs/specs/transcribe.md: "exits
+    // non-zero with a precise error if ... sources are unknown." Checking
+    // the source's directory (sources/<id>/) rather than requiring
+    // meta.toml specifically: every source earsd has ever started capturing
+    // gets this directory (EarsDaemon.init creates it unconditionally), so
+    // its presence is the honest "does this source exist at all" signal --
+    // a missing meta.toml on an existing directory (a stale capture from
+    // before EarsDaemon started writing it) surfaces instead as
+    // SegmentedAudioReader's own clear error below, not a misleading
+    // "unknown source".
+    for sourceID in sourceIDs {
+      let sourceDirectory = DataStoreLayout.sourceDirectory(dataRoot: dataRoot, sourceID: sourceID)
+      guard FileManager.default.fileExists(atPath: sourceDirectory.path) else {
+        dependencies.writeStderr(
+          "error: unknown source '\(sourceID.rawValue)': no data found under \(sourceDirectory.path)"
+        )
+        return 1
+      }
+    }
+
+    let transcriber: any Transcriber
+    do {
+      transcriber = try dependencies.transcriberFactory()
+      try transcriber.load(dependencies.loadOptions)
+    } catch {
+      dependencies.writeStderr("error: failed to load transcriber: \(error)")
+      return 1
+    }
+
+    let audioReader = SegmentedAudioReader(dataRoot: dataRoot)
+    var transcriptions: [SourceTranscription] = []
+    var speechSeconds: Double = 0
+
+    for sourceID in sourceIDs {
+      let slices: [AudioSlice]
+      do {
+        slices = try audioReader.slices(source: sourceID, range: requestedRange)
+      } catch {
+        dependencies.writeStderr(
+          "error: failed to read audio for source '\(sourceID.rawValue)': \(error)")
+        return 1
+      }
+
+      var segments: [Segment] = []
+      for slice in slices {
+        speechSeconds += slice.audio.duration
+        // Segment.start/end are relative to the audio buffer a Transcriber
+        // decoded (its own doc comment), i.e. relative to *this slice*'s
+        // start -- not the overall requested range. Shifting by the
+        // slice's own offset from the range start puts every source's
+        // segments on one shared timeline before TranscriptAssembly merges
+        // them, per docs/specs/transcribe.md's "merge sources on a shared
+        // timeline" step.
+        let sliceOffset = slice.range.start.interval(since: requestedRange.start)
+
+        // `Transcriber.transcribe` is a plain synchronous, throwing call
+        // (docs/specs/model-interface.md's base protocol). ParakeetTranscriber
+        // bridges FluidAudio's async API with a blocking semaphore inside a
+        // detached Task (see that type's doc comment for exactly when that
+        // bridge is and isn't safe): it is safe here because `transcribe` is
+        // a single-shot batch CLI process running one command to completion
+        // on its own cooperative-thread-pool task, not a long-lived,
+        // multi-actor runtime -- and this loop calls
+        // `transcribe(_:context:)` sequentially, never from inside a
+        // spawned concurrent `Task`, so the blocking wait here cannot starve
+        // other in-flight work. If sources/slices are ever parallelised with
+        // `withThrowingTaskGroup`, a blocking call from inside each spawned
+        // Task would risk exhausting the limited cooperative thread pool and
+        // should move to a genuinely async transcribe API or a dedicated
+        // thread instead.
+        do {
+          let sliceSegments = try transcriber.transcribe(slice.audio, context: TranscribeContext())
+          for segment in sliceSegments {
+            segments.append(shifted(segment, by: sliceOffset))
+          }
+        } catch {
+          dependencies.writeStderr(
+            "error: transcription failed for source '\(sourceID.rawValue)': \(error)")
+          return 1
+        }
+      }
+
+      transcriptions.append(SourceTranscription(sourceID: sourceID, segments: segments))
+    }
+
+    let generated = dependencies.clock.now()
+    let modelInfo = TranscriptModelInfo(
+      name: transcriber.info.name, backend: backendName, version: transcriber.info.version)
+    let sessionIdentifier = OutputPathResolution.sessionIdentifier(
+      requestedStart: requestedRange.start, sourceIDs: sourceIDs)
+
+    let document = TranscriptAssembly.assemble(
+      sourceIDs: sourceIDs,
+      transcriptions: transcriptions,
+      requested: requestedRange,
+      sessionIdentifier: sessionIdentifier,
+      model: modelInfo,
+      generated: generated,
+      speechSeconds: speechSeconds
+    )
+
+    let paths = OutputPathResolution.resolve(
+      outputRoot: outputRoot, requestedStart: requestedRange.start, sourceIDs: sourceIDs,
+      explicitOut: inputs.out)
+
+    do {
+      let markdown = TranscriptRenderer.renderMarkdown(document)
+      try AtomicFileIO.writeAtomically(to: paths.markdown) { tempURL in
+        try markdown.write(to: tempURL, atomically: false, encoding: String.Encoding.utf8)
+      }
+      let json = TranscriptRenderer.renderJSON(document)
+      try AtomicFileIO.writeAtomically(to: paths.sidecar) { tempURL in
+        try json.write(to: tempURL, atomically: false, encoding: String.Encoding.utf8)
+      }
+    } catch {
+      dependencies.writeStderr("error: failed to write transcript: \(error)")
+      return 1
+    }
+
+    dependencies.log(
+      "run.summary: segments=\(document.segments.count) words=\(document.frontmatter.wordCount) "
+        + "speech_seconds=\(speechSeconds) duration_seconds=\(requestedRange.duration) "
+        + "output=\(paths.markdown.path)"
+    )
+
+    return 0
+  }
+
+  private static func shifted(_ segment: Segment, by offset: Double) -> Segment {
+    var result = segment
+    result.start += offset
+    result.end += offset
+    result.words = segment.words.map { word in
+      var shiftedWord = word
+      shiftedWord.start += offset
+      shiftedWord.end += offset
+      return shiftedWord
+    }
+    return result
+  }
+}

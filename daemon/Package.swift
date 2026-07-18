@@ -179,6 +179,13 @@ let package = Package(
         "EarsConfig",
         "EarsLogging",
         "EarsCLISupport",
+        // For SegmentedAudioReader/AtomicFileIO/DataStoreLayout -- reading
+        // real ring-buffer audio off disk and writing the transcript
+        // atomically (docs/specs/transcribe.md).
+        "EarsDataStore",
+        // For ParakeetTranscriber, the real FluidAudio-backed Transcriber
+        // TranscribePipeline.Dependencies.production() wires in.
+        "EarsTranscribeKit",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
     ),
@@ -252,6 +259,17 @@ let package = Package(
     .testTarget(
       name: "EarsTranscribeKitTests",
       dependencies: ["EarsTranscribeKit", "EarsCoreTestSupport"]
+    ),
+    // Depends on the `transcribe` executable target (not just `EarsCore`/
+    // `EarsDataStore`) so its pure decision logic -- range resolution,
+    // output-path resolution, transcript assembly, and the pipeline
+    // orchestration itself -- is directly unit-testable via `@testable
+    // import transcribe` against a fixture data root and an injected
+    // `ScriptedTranscriber`, with no real FluidAudio/Parakeet model or
+    // config file needed, matching `CLISmokeTests`' split for `earsd`/`ears`.
+    .testTarget(
+      name: "TranscribeTests",
+      dependencies: ["EarsCore", "EarsCoreTestSupport", "EarsDataStore", "transcribe"]
     ),
   ]
 )
