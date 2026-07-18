@@ -13,43 +13,50 @@ import type { ParticipantId } from "../protocol";
 // capture.
 //
 // ── VERIFICATION STATUS ──────────────────────────────────────────────────
-// Implemented against the spec's documented DOM shape (confidence: medium).
-// The live-call verification pass required by prompts/meet-identity.md §1 has
-// NOT run yet — record its findings as journal evidence entries when it does.
-// Checklist for that pass (≥2 other participants, DevTools on meet.google.com):
+// Live-verified 2026-07-18 (Chrome, meet.google.com, 3-account real call —
+// journal #41–#46). Conclusion: identify() is expected to return null in
+// practice on this Meet build. Every correlation mechanism investigated was
+// confirmed dead, not just theoretically risky:
 //
-//   1. `document.querySelectorAll("[data-participant-id],[data-requested-participant-id],[data-initial-participant-id]")`
-//      — confirm which attribute the current build carries (update
-//      PARTICIPANT_ID_ATTRIBUTES if it changed) and where the display-name
-//      text lives relative to it (update extractDisplayName's probes).
-//   2. For each <audio>/<video> with a `.srcObject`, compare
-//      `srcObject.getTracks().map(t => t.id)` and `srcObject.id` against the
-//      "[ears] +track" console lines. Known risk: Meet decodes remote audio in
-//      its own WASM pipeline (journal #28–#31), so per-tile media elements may
-//      hold Meet-generated streams whose track ids do NOT match the RTC
-//      tracks; if so, the shared-MediaStream (msid) match on the tile's
-//      <video> is the only viable DOM channel — and if that fails too, the
-//      CSRC fallback below becomes the primary mechanism.
-//   3. Confirm tiles are mounted by the time "+track" fires — identify() is
-//      called exactly once per track, synchronously, so a tile that mounts
-//      later means that track stays speaker-<n> (accepted by Phase 4's exit
-//      bar; not a bug).
+//   - Tile attributes/name: data-participant-id + data-requested-participant-id
+//     both hold (spaces/<space>/devices/<device>-shaped, confirmed live —
+//     PARTICIPANT_ID_ATTRIBUTES is correct as written). Display name does NOT
+//     live in data-self-name or aria-label on this build (both empty/null on
+//     every tile) — the real name text is a descendant `span.notranslate`
+//     (journal #41), which extractDisplayName now also probes.
+//   - Tile-media correlation (this file's primary path): zero <audio>/<video>
+//     elements exist anywhere in the document, including shadow DOM (journal
+//     #42) — findMediaElementForTrack() is structurally guaranteed to return
+//     null, not just occasionally mismatched. Matches rtc-hook.ts's own note
+//     that Meet decodes audio via createEncodedStreams() (journal #28–#31)
+//     and never touches an HTMLMediaElement.
+//   - CSRC fallback: getContributingSources() returns [] for every live
+//     receiver (journal #43) — our own encoded-audio tee diverts frames
+//     before the native stats pipeline that populates CSRC ever runs.
+//   - SSRC correlation (tried live, not in the original spec): tile
+//     data-ssrc and the audio receiver's inbound-rtp SSRC (via getStats())
+//     are in disjoint numeric namespaces — no bridge there either (#43).
+//   - Track/tile ordering heuristic (tried live at explicit request after the
+//     above three failed): fails its own precondition. A fresh join fires
+//     +track before tiles mount (identify()'s one-shot structural warning
+//     fired at the literal instant of join, confirming zero tiles existed
+//     yet), and a 3-person call produces 3 remote audio tracks against only 2
+//     non-self tiles, reproduced on two separate meetings — there is no
+//     stable 1:1 track↔tile correspondence to order against (journal #44).
 //
-// ── CSRC fallback (documented, deliberately NOT implemented) ─────────────
-// If the verification pass shows tile-DOM doesn't hold, rebuild identify() on
-// `RTCRtpReceiver.getContributingSources()` (reading the already-known
-// receiver behind the passed transceiver is fine — it's not track discovery),
-// correlating CSRC + audioLevel against a separately available roster. Per
-// specs/extension.md MUST-NOT #8: never per-frame single-winner attribution
-// that silently drops simultaneous speakers, and never present attribution as
-// verified per-participant identity — label it the way teams.ts labels its
-// dominant-speaker approach. It is not half-implemented here on purpose:
-// prompts/meet-identity.md §1 makes the choice of primary mechanism an
-// empirical one, and building both blind would leave dead unverified code.
+// identify() keeps returning null by design; audio-tap.ts's speaker-<n>
+// fallback already handles this correctly and needs no change. Re-verify if
+// a future Meet build changes any of the above (e.g. media elements return,
+// or track/tile counts start matching) — see journal #41–#46 for full detail
+// and #45 for an unrelated capture-pipeline bug (AudioDecoder errors) noticed
+// during this pass.
 //
 // The returned ParticipantId is the raw tile attribute value (historically
 // "spaces/<space>/devices/<device>"-shaped); protocol.ts's sanitizeLabel maps
-// it into the earsd source label downstream.
+// it into the earsd source label downstream. This code is left in place
+// (rather than short-circuited to `return null`) because it's still correct
+// against the DOM shape that does exist, and costs nothing to keep for
+// re-verification against a future build.
 
 /** Tile attributes probed for a stable participant id, strongest first. */
 export const PARTICIPANT_ID_ATTRIBUTES = [
@@ -110,8 +117,11 @@ export function findParticipantTile(el: ElementLike): ElementLike | null {
 
 /**
  * Read the tile's display name: its own data-self-name, a descendant's
- * data-self-name (attribute value, else that element's text), then the tile's
- * aria-label. undefined when none — name is optional, id is what matters.
+ * data-self-name (attribute value, else that element's text), a descendant
+ * `span.notranslate` (the name-overlay element observed live — journal #41;
+ * tag-qualified because Meet also marks material-icon ligatures `notranslate`
+ * on `<i>` elements), then the tile's aria-label. undefined when none — name
+ * is optional, id is what matters.
  */
 export function extractDisplayName(tile: ElementLike): string | undefined {
   const own = clean(tile.getAttribute("data-self-name"));
@@ -123,6 +133,8 @@ export function extractDisplayName(tile: ElementLike): string | undefined {
     const fromText = clean(nameEl.textContent);
     if (fromText) return fromText;
   }
+  const notranslate = clean(tile.querySelector?.("span.notranslate")?.textContent);
+  if (notranslate) return notranslate;
   return clean(tile.getAttribute("aria-label"));
 }
 

@@ -20,19 +20,41 @@ interface FakeElInit {
   text?: string;
   children?: FakeEl[];
   srcObject?: unknown;
+  tag?: string;
+  classes?: string[];
+}
+
+// Fake querySelector supports exactly the two selector shapes meet.ts uses:
+// "[attr]" (attribute presence, comma-separated) and "tag.class".
+interface SelectorPattern {
+  attr?: string;
+  tag?: string;
+  cls?: string;
+}
+
+function parseFakeSelector(selector: string): SelectorPattern {
+  const attrMatch = selector.match(/^\[([^\]]+)\]$/);
+  if (attrMatch) return { attr: attrMatch[1]! };
+  const tagClassMatch = selector.match(/^([a-zA-Z]+)\.([\w-]+)$/);
+  if (tagClassMatch) return { tag: tagClassMatch[1]!.toUpperCase(), cls: tagClassMatch[2]! };
+  throw new Error(`unsupported fake selector: ${selector}`);
 }
 
 class FakeEl implements MediaElementLike {
   parentElement: FakeEl | null = null;
   textContent: string | null;
   srcObject?: unknown;
+  readonly tag: string;
   private readonly attrs: Map<string, string>;
   private readonly children: FakeEl[];
+  private readonly classes: Set<string>;
 
   constructor(init: FakeElInit = {}) {
     this.attrs = new Map(Object.entries(init.attrs ?? {}));
     this.textContent = init.text ?? null;
     this.children = init.children ?? [];
+    this.tag = (init.tag ?? "DIV").toUpperCase();
+    this.classes = new Set(init.classes ?? []);
     for (const child of this.children) child.parentElement = this;
     if ("srcObject" in init) this.srcObject = init.srcObject;
   }
@@ -41,11 +63,18 @@ class FakeEl implements MediaElementLike {
     return this.attrs.get(name) ?? null;
   }
 
+  private matches(pattern: SelectorPattern): boolean {
+    if (pattern.attr) return this.getAttribute(pattern.attr) !== null;
+    if (pattern.tag && this.tag !== pattern.tag) return false;
+    if (pattern.cls && !this.classes.has(pattern.cls)) return false;
+    return true;
+  }
+
   querySelector(selectors: string): FakeEl | null {
-    const wanted = selectors.split(",").map((s) => s.trim().replace(/^\[/, "").replace(/\]$/, ""));
+    const patterns = selectors.split(",").map((s) => parseFakeSelector(s.trim()));
     const walk = (el: FakeEl): FakeEl | null => {
       for (const child of el.children) {
-        if (wanted.some((attr) => child.getAttribute(attr) !== null)) return child;
+        if (patterns.some((p) => child.matches(p))) return child;
         const hit = walk(child);
         if (hit) return hit;
       }
@@ -125,6 +154,34 @@ describe("extractDisplayName", () => {
       children: [new FakeEl({ attrs: { "data-self-name": "  " }, text: " Katherine Johnson " })],
     });
     expect(extractDisplayName(tile)).toBe("Katherine Johnson");
+  });
+
+  it("falls back to a descendant span.notranslate (journal #41 live shape)", () => {
+    // Real Meet markup: the name lives in a tag-qualified span.notranslate
+    // (Google's do-not-translate marker), not data-self-name/aria-label —
+    // neither of which is present on the current build.
+    const tile = new FakeEl({
+      children: [new FakeEl({ tag: "span", classes: ["notranslate"], text: "Tom Elliot" })],
+    });
+    expect(extractDisplayName(tile)).toBe("Tom Elliot");
+  });
+
+  it("ignores non-span notranslate elements (material-icon ligatures also carry the class)", () => {
+    const tile = new FakeEl({
+      children: [
+        new FakeEl({ tag: "i", classes: ["notranslate"], text: "keep_outline" }),
+        new FakeEl({ tag: "span", classes: ["notranslate"], text: "Grace Hopper" }),
+      ],
+    });
+    expect(extractDisplayName(tile)).toBe("Grace Hopper");
+  });
+
+  it("prefers data-self-name over span.notranslate when both are present", () => {
+    const tile = new FakeEl({
+      attrs: { "data-self-name": "Ada Lovelace" },
+      children: [new FakeEl({ tag: "span", classes: ["notranslate"], text: "Someone Else" })],
+    });
+    expect(extractDisplayName(tile)).toBe("Ada Lovelace");
   });
 
   it("falls back to the tile's aria-label", () => {
