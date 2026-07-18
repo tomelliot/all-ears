@@ -24,4 +24,10 @@ public enum DataStoreError: Error, Sendable, Hashable {
   /// `docs/specs/capture-daemon.md`'s "Ring buffer maintenance"); this error
   /// reports which feed(s) failed so a caller can log it.
   case partialChunkWrite(nativeFailed: Bool, asrFailed: Bool)
+  /// Opening or `mmap`ing a chunk file for reading failed (e.g. missing
+  /// file, permission denied, or the `mmap` syscall itself failing).
+  case chunkFileUnreadable(path: String)
+  /// A frame range requested from ``ChunkFileReading`` fell outside the
+  /// chunk file's actual on-disk frame count.
+  case chunkRangeOutOfBounds(requested: Range<Int>, available: Int)
 }
