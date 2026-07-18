@@ -32,6 +32,8 @@ Phased so each stage is independently verifiable in a real call. Every phase car
 
 ## Phase 4 — Meet identity
 
+Executable prompt: [`prompts/meet-identity.md`](prompts/meet-identity.md).
+
 - **Depends on Phase 2's Meet audio path** (the `createEncodedStreams` tee) — without it there is no PCM to attach identity to on Meet; the `track`/`transceiver` correlation this phase uses is unaffected by the tee (the standard `track` event still fires normally).
 - `lib/identity/meet.ts`: tile `MutationObserver` correlating each captured stream to its tile, reading `data-participant-id` + display name; `Speaker N` fallback; CSRC `audioLevel` path documented as fallback.
 - **Verify empirically** whether the current Meet build exposes per-tile `<audio srcObject>` (preferred) or requires CSRC attribution; pick the least-fragile path that holds.
@@ -48,6 +50,8 @@ Phased so each stage is independently verifiable in a real call. Every phase car
 - **Exit:** a Teams call produces attributed `Speaker N` sources; the UI/logs state plainly that Teams is attribution, not isolation. No false per-participant claim.
 
 ## Phase 7 — Cross-browser parity + hardening
+
+Executable prompt: [`prompts/cross-browser-hardening.md`](prompts/cross-browser-hardening.md).
 
 - Firefox: persistent-background-page WebSocket owner; confirm `injectScript` timing and that earsd's `Origin` allowlist includes the Firefox `moz-extension://<uuid>` origin; the only per-browser code is the socket lifetime.
 - Chrome: `chrome.alarms` keepalive; `storage` session recovery on worker respawn.
