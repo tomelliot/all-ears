@@ -2,17 +2,15 @@ import Foundation
 
 /// Protocol seam over reading a chunk file's PCM samples back, per the "thin
 /// shim over a hardware/model boundary" pattern in `docs/architecture.md` --
-/// the read-side mirror of ``ChunkFileWriting``. ``MmapPCMChunkFileReader``
-/// is the real, `mmap`-backed conformance; tests can inject a fake.
-///
-/// Conformers read **raw interleaved mono `Float32` PCM** files: the format
-/// this module's fixtures and ``AsrChunkRangeReader`` operate on. Production
-/// `asr/` chunk files are AAC/Opus containers written via `AVAudioFile`
-/// (``ChunkAudioSettings``); decoding those into this raw, `mmap`-able form
-/// is a follow-up thin shim (symmetric to ``AVFoundationChunkFileWriter`` on
-/// the write side) for whoever wires the real `transcribe` CLI -- out of
-/// scope here, which builds the constant-memory, disk-backed read path and
-/// its consumers against fixture chunk files.
+/// the read-side mirror of ``ChunkFileWriting``. Two conformances exist:
+/// ``AVFoundationChunkFileReader``, the real `AVAudioFile`-backed decoder for
+/// production `asr/` chunk files (AAC/Opus containers written via
+/// ``ChunkAudioSettings``/``AVFoundationChunkFileWriter``), and the default
+/// ``AsrChunkRangeReader``/``SegmentedAudioReader`` use; and
+/// ``MmapPCMChunkFileReader``, an `mmap`-backed reader of **raw interleaved
+/// mono `Float32` PCM** files, kept for fixture tests that want exact-sample
+/// assertions a lossy codec round-trip can't give. Tests can also inject a
+/// fake ``ChunkFileReading`` directly.
 public protocol ChunkFileReading: Sendable {
   /// Total sample (frame) count available in this chunk file -- the
   /// authoritative source of truth for how much audio actually landed on

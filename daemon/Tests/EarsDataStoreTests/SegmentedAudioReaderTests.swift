@@ -68,10 +68,18 @@ struct SegmentedAudioReaderTests {
     return Fixture(dataRoot: dataRoot)
   }
 
+  /// This fixture writes raw `Float32` ramp samples directly under `asr/`
+  /// (not real encoded audio), so it needs ``MmapPCMChunkFileReader``
+  /// explicitly: the default `readerFactory` is now
+  /// ``AVFoundationChunkFileReader``, which decodes real AAC/Opus
+  /// containers. These tests care about index/segmentation/stitching logic
+  /// with exact-sample assertions, not codec decoding, so they keep the
+  /// raw-PCM reader.
   private func makeReader(dataRoot: URL) -> SegmentedAudioReader {
     SegmentedAudioReader(
       dataRoot: dataRoot,
-      segmentationOptions: SegmentationOptions(maxPauseSeconds: 1.5, preRollSeconds: 0.3))
+      segmentationOptions: SegmentationOptions(maxPauseSeconds: 1.5, preRollSeconds: 0.3),
+      readerFactory: MmapPCMChunkFileReader.make)
   }
 
   @Test("a range within one chunk, with a single speech span, produces one slice")

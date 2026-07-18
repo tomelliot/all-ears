@@ -20,7 +20,7 @@ public struct SegmentedAudioReader: Sendable {
   public init(
     dataRoot: URL,
     segmentationOptions: SegmentationOptions = SegmentationOptions(),
-    readerFactory: @escaping ChunkFileReaderFactory = MmapPCMChunkFileReader.make
+    readerFactory: @escaping ChunkFileReaderFactory = AVFoundationChunkFileReader.make
   ) {
     self.dataRoot = dataRoot
     self.segmentationOptions = segmentationOptions

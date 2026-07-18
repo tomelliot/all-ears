@@ -40,8 +40,16 @@ struct AsrChunkRangeReaderTests {
     return url
   }
 
+  /// Raw-PCM fixture chunks (written via `writeAsrChunk` above) need
+  /// ``MmapPCMChunkFileReader`` explicitly: the default `readerFactory` is
+  /// now ``AVFoundationChunkFileReader``, which decodes real AAC/Opus
+  /// containers, not raw `Float32` files -- these tests want exact-sample
+  /// assertions a lossy codec round-trip can't give, so they keep using the
+  /// raw-PCM reader directly rather than the production default.
   private func makeReader(dataRoot: URL) -> AsrChunkRangeReader {
-    AsrChunkRangeReader(dataRoot: dataRoot, sourceID: "mic", asrSampleRate: sampleRate)
+    AsrChunkRangeReader(
+      dataRoot: dataRoot, sourceID: "mic", asrSampleRate: sampleRate,
+      readerFactory: MmapPCMChunkFileReader.make)
   }
 
   @Test("a range fully inside a single chunk reads exactly that sub-range")
@@ -117,6 +125,51 @@ struct AsrChunkRangeReaderTests {
     let audio = try makeReader(dataRoot: dataRoot).read(range(0, 1), chunks: chunks)
 
     #expect(audio.samples == (0..<10).map { Float($0) })
+  }
+
+  @Test(
+    "using the production default reader (AVFoundationChunkFileReader), a real encoded AAC chunk is decoded and stitched correctly"
+  )
+  func realEncodedChunkViaDefaultReaderFactory() throws {
+    let dataRoot = try makeDataRoot()
+    let asrDirectory = DataStoreLayout.asrDirectory(dataRoot: dataRoot, sourceID: "mic")
+    try FileManager.default.createDirectory(at: asrDirectory, withIntermediateDirectories: true)
+
+    // A real AAC-encoded chunk, written exactly as `earsd` writes one --
+    // proves the *default* readerFactory (no override) actually decodes
+    // production-shaped `asr/` files, not just raw PCM fixtures.
+    let asrSampleRate = 16000
+    let loud = (0..<(asrSampleRate / 2)).map { index in
+      Float(sin(2.0 * Double.pi * 440.0 * Double(index) / Double(asrSampleRate)) * 0.5)
+    }
+    let quiet = [Float](repeating: 0, count: asrSampleRate / 2)
+    let settings = ChunkAudioSettings(codec: "aac", sampleRate: asrSampleRate, bitrate: 64000)
+    let url = asrDirectory.appendingPathComponent("real.m4a")
+    let writer = try AVFoundationChunkFileWriter(url: url, settings: settings)
+    try writer.write(samples: loud + quiet)
+    try writer.finish()
+
+    let chunkRange = TimeRange(
+      start: base, end: base.advanced(by: 1))
+    let chunks = [IndexedChunk(range: chunkRange, file: "asr/real.m4a", frames: asrSampleRate)]
+
+    // Default readerFactory: no override, so this exercises
+    // `AVFoundationChunkFileReader.make` exactly as production wires it.
+    let reader = AsrChunkRangeReader(dataRoot: dataRoot, sourceID: "mic", asrSampleRate: 16000)
+    let firstHalf = try reader.read(
+      TimeRange(start: base, end: base.advanced(by: 0.5)), chunks: chunks)
+    let secondHalf = try reader.read(
+      TimeRange(start: base.advanced(by: 0.5), end: base.advanced(by: 1)), chunks: chunks)
+
+    #expect(firstHalf.sampleRate == 16000)
+    #expect(rms(firstHalf.samples) > 0.1)
+    #expect(rms(secondHalf.samples) < 0.05)
+  }
+
+  private func rms(_ samples: [Float]) -> Float {
+    guard !samples.isEmpty else { return 0 }
+    let sumSquares = samples.reduce(Float(0)) { $0 + $1 * $1 }
+    return (sumSquares / Float(samples.count)).squareRoot()
   }
 
   @Test(

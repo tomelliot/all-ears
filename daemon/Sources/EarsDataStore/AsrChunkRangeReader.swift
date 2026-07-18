@@ -11,8 +11,9 @@ import Foundation
 /// Handles a range spanning multiple chunk files (frames from each
 /// overlapping chunk are read in order and concatenated) and a range
 /// landing mid-chunk on either end (only the overlapping frames of that
-/// chunk are read). Reads via ``ChunkFileReading`` (``MmapPCMChunkFileReader``
-/// by default), so no chunk file is ever loaded in full.
+/// chunk are read). Reads via ``ChunkFileReading`` (``AVFoundationChunkFileReader``
+/// by default, decoding the real AAC/Opus `asr/` chunk files production
+/// writes), so no chunk file is ever loaded in full.
 public struct AsrChunkRangeReader: Sendable {
   private let dataRoot: URL
   private let sourceID: SourceID
@@ -23,7 +24,7 @@ public struct AsrChunkRangeReader: Sendable {
     dataRoot: URL,
     sourceID: SourceID,
     asrSampleRate: Int,
-    readerFactory: @escaping ChunkFileReaderFactory = MmapPCMChunkFileReader.make
+    readerFactory: @escaping ChunkFileReaderFactory = AVFoundationChunkFileReader.make
   ) {
     self.dataRoot = dataRoot
     self.sourceID = sourceID
