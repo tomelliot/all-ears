@@ -97,19 +97,36 @@ Commands:
 | `session.close` | Close a session by id (sets `end`, state=closed). |
 | `session.list` | Open/recent sessions. |
 | `mark` | Convenience: retroactively define a range (e.g. "last 30m") as a session. |
-| `ingest.open` | Begin pushing audio for a `browser:<label>` source: declares format. |
+| `ingest.open` / `ingest.close` | **Not usable here** — always fail clearly. Browser audio ingestion is a separate loopback WebSocket, not the Unix socket; see [Audio ingestion](#audio-ingestion) below. |
 | `flush` | Finalizes and indexes each enabled source's in-progress chunk, then opens a fresh one — not a bare fsync of an unindexed partial. |
 
 ### Audio ingestion
 
-```jsonc
-// --> declare a stream
-{"cmd":"ingest.open","source":"browser:meet","format":{"sample_rate":48000,"channels":1,"encoding":"pcm_s16le"}}
-// <-- {"ok":true,"data":{"stream_id":"s7"}}
-// then binary/base64 frames are pushed referencing stream_id (framing defined in the wire spec)
-```
+Browser-sourced (`browser:<label>`) audio does **not** flow over the Unix control socket above — it uses a separate **loopback WebSocket** ingest endpoint, `[earsd.ingest_ws]` (`ws://127.0.0.1:<port>/ingest`, off by default). The Unix socket's own `ingest.open`/`ingest.close` always fail clearly ("use the WebSocket ingest endpoint"): a page-driven browser extension has no way to reach a privileged Unix socket, and the daemon's control plane (`status`/`sources.*`/`session.*`) must stay off any endpoint a web page's `Origin` could otherwise reach.
 
-Ingested audio is resampled/encoded and appended to the named source exactly like locally-captured audio.
+- **Bind:** `127.0.0.1` only, never `0.0.0.0`/`::`. Serves exactly one path, `GET /ingest`; anything else gets `404`.
+- **Origin allowlist:** the WebSocket upgrade validates the handshake's `Origin` header against `[earsd.ingest_ws].allowed_origins` *before* completing it — a disallowed origin (or, with an empty allowlist, *any* origin) gets `403` and no upgrade. Browsers set `Origin` truthfully on the handshake and page content cannot forge it, so this is what keeps a random web page from streaming audio in even though the port is open.
+- **Wire protocol:** control is text frames, reusing the same `ControlRequest`/`ControlResponse` Codable types as the Unix socket — but **ingest-only**: only `ingest.open`/`ingest.close` are accepted; every other `cmd` (`subscribe` included) is rejected, so an allowed origin still cannot drive the daemon.
+
+  ```jsonc
+  // text frame --> declare a stream
+  {"cmd":"ingest.open","source":"browser:meet:jane-a1b2","format":{"sample_rate":16000,"channels":1,"encoding":"pcm_s16le"}}
+  // text frame <-- {"ok":true,"data":{"stream_id":"s7"}}
+
+  // text frame --> end a stream
+  {"cmd":"ingest.close","stream_id":"s7"}
+  // text frame <-- {"ok":true,"data":{}}
+  ```
+
+  Audio is binary frames, one per PCM chunk, multiplexed by `stream_id` — no sequence number, since WebSocket rides TCP and frames are already ordered and reliable:
+
+  ```
+  [ u8 idLen ][ stream_id : idLen ASCII bytes ][ pcm_s16le bytes (mono, little-endian) ]
+  ```
+
+- **Source lifecycle:** a `browser:<label>` source is created lazily on its first-ever `ingest.open` — there is no `[[earsd.source]]` config entry to resolve one from ahead of time — and persists for the daemon's lifetime once seen. A later `ingest.open` for the same label (a participant leaving and rejoining a call) resumes the *same* on-disk source rather than fragmenting into a new one. Ingested audio is resampled/encoded and appended to it exactly like locally-captured audio; `ingest.close` flushes and indexes its in-progress chunk, the same as `sources.disable`.
+
+Full client-side detail — the browser extension's connection lifecycle, reconnect/backoff, and back-pressure policy — lives in [`docs/product/browser/specs/transport.md`](../browser/specs/transport.md), which this endpoint matches wire-for-wire.
 
 ### Live feed (pub/sub)
 

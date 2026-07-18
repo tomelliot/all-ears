@@ -26,19 +26,55 @@ public struct EarsDaemonConfiguration: Sendable {
   /// The VAD conformance shared across every source (Phase 1: always
   /// ``EnergyVAD``, per that type's doc comment).
   public var vad: EnergyVAD
+  /// `[earsd].codec`/`.bitrate`/`.default_time_cap_seconds` — the same
+  /// operator-configured storage defaults every config-declared source uses,
+  /// reused for a dynamically-created `browser:<label>` source's on-disk
+  /// encoding (see ``EarsDaemon/openIngestSource(label:format:)``). Every
+  /// config-declared ``SourceDescriptor`` already has these baked in at
+  /// resolution time; a browser source has no config entry to resolve one
+  /// from, so ``EarsDaemon`` needs them directly.
+  public var codec: String
+  public var bitrate: Int
+  public var defaultTimeCapSeconds: Int
+  /// `[earsd.ingest_ws]`, or `nil` when disabled (the default) — gates
+  /// whether ``EarsDaemon/start()`` also binds the loopback ingest
+  /// WebSocket.
+  public var ingestWebSocket: IngestWebSocketConfiguration?
 
   public init(
     sources: [SourceDescriptor],
     dataRoot: URL,
     socketPath: String,
     chunkSeconds: Double = 30,
-    vad: EnergyVAD = EnergyVAD()
+    vad: EnergyVAD = EnergyVAD(),
+    codec: String = "aac",
+    bitrate: Int = 64_000,
+    defaultTimeCapSeconds: Int = 7_200,
+    ingestWebSocket: IngestWebSocketConfiguration? = nil
   ) {
     self.sources = sources
     self.dataRoot = dataRoot
     self.socketPath = socketPath
     self.chunkSeconds = chunkSeconds
     self.vad = vad
+    self.codec = codec
+    self.bitrate = bitrate
+    self.defaultTimeCapSeconds = defaultTimeCapSeconds
+    self.ingestWebSocket = ingestWebSocket
+  }
+}
+
+/// `[earsd.ingest_ws]`'s resolved shape: the loopback port to bind and the
+/// Origin allowlist to enforce before completing a WebSocket upgrade. See
+/// `EarsIPC.IngestWebSocketServer`.
+public struct IngestWebSocketConfiguration: Sendable {
+  public var port: UInt16
+  /// Empty rejects every connection (fail closed) — never "allow all".
+  public var allowedOrigins: [String]
+
+  public init(port: UInt16, allowedOrigins: [String]) {
+    self.port = port
+    self.allowedOrigins = allowedOrigins
   }
 }
 
@@ -57,7 +93,7 @@ public actor EarsDaemon {
   private let clock: any NowProviding
   private let log: @Sendable (String) -> Void
 
-  private let captureActors: [SourceID: CaptureActor]
+  private var captureActors: [SourceID: CaptureActor]
   /// The producer→subscriber bridge for live-feed events: every
   /// ``CaptureActor`` and the ``SessionRegistry`` publish into it from
   /// construction on, and ``start()`` attaches the socket server's fan-out
@@ -65,7 +101,42 @@ public actor EarsDaemon {
   private let eventBus: EventBus
   private var controlSocketServer: ControlSocketServer?
   private var controlServerRunTask: Task<Void, Never>?
+  private var controlServer: ControlServer?
   private var powerObserver: PowerObserver?
+
+  // MARK: - Dynamic browser (ingest) sources
+  //
+  // Unlike config-declared sources (built once in init(), fixed for the
+  // daemon's lifetime), a browser:<label> source is built lazily on its
+  // first ingest.open — see openIngestSource(label:format:). Once built it
+  // joins `captureActors` like any other source (so status/sources.list see
+  // it for free); `pushBackends` and `ingestStreams` are the extra state
+  // only dynamic sources need.
+
+  /// The push backend behind each dynamically-created source, keyed the
+  /// same as `captureActors` — needed because `CaptureActor` only exposes
+  /// its backend as `any CaptureBackend`, with no way back to the concrete
+  /// `PushCaptureBackend` a WebSocket push needs to feed.
+  private var pushBackends: [SourceID: PushCaptureBackend] = [:]
+  /// stream_id → the label it was opened for. stream_ids are per-open-call
+  /// (not per-label): the same label can be opened, closed, and reopened
+  /// many times over the daemon's life (a participant leaving and
+  /// rejoining), each time reusing the same underlying CaptureActor/backend
+  /// — mirroring sources.enable/disable on a persistent actor — while each
+  /// individual `ingest.open` still gets its own fresh id to route binary
+  /// frames and a later `ingest.close` by.
+  private var ingestStreams: [String: SourceID] = [:]
+  private var nextIngestStreamID = 0
+  private var ingestWebSocketServer: IngestWebSocketServer?
+  private var ingestServerRunTask: Task<Void, Never>?
+
+  /// Thrown by ``openIngestSource(label:format:)`` for a `source` that isn't
+  /// a `browser:*` id — guards against a WebSocket client naming an
+  /// existing config-declared source (e.g. `mic`) and hijacking its
+  /// `CaptureActor`.
+  public enum IngestError: Error, Sendable {
+    case notABrowserSource(SourceID)
+  }
 
   /// Builds every source's `CaptureActor` (and its `ChunkEncoder`/
   /// `IndexAppender`) from `configuration`, but starts nothing yet — no
@@ -92,39 +163,59 @@ public actor EarsDaemon {
 
     var actors: [SourceID: CaptureActor] = [:]
     for descriptor in configuration.sources {
-      let sourceDirectory = DataStoreLayout.sourceDirectory(
-        dataRoot: configuration.dataRoot, sourceID: descriptor.id)
-      try FileManager.default.createDirectory(
-        at: sourceDirectory, withIntermediateDirectories: true)
-
-      try Self.writeSourceMeta(descriptor, dataRoot: configuration.dataRoot)
-
-      let indexAppender = IndexAppender(
-        fileURL: DataStoreLayout.indexFile(
-          dataRoot: configuration.dataRoot, sourceID: descriptor.id))
-      let encoder = try ChunkEncoder(
-        sourceID: descriptor.id,
-        dataRoot: configuration.dataRoot,
-        codec: descriptor.codec,
-        bitrate: descriptor.bitrate,
-        nativeSampleRate: descriptor.nativeSampleRate,
-        asrSampleRate: descriptor.asrSampleRate,
-        storeNative: descriptor.storeNative,
-        chunkSeconds: configuration.chunkSeconds,
-        startInstant: clock.now(),
-        indexAppender: indexAppender)
-
-      actors[descriptor.id] = CaptureActor(
-        descriptor: descriptor,
-        dataRoot: configuration.dataRoot,
+      actors[descriptor.id] = try Self.buildCaptureActor(
+        for: descriptor,
+        configuration: configuration,
         backend: backendFactory(descriptor),
-        encoder: encoder,
-        indexAppender: indexAppender,
-        vad: configuration.vad,
         clock: clock,
         eventSink: eventSink)
     }
     self.captureActors = actors
+  }
+
+  /// Builds one source's `CaptureActor` — and its `ChunkEncoder`/
+  /// `IndexAppender`/on-disk directory/`meta.toml` — from `descriptor`. The
+  /// construction logic every config-declared source goes through at
+  /// `init()`, and the same logic ``openIngestSource(label:format:)`` uses
+  /// to build a `browser:<label>` source the first time it's ever seen.
+  private static func buildCaptureActor(
+    for descriptor: SourceDescriptor,
+    configuration: EarsDaemonConfiguration,
+    backend: any CaptureBackend,
+    clock: any NowProviding,
+    eventSink: EventSink?
+  ) throws -> CaptureActor {
+    let sourceDirectory = DataStoreLayout.sourceDirectory(
+      dataRoot: configuration.dataRoot, sourceID: descriptor.id)
+    try FileManager.default.createDirectory(
+      at: sourceDirectory, withIntermediateDirectories: true)
+
+    try writeSourceMeta(descriptor, dataRoot: configuration.dataRoot)
+
+    let indexAppender = IndexAppender(
+      fileURL: DataStoreLayout.indexFile(
+        dataRoot: configuration.dataRoot, sourceID: descriptor.id))
+    let encoder = try ChunkEncoder(
+      sourceID: descriptor.id,
+      dataRoot: configuration.dataRoot,
+      codec: descriptor.codec,
+      bitrate: descriptor.bitrate,
+      nativeSampleRate: descriptor.nativeSampleRate,
+      asrSampleRate: descriptor.asrSampleRate,
+      storeNative: descriptor.storeNative,
+      chunkSeconds: configuration.chunkSeconds,
+      startInstant: clock.now(),
+      indexAppender: indexAppender)
+
+    return CaptureActor(
+      descriptor: descriptor,
+      dataRoot: configuration.dataRoot,
+      backend: backend,
+      encoder: encoder,
+      indexAppender: indexAppender,
+      vad: configuration.vad,
+      clock: clock,
+      eventSink: eventSink)
   }
 
   /// Persists `descriptor` to `<data-root>/sources/<id>/meta.toml` via
@@ -195,6 +286,10 @@ public actor EarsDaemon {
       listener: listener, log: log, handler: controlServer.makeHandler())
     controlSocketServer = socketServer
     controlServerRunTask = Task { await socketServer.run() }
+    // Kept so openIngestSource(label:format:) can register a dynamically-
+    // created source into this SAME actor's captureActors — otherwise it's
+    // a value-type copy neither sees the other's later changes to.
+    self.controlServer = controlServer
 
     // Only now does a pub/sub consumer exist: route every event published by
     // the capture actors / session registry into the socket's fan-out. Events
@@ -205,6 +300,41 @@ public actor EarsDaemon {
     let observer = PowerObserver(captureActors: captureActors)
     await observer.startObserving()
     powerObserver = observer
+
+    if let ingestWebSocket = configuration.ingestWebSocket {
+      await startIngestWebSocket(ingestWebSocket)
+    }
+  }
+
+  /// Binds and starts the ingest WebSocket. A bind failure (e.g. the port is
+  /// already in use) is logged and leaves ingest disabled for this run,
+  /// exactly like a capture source's own startup failure — it must never
+  /// take down local capture, which `start()`'s caller has no reason to
+  /// expect a browser-ingest port conflict to affect.
+  private func startIngestWebSocket(_ ingestWebSocket: IngestWebSocketConfiguration) async {
+    let ingestListener: NetworkSocketListener
+    do {
+      ingestListener = try await NetworkSocketListener.bind(toLoopbackPort: ingestWebSocket.port)
+    } catch {
+      log("ingest websocket failed to bind port \(ingestWebSocket.port) and is disabled: \(error)")
+      return
+    }
+    let ingestServer = IngestWebSocketServer(
+      listener: ingestListener,
+      allowedOrigins: ingestWebSocket.allowedOrigins,
+      log: log,
+      onOpen: { [weak self] label, format in
+        guard let self else { throw IngestError.notABrowserSource(label) }
+        return try await self.openIngestSource(label: label, format: format)
+      },
+      onPush: { [weak self] streamID, samples, sampleRate in
+        await self?.pushIngestAudio(streamID: streamID, samples: samples, sampleRate: sampleRate)
+      },
+      onClose: { [weak self] streamID in
+        await self?.closeIngestSource(streamID: streamID)
+      })
+    ingestWebSocketServer = ingestServer
+    ingestServerRunTask = Task { await ingestServer.run() }
   }
 
   /// Stops the control socket and power observer, then every source, in
@@ -222,6 +352,14 @@ public actor EarsDaemon {
     controlServerRunTask?.cancel()
     controlServerRunTask = nil
     controlSocketServer = nil
+    controlServer = nil
+
+    if let ingestWebSocketServer {
+      await ingestWebSocketServer.shutdown()
+    }
+    ingestServerRunTask?.cancel()
+    ingestServerRunTask = nil
+    self.ingestWebSocketServer = nil
 
     if let powerObserver {
       await powerObserver.stopObserving()
@@ -229,6 +367,105 @@ public actor EarsDaemon {
     powerObserver = nil
 
     for actor in captureActors.values {
+      await actor.stop()
+    }
+  }
+
+  // MARK: - Dynamic browser (ingest) sources
+
+  /// `ingest.open`: find-or-build the `CaptureActor` for `label`, (re)start
+  /// it, and mint a fresh `stream_id` for this open call.
+  ///
+  /// First-time construction is deferred to a label's first `ingest.open` —
+  /// there is no config entry to resolve a `browser:<label>` source from
+  /// ahead of time. A label that already has a `CaptureActor` (from a prior
+  /// open within this daemon's lifetime) is reused and (re)started rather
+  /// than rebuilt, mirroring `sources.enable`'s semantics on a persistent
+  /// actor: a participant who leaves and rejoins resumes the SAME on-disk
+  /// source instead of fragmenting into a new one, and `CaptureActor.start()`
+  /// throwing `.alreadyCapturing` (a second concurrent open for a still-live
+  /// stream) is treated as success, not an error.
+  ///
+  /// The declared `format` becomes the source's native *and* ASR rate (no
+  /// separate higher-quality feed exists for browser-ingested audio — the
+  /// extension already resamples to 16 kHz before sending), so `storeNative`
+  /// is `false`: storing a second identical-rate copy under `chunks/` would
+  /// just duplicate `asr/`'s bytes for nothing. `ChunkResampler` accepts an
+  /// equal native/ASR rate fine (verified: it builds an `AVAudioConverter`
+  /// with ratio 1.0, not a special-cased failure).
+  ///
+  /// Known gap: `SessionRegistry.knownSourceIDs` and `PowerObserver` were
+  /// each handed a snapshot of `captureActors` at `start()`, so a session
+  /// can't reference a browser source opened after start, and the power
+  /// observer won't pause/resume it on sleep/wake. Only `ControlServer`'s
+  /// copy is kept in sync (via `registerDynamicSource`), since `status`/
+  /// `sources.list` visibility is this task's actual exit bar; the other two
+  /// are a follow-up, not silently assumed fixed.
+  public func openIngestSource(label: SourceID, format: AudioFormatSpec) async throws -> String {
+    guard label.sourceClass == .browser else {
+      throw IngestError.notABrowserSource(label)
+    }
+
+    let actor: CaptureActor
+    if let existing = captureActors[label] {
+      actor = existing
+    } else {
+      let descriptor = SourceDescriptor(
+        schema: 1,
+        id: label,
+        sourceClass: .browser,
+        label: "",
+        deviceUID: "",
+        nativeSampleRate: format.sampleRate,
+        asrSampleRate: format.sampleRate,
+        storeNative: false,
+        channels: format.channels,
+        codec: configuration.codec,
+        bitrate: configuration.bitrate,
+        timeCapSeconds: configuration.defaultTimeCapSeconds,
+        created: clock.now())
+      let backend = PushCaptureBackend(source: label)
+      let built = try Self.buildCaptureActor(
+        for: descriptor,
+        configuration: configuration,
+        backend: backend,
+        clock: clock,
+        eventSink: { [eventBus] event in await eventBus.publish(event) })
+      captureActors[label] = built
+      pushBackends[label] = backend
+      await controlServer?.registerDynamicSource(built, id: label)
+      actor = built
+    }
+
+    do {
+      try await actor.start()
+    } catch CaptureActorError.alreadyCapturing {
+      // Already running — a second open for a still-live stream is a no-op.
+    }
+
+    nextIngestStreamID += 1
+    let streamID = "s\(nextIngestStreamID)"
+    ingestStreams[streamID] = label
+    return streamID
+  }
+
+  /// Routes one decoded PCM buffer to the `CaptureActor` behind `streamID`,
+  /// via its `PushCaptureBackend`. An unknown `streamID` (already closed, or
+  /// never opened) drops the buffer silently — the WebSocket layer already
+  /// logs that case once per frame.
+  public func pushIngestAudio(streamID: String, samples: [Float], sampleRate: Int) async {
+    guard let label = ingestStreams[streamID], let backend = pushBackends[label] else { return }
+    await backend.push(AudioBuffer(samples: samples, sampleRate: sampleRate))
+  }
+
+  /// `ingest.close`: stop the `CaptureActor` behind `streamID` (flushing and
+  /// indexing its in-progress chunk, same as `sources.disable`) and forget
+  /// the stream_id → label mapping. The actor itself, and its `meta.toml`,
+  /// are left in place — a later `ingest.open` for the same label resumes
+  /// them rather than starting over.
+  public func closeIngestSource(streamID: String) async {
+    guard let label = ingestStreams.removeValue(forKey: streamID) else { return }
+    if let actor = captureActors[label] {
       await actor.stop()
     }
   }

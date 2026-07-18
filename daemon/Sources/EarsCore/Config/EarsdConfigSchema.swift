@@ -29,6 +29,11 @@ public enum EarsdConfigSchema {
         "speech_pad_ms": .int(300),
         "min_silence_ms": .int(700),
       ]),
+      "ingest_ws": .table([
+        "enabled": .bool(false),
+        "port": .int(47811),
+        "allowed_origins": .array([]),
+      ]),
       "source": .array([
         .table([
           "id": .string("mic"),
@@ -78,6 +83,19 @@ public enum EarsdConfigSchema {
                   "backend": ConfigSchema.Field(type: .string),
                   "speech_pad_ms": ConfigSchema.Field(type: .int),
                   "min_silence_ms": ConfigSchema.Field(type: .int),
+                ]
+              )
+            ),
+            "ingest_ws": ConfigSchema.Field(
+              type: .table,
+              children: ConfigSchema(
+                fields: [
+                  "enabled": ConfigSchema.Field(type: .bool),
+                  "port": ConfigSchema.Field(type: .int),
+                  // Array of scalars (origin strings) — left unvalidated
+                  // element-wise per ConfigSchema.Field's documented
+                  // elementSchema-nil convention.
+                  "allowed_origins": ConfigSchema.Field(type: .array),
                 ]
               )
             ),

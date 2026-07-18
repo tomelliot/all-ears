@@ -20,7 +20,7 @@ import Foundation
 /// single handler can't name every command's concrete `ControlResponse<Payload>`
 /// (see `EarsIPC.ControlReply`).
 ///
-/// ## Command routing (the fourteen `ControlRequest` cases)
+/// ## Command routing (the fifteen `ControlRequest` cases)
 ///
 /// | command | routed to | reply payload |
 /// |---|---|---|
@@ -36,7 +36,8 @@ import Foundation
 /// | `session.close` | ``SessionRegistry/close(id:)`` | `EmptyData` |
 /// | `session.list` | ``SessionRegistry/list()`` | `SessionListData` |
 /// | `mark` | ``SessionRegistry/mark(sources:slug:range:trigger:)`` | `SessionOpenData` |
-/// | `ingest.open` | — (Phase 6) | failure: "not yet supported" |
+/// | `ingest.open` | — (WebSocket-only, see below) | failure: "use the WebSocket ingest endpoint" |
+/// | `ingest.close` | — (WebSocket-only, see below) | failure: "use the WebSocket ingest endpoint" |
 /// | `flush` | ``CaptureActor/flush()`` on every enabled source | `EmptyData` |
 ///
 /// ### Locked routing decisions (re-confirmed from the spec)
@@ -53,9 +54,11 @@ import Foundation
 ///   `meta.toml` with no matching `CaptureActor` was considered and rejected:
 ///   the added source would then be invisible to `status`/`sources.list`,
 ///   which is worse than failing loudly.)
-/// - **`ingest.open` replies with an explicit failure** — a `ControlError`
-///   like "ingest.open not yet supported" — because socket-fed `browser:*`
-///   sources are Phase 6 scope, not silently accepted.
+/// - **`ingest.open`/`ingest.close` reply with an explicit failure on this
+///   socket** — browser ingest is WebSocket-only (`[earsd.ingest_ws]`, see
+///   `EarsIPC.IngestWebSocketServer` and `specs/transport.md`); the Unix
+///   control socket never accepts binary PCM, so it fails clearly here
+///   rather than silently accepting a stream it can't consume.
 /// - **`flush` finalizes and indexes** each enabled source's in-progress chunk
 ///   then opens a fresh one (``CaptureActor/flush()``), not a bare fsync of an
 ///   unindexed partial.
@@ -95,6 +98,19 @@ public actor ControlServer {
   /// Pure wiring: forwards each request to ``handle(_:)`` on this actor.
   public nonisolated func makeHandler() -> ControlSocketServer.Handler {
     { request in await self.handle(request) }
+  }
+
+  /// Registers a `CaptureActor` built after construction — ``EarsDaemon``
+  /// calls this for a dynamically-created `browser:<label>` source (its
+  /// first `ingest.open`) so `status`/`sources.list` see it without a
+  /// restart. `EarsDaemon.captureActors` and this actor's own copy are two
+  /// independent dictionaries (handed over by value at `start()`), so
+  /// nothing added to one is visible from the other unless propagated
+  /// explicitly — this is that propagation. Overwrites any existing entry
+  /// for `id`, matching `openIngestSource(label:format:)`'s reuse-if-present
+  /// semantics.
+  public func registerDynamicSource(_ actor: CaptureActor, id: SourceID) {
+    captureActors[id] = actor
   }
 
   /// Dispatch one decoded request to the owning actor and build its reply,
@@ -137,11 +153,20 @@ public actor ControlServer {
     case .mark(let sources, let slug, let range):
       return await handleMark(sources: sources, slug: slug, range: range)
     case .ingestOpen:
-      // Locked decision (`ActorContracts`): socket-fed `browser:*` sources are
-      // Phase 6 scope, so this always fails clearly rather than silently
-      // accepting a stream it can't yet consume.
+      // Browser ingest lives on the loopback WebSocket (`[earsd.ingest_ws]`),
+      // not the privileged Unix control socket — see specs/transport.md.
+      // Always fails clearly here rather than silently accepting a stream
+      // this socket doesn't consume.
       return ControlReply(
-        ControlResponse<IngestOpenData>.failure("ingest.open is not yet supported (Phase 6 scope)")
+        ControlResponse<IngestOpenData>.failure(
+          "ingest.open is not supported on the control socket — use the WebSocket ingest endpoint"
+        )
+      )
+    case .ingestClose:
+      return ControlReply(
+        ControlResponse<EmptyData>.failure(
+          "ingest.close is not supported on the control socket — use the WebSocket ingest endpoint"
+        )
       )
     case .flush:
       return await fanOut { try await $0.flush() }

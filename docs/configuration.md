@@ -62,6 +62,12 @@ backend      = "silero"   # pluggable; not yet honored -- Phase 1 always uses
 speech_pad_ms = 300       # pad around detected speech spans
 min_silence_ms = 700      # gap before declaring silence
 
+[earsd.ingest_ws]
+enabled         = false   # off by default; opt-in
+port            = 47811   # loopback TCP port; matches the browser extension's default
+allowed_origins = []      # e.g. ["chrome-extension://<id>", "moz-extension://<uuid>"];
+                           # empty rejects every connection (fail closed)
+
 # Sources enabled at startup. Each may override capture params.
 [[earsd.source]]
 id    = "mic"

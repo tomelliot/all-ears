@@ -144,7 +144,7 @@ struct ControlServerTests {
 
   // MARK: - ingest.open (not supported)
 
-  @Test("ingest.open fails clearly as Phase 6 scope")
+  @Test("ingest.open fails clearly on the control socket — it's WebSocket-only")
   func ingestOpenNotSupported() async throws {
     let clock = ManualClock()
     let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
@@ -155,7 +155,20 @@ struct ControlServerTests {
     #expect(json["ok"] as? Bool == false)
     let message = try requireString(json, key: "error")
     #expect(message.contains("ingest.open"))
-    #expect(message.contains("not yet supported"))
+    #expect(message.contains("WebSocket"))
+  }
+
+  @Test("ingest.close fails clearly on the control socket — it's WebSocket-only")
+  func ingestCloseNotSupported() async throws {
+    let clock = ManualClock()
+    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
+
+    let reply = await server.handle(.ingestClose(streamID: "s1"))
+    let json = try envelope(reply)
+    #expect(json["ok"] as? Bool == false)
+    let message = try requireString(json, key: "error")
+    #expect(message.contains("ingest.close"))
+    #expect(message.contains("WebSocket"))
   }
 
   // MARK: - unknown source id mapping

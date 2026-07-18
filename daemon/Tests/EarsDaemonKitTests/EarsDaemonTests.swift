@@ -266,4 +266,121 @@ struct EarsDaemonTests {
     await watcher.close()
     await daemon.stop()
   }
+
+  // MARK: - Dynamic browser (ingest) sources
+
+  @Test("openIngestSource builds a dynamic browser source that writes real PCM to disk")
+  func dynamicIngestSourceWritesToDisk() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_000))
+
+    let configuration = EarsDaemonConfiguration(
+      sources: [],
+      dataRoot: dataRoot,
+      socketPath: tempSocketPath())
+
+    let daemon = try EarsDaemon(
+      configuration: configuration,
+      backendFactory: { descriptor in SyntheticCaptureBackend(source: descriptor.id, buffers: []) },
+      clock: clock)
+    try await daemon.start()
+
+    let format = AudioFormatSpec(sampleRate: 16000, channels: 1, encoding: "pcm_s16le")
+    let streamID = try await daemon.openIngestSource(
+      label: "browser:meet:jane-a1b2", format: format)
+
+    let samples = [Float](repeating: 0.25, count: 1600)  // 100 ms @ 16 kHz
+    await daemon.pushIngestAudio(streamID: streamID, samples: samples, sampleRate: 16000)
+    // stop() (called by closeIngestSource) awaits the CaptureActor's consume
+    // task draining every already-yielded buffer before returning, and
+    // flushes whatever's pending as a short final chunk — so no sleep is
+    // needed here to avoid racing the background consume loop.
+    await daemon.closeIngestSource(streamID: streamID)
+
+    let statuses = await daemon.statusForTesting()
+    let status = try #require(statuses["browser:meet:jane-a1b2"])
+    #expect(status.bytesUsed > 0)
+    #expect(status.state == .disabled)  // stopped by ingest.close, not left capturing
+
+    let written = try SourceMetaStore.read(sourceID: "browser:meet:jane-a1b2", dataRoot: dataRoot)
+    #expect(written.sourceClass == .browser)
+    #expect(written.nativeSampleRate == 16000)
+    #expect(written.asrSampleRate == 16000)
+    #expect(written.storeNative == false)
+
+    await daemon.stop()
+  }
+
+  @Test(
+    "reopening the same label after a close resumes the same on-disk source rather than a fresh one"
+  )
+  func reopenSameLabelResumesSameSource() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_000))
+
+    let configuration = EarsDaemonConfiguration(
+      sources: [],
+      dataRoot: dataRoot,
+      socketPath: tempSocketPath())
+
+    let daemon = try EarsDaemon(
+      configuration: configuration,
+      backendFactory: { descriptor in SyntheticCaptureBackend(source: descriptor.id, buffers: []) },
+      clock: clock)
+    try await daemon.start()
+
+    let format = AudioFormatSpec(sampleRate: 16000, channels: 1, encoding: "pcm_s16le")
+    let label: SourceID = "browser:meet:speaker-1"
+    // A full second, not a small 100ms buffer: FilenameTimestampCodec
+    // truncates chunk filenames to whole-second precision (chunks are
+    // fixed-duration 30s+ in real capture, so sub-second start times never
+    // collide in practice — see that type's doc comment). ChunkEncoder's
+    // timeline is buffer-duration-derived, not clock-derived, so the two
+    // sessions' chunks must be pushed far enough apart in accumulated
+    // duration to land in different whole seconds and write distinct files,
+    // or the second session's flush silently overwrites the first's file.
+    let samples = [Float](repeating: 0.25, count: 16000)
+
+    let firstStreamID = try await daemon.openIngestSource(label: label, format: format)
+    await daemon.pushIngestAudio(streamID: firstStreamID, samples: samples, sampleRate: 16000)
+    await daemon.closeIngestSource(streamID: firstStreamID)
+    let bytesAfterFirstSession = try #require(await daemon.statusForTesting()[label]?.bytesUsed)
+
+    // Same label, a later "join": must reuse the existing CaptureActor, not
+    // build a second one — a fresh stream_id each time, same source.
+    let secondStreamID = try await daemon.openIngestSource(label: label, format: format)
+    #expect(secondStreamID != firstStreamID)
+    await daemon.pushIngestAudio(streamID: secondStreamID, samples: samples, sampleRate: 16000)
+    await daemon.closeIngestSource(streamID: secondStreamID)
+    let bytesAfterSecondSession = try #require(await daemon.statusForTesting()[label]?.bytesUsed)
+
+    #expect(bytesAfterSecondSession > bytesAfterFirstSession)
+    #expect(await daemon.statusForTesting().keys.filter { $0 == label }.count == 1)
+
+    await daemon.stop()
+  }
+
+  @Test("openIngestSource rejects a label that isn't a browser:* source")
+  func rejectsNonBrowserLabel() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_000))
+
+    let configuration = EarsDaemonConfiguration(
+      sources: [makeDescriptor(id: "mic", sourceClass: .mic)],
+      dataRoot: dataRoot,
+      socketPath: tempSocketPath())
+
+    let daemon = try EarsDaemon(
+      configuration: configuration,
+      backendFactory: { descriptor in SyntheticCaptureBackend(source: descriptor.id, buffers: []) },
+      clock: clock)
+    try await daemon.start()
+
+    let format = AudioFormatSpec(sampleRate: 16000, channels: 1, encoding: "pcm_s16le")
+    await #expect(throws: EarsDaemon.IngestError.self) {
+      _ = try await daemon.openIngestSource(label: "mic", format: format)
+    }
+
+    await daemon.stop()
+  }
 }

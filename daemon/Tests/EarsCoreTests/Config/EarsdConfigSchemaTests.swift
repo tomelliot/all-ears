@@ -20,6 +20,11 @@ struct EarsdConfigSchemaTests {
       "speech_pad_ms": .int(300),
       "min_silence_ms": .int(700),
     ])
+    let ingestWS: ConfigValue = .table([
+      "enabled": .bool(false),
+      "port": .int(47811),
+      "allowed_origins": .array([]),
+    ])
     let micSource: ConfigValue = .table([
       "id": .string("mic"),
       "class": .string("mic"),
@@ -36,6 +41,7 @@ struct EarsdConfigSchemaTests {
       "store_native": .bool(true),
       "channels": .int(1),
       "vad": vad,
+      "ingest_ws": ingestWS,
       "source": .array([micSource]),
     ])
     let expected: ConfigValue = .table(["earsd": earsdTable])

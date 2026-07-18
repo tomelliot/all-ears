@@ -78,9 +78,26 @@ enum DaemonConfigResolution {
       dataRoot: URL(fileURLWithPath: dataRoot.isEmpty ? "." : dataRoot),
       socketPath: socketPath,
       chunkSeconds: chunkSeconds,
-      vad: vad
+      vad: vad,
+      codec: defaults.codec,
+      bitrate: defaults.bitrate,
+      defaultTimeCapSeconds: defaults.defaultTimeCapSeconds,
+      ingestWebSocket: resolveIngestWebSocket(earsd)
     )
     return Result(configuration: configuration, skipped: skipped)
+  }
+
+  /// `[earsd.ingest_ws]` → ``IngestWebSocketConfiguration``, or `nil` when
+  /// `enabled` isn't `true` (the default — opt-in per
+  /// `docs/product/browser/prompts/earsd-websocket-ingest.md`).
+  private static func resolveIngestWebSocket(
+    _ earsd: [String: ConfigValue]
+  ) -> IngestWebSocketConfiguration? {
+    let table = nestedTable(earsd, "ingest_ws")
+    guard bool(table, "enabled", default: false) else { return nil }
+    let port = int(table, "port", default: 47_811)
+    let origins = stringArray(table, "allowed_origins")
+    return IngestWebSocketConfiguration(port: UInt16(clamping: port), allowedOrigins: origins)
   }
 
   // MARK: - Per-source resolution
@@ -177,6 +194,16 @@ enum DaemonConfigResolution {
   private static func array(_ table: [String: ConfigValue], _ key: String) -> [ConfigValue] {
     guard case .array(let items)? = table[key] else { return [] }
     return items
+  }
+
+  /// `array(_:_:)` plus filtering to string elements — non-string entries
+  /// (a malformed `allowed_origins` entry) are dropped rather than crashing,
+  /// matching this function's never-throwing defaulting-reader contract.
+  private static func stringArray(_ table: [String: ConfigValue], _ key: String) -> [String] {
+    array(table, key).compactMap { value in
+      guard case .string(let s) = value else { return nil }
+      return s
+    }
   }
 
   private static func string(

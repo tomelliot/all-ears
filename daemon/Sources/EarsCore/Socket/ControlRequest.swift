@@ -19,6 +19,7 @@
 /// {"cmd":"session.list"}
 /// {"cmd":"mark","sources":["mic"],"slug":"hallway-chat","last_seconds":1800}
 /// {"cmd":"ingest.open","source":"browser:meet","format":{"sample_rate":48000,"channels":1,"encoding":"pcm_s16le"}}
+/// {"cmd":"ingest.close","stream_id":"s7"}
 /// {"cmd":"flush"}
 /// ```
 ///
@@ -55,6 +56,8 @@ public enum ControlRequest: Sendable, Hashable {
   case mark(sources: [SourceID], slug: String, range: MarkRange)
   /// Begin pushing audio for a `browser:<label>` source; declares its format.
   case ingestOpen(source: SourceID, format: AudioFormatSpec)
+  /// End a stream opened by `ingest.open`, by its `stream_id`.
+  case ingestClose(streamID: String)
   /// Force-flush in-flight chunks and index.
   case flush
 }
@@ -63,6 +66,7 @@ extension ControlRequest: Codable {
   fileprivate enum CodingKeys: String, CodingKey {
     case cmd, spec, source, sources, slug, start, end, vocab, id, format
     case lastSeconds = "last_seconds"
+    case streamID = "stream_id"
   }
 
   private enum Tag: String, Codable {
@@ -79,6 +83,7 @@ extension ControlRequest: Codable {
     case sessionList = "session.list"
     case mark
     case ingestOpen = "ingest.open"
+    case ingestClose = "ingest.close"
     case flush
   }
 
@@ -124,6 +129,8 @@ extension ControlRequest: Codable {
         source: try container.decode(SourceID.self, forKey: .source),
         format: try container.decode(AudioFormatSpec.self, forKey: .format)
       )
+    case .ingestClose:
+      self = .ingestClose(streamID: try container.decode(String.self, forKey: .streamID))
     case .flush:
       self = .flush
     }
@@ -206,6 +213,9 @@ extension ControlRequest: Codable {
       try container.encode(Tag.ingestOpen, forKey: .cmd)
       try container.encode(source, forKey: .source)
       try container.encode(format, forKey: .format)
+    case .ingestClose(let streamID):
+      try container.encode(Tag.ingestClose, forKey: .cmd)
+      try container.encode(streamID, forKey: .streamID)
     case .flush:
       try container.encode(Tag.flush, forKey: .cmd)
     }

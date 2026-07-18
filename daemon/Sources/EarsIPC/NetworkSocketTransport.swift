@@ -100,18 +100,20 @@ public final class NetworkSocketConnection: SocketConnection, @unchecked Sendabl
 /// `Sendable` connections continuation.
 public final class NetworkSocketListener: SocketListener, @unchecked Sendable {
   private let listener: NWListener
-  private let path: String
+  /// The Unix-domain socket file to remove on ``close()``, or `nil` for a
+  /// TCP listener (nothing on disk to clean up).
+  private let cleanupPath: String?
   public let connections: AsyncStream<any SocketConnection>
   private let connectionsContinuation: AsyncStream<any SocketConnection>.Continuation
 
   private init(
     listener: NWListener,
-    path: String,
+    cleanupPath: String?,
     connections: AsyncStream<any SocketConnection>,
     continuation: AsyncStream<any SocketConnection>.Continuation
   ) {
     self.listener = listener
-    self.path = path
+    self.cleanupPath = cleanupPath
     self.connections = connections
     self.connectionsContinuation = continuation
   }
@@ -128,6 +130,28 @@ public final class NetworkSocketListener: SocketListener, @unchecked Sendable {
 
     let parameters = unixParameters()
     parameters.requiredLocalEndpoint = .unix(path: path)
+    return try await startListening(using: parameters, cleanupPath: path, queue: queue)
+  }
+
+  /// Bind and start listening on `127.0.0.1:port` — **loopback only**, never
+  /// a wildcard/`0.0.0.0` bind (the ingest WebSocket's security boundary
+  /// relies on this; see `EarsIPC.IngestWebSocketServer`). Awaits the
+  /// listener reaching `.ready` so a client may connect immediately on
+  /// return.
+  public static func bind(
+    toLoopbackPort port: UInt16,
+    queue: DispatchQueue = DispatchQueue(label: "net.tomelliot.ears.ipc.ingest-server")
+  ) async throws -> NetworkSocketListener {
+    let parameters = NWParameters.tcp
+    parameters.allowLocalEndpointReuse = true
+    parameters.requiredLocalEndpoint = NWEndpoint.hostPort(
+      host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port) ?? .any)
+    return try await startListening(using: parameters, cleanupPath: nil, queue: queue)
+  }
+
+  private static func startListening(
+    using parameters: NWParameters, cleanupPath: String?, queue: DispatchQueue
+  ) async throws -> NetworkSocketListener {
     let listener: NWListener
     do {
       listener = try NWListener(using: parameters)
@@ -153,7 +177,8 @@ public final class NetworkSocketListener: SocketListener, @unchecked Sendable {
     }
 
     let wrapper = NetworkSocketListener(
-      listener: listener, path: path, connections: connections, continuation: continuation)
+      listener: listener, cleanupPath: cleanupPath, connections: connections,
+      continuation: continuation)
     try await wrapper.awaitReady(on: queue)
     return wrapper
   }
@@ -175,10 +200,19 @@ public final class NetworkSocketListener: SocketListener, @unchecked Sendable {
     }
   }
 
+  /// The bound TCP port — only meaningful for a ``bind(toLoopbackPort:queue:)``
+  /// listener; used by tests that bind to port `0` (an ephemeral port chosen
+  /// by the OS) and need to learn what it actually is.
+  public var boundPort: UInt16? {
+    listener.port?.rawValue
+  }
+
   public func close() async {
     listener.cancel()
     connectionsContinuation.finish()
-    try? FileManager.default.removeItem(atPath: path)
+    if let cleanupPath {
+      try? FileManager.default.removeItem(atPath: cleanupPath)
+    }
   }
 }
 
