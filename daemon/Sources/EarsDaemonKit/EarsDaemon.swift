@@ -44,7 +44,8 @@ public struct EarsDaemonConfiguration: Sendable {
 
 /// The top-level composition: wires one ``CaptureActor`` per configured
 /// source, a ``SessionRegistry``, a ``ControlServer`` serving the real control
-/// socket, a ``PowerObserver``, and a ``ShutdownCoordinator`` into one
+/// socket, an ``EventBus`` bridging both event producers to the socket's
+/// pub/sub fan-out, a ``PowerObserver``, and a ``ShutdownCoordinator`` into one
 /// runnable daemon — the object `earsd`'s `main` constructs and runs.
 ///
 /// This is integration/wiring only: every real behavior already lives in the
@@ -57,6 +58,11 @@ public actor EarsDaemon {
   private let log: @Sendable (String) -> Void
 
   private let captureActors: [SourceID: CaptureActor]
+  /// The producer→subscriber bridge for live-feed events: every
+  /// ``CaptureActor`` and the ``SessionRegistry`` publish into it from
+  /// construction on, and ``start()`` attaches the socket server's fan-out
+  /// once the listener is bound (see ``EventBus``'s lifetime rationale).
+  private let eventBus: EventBus
   private var controlSocketServer: ControlSocketServer?
   private var controlServerRunTask: Task<Void, Never>?
   private var powerObserver: PowerObserver?
@@ -79,6 +85,10 @@ public actor EarsDaemon {
     self.configuration = configuration
     self.clock = clock
     self.log = log
+
+    let eventBus = EventBus()
+    self.eventBus = eventBus
+    let eventSink: EventSink = { event in await eventBus.publish(event) }
 
     var actors: [SourceID: CaptureActor] = [:]
     for descriptor in configuration.sources {
@@ -109,7 +119,8 @@ public actor EarsDaemon {
         encoder: encoder,
         indexAppender: indexAppender,
         vad: configuration.vad,
-        clock: clock)
+        clock: clock,
+        eventSink: eventSink)
     }
     self.captureActors = actors
   }
@@ -137,7 +148,8 @@ public actor EarsDaemon {
     let sessions = SessionRegistry(
       dataRoot: configuration.dataRoot,
       knownSourceIDs: { [captureActors] in Set(captureActors.keys) },
-      clock: clock)
+      clock: clock,
+      eventSink: { [eventBus] event in await eventBus.publish(event) })
     let controlServer = ControlServer(
       captureActors: captureActors,
       sessions: sessions,
@@ -155,6 +167,12 @@ public actor EarsDaemon {
     controlSocketServer = socketServer
     controlServerRunTask = Task { await socketServer.run() }
 
+    // Only now does a pub/sub consumer exist: route every event published by
+    // the capture actors / session registry into the socket's fan-out. Events
+    // published before this line (during source startup) were dropped by
+    // design — no subscriber could have been connected yet anyway.
+    await eventBus.attach { event in await socketServer.publish(event) }
+
     let observer = PowerObserver(captureActors: captureActors)
     await observer.startObserving()
     powerObserver = observer
@@ -165,6 +183,10 @@ public actor EarsDaemon {
   /// source's in-progress chunk is flushed and indexed (``CaptureActor/stop()``'s
   /// contract) before this returns.
   public func stop() async {
+    // Detach the event fan-out first so no capture actor's publish races the
+    // socket server's teardown; events published during shutdown are dropped
+    // (the bus's documented unattached behavior).
+    await eventBus.detach()
     if let controlSocketServer {
       await controlSocketServer.shutdown()
     }
@@ -192,5 +214,15 @@ public actor EarsDaemon {
       statuses[id] = await actor.status()
     }
     return statuses
+  }
+
+  /// The socket server's current subscriber count — a test-only seam so an
+  /// end-to-end test can wait for its `subscribe` to be registered before
+  /// triggering the events it expects to receive (the same handshake
+  /// `EarsIPCTests/NetworkTransportIntegrationTests` does against the server
+  /// it owns directly).
+  func subscriberCountForTesting() async -> Int {
+    guard let controlSocketServer else { return 0 }
+    return await controlSocketServer.subscriberCount
   }
 }

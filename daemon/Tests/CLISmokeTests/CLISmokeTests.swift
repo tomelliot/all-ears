@@ -540,6 +540,34 @@ struct CLISmokeTests {
     #expect(run.result.stderr.contains("at least one source is required"))
   }
 
+  @Test("ears status --verbose traces the socket resolution and request/reply exchange to stderr")
+  func earsStatusVerboseTracesExchange() throws {
+    let temp = TempDirectory()
+    let configPath = temp.write(
+      """
+      data_root = "\(temp.url.path)/data"
+
+      [earsd]
+      source = []
+      """,
+      named: "config.toml"
+    )
+
+    let run = try Self.withRunningDaemon(configPath: configPath) { socketPath in
+      try Self.runEars(
+        ["status", "--config", configPath, "--json", "--verbose"],
+        environment: ["EARS_SOCKET_PATH": socketPath])
+    }
+    #expect(run.socketBecameReady)
+    #expect(run.result.exitCode == 0)
+    // The trace goes to stderr only; stdout stays the command's real output.
+    #expect(run.result.stdout.contains("\"uptime_s\""))
+    #expect(!run.result.stdout.contains("ears[debug]"))
+    #expect(run.result.stderr.contains("ears[debug]: resolved control socket path:"))
+    #expect(run.result.stderr.contains("ears[debug]: sending request: {\"cmd\":\"status\"}"))
+    #expect(run.result.stderr.contains("ears[debug]: received reply:"))
+  }
+
   @Test("ears session list returns an empty list from a fresh live earsd")
   func earsSessionListAgainstLiveDaemon() throws {
     let temp = TempDirectory()

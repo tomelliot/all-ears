@@ -149,4 +149,61 @@ struct EarsDaemonTests {
       _ = try await ControlSocketClient.connect(toPath: socketPath)
     }
   }
+
+  @Test("a subscribed client receives session open/close events end to end")
+  func endToEndSessionEvents() async throws {
+    let dataRoot = try makeDataRoot()
+    let socketPath = tempSocketPath()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_000))
+
+    let configuration = EarsDaemonConfiguration(
+      sources: [makeDescriptor(id: "mic", sourceClass: .mic)],
+      dataRoot: dataRoot,
+      socketPath: socketPath
+    )
+
+    // An empty capture script: the mic source starts and idles, so the only
+    // live-feed traffic is the session lifecycle this test drives.
+    let daemon = try EarsDaemon(
+      configuration: configuration,
+      backendFactory: { descriptor in
+        SyntheticCaptureBackend(source: descriptor.id, buffers: [])
+      },
+      clock: clock
+    )
+    try await daemon.start()
+
+    let watcher = try await ControlSocketClient.connect(toPath: socketPath)
+    let events = try await watcher.subscribe(SubscribeRequest(events: [.session], sources: []))
+    // Wait until the server has registered the subscription before driving
+    // the lifecycle, else the events could fan out to nobody.
+    while await daemon.subscriberCountForTesting() == 0 { await Task.yield() }
+
+    let controller = try await ControlSocketClient.connect(toPath: socketPath)
+    let openReply = try await controller.send(
+      .sessionOpen(sources: ["mic"], slug: "standup", start: nil, vocab: nil),
+      expecting: SessionOpenData.self)
+    guard case .success(let opened) = openReply else {
+      Issue.record("expected a successful session.open reply, got \(openReply)")
+      return
+    }
+    let closeReply = try await controller.send(
+      .sessionClose(id: opened.id), expecting: EmptyData.self)
+    #expect(closeReply == .success(EmptyData()))
+    await controller.close()
+
+    var received: [EarsEvent] = []
+    for await event in events {
+      received.append(event)
+      if received.count == 2 { break }
+    }
+    #expect(
+      received == [
+        .session(id: opened.id, state: .open),
+        .session(id: opened.id, state: .closed),
+      ])
+
+    await watcher.close()
+    await daemon.stop()
+  }
 }

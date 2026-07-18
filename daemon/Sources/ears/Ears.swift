@@ -39,17 +39,25 @@ struct ConfigOptions: ParsableArguments {
 }
 
 /// Options every daemon-facing subcommand shares: which config to resolve
-/// the socket path from (via ``ConfigOptions``), and whether to emit raw
-/// JSON instead of a human-readable summary. `--json` per
-/// `docs/specs/capture-daemon.md`: "Output is human-readable by default,
-/// `--json` for scripting."
+/// the socket path from (via ``ConfigOptions``), whether to emit raw JSON
+/// instead of a human-readable summary, and whether to trace the
+/// client↔daemon exchange. `--json` per `docs/specs/capture-daemon.md`:
+/// "Output is human-readable by default, `--json` for scripting."
 struct ClientOptions: ParsableArguments {
   @OptionGroup var configOptions: ConfigOptions
 
   @Flag(name: .customLong("json"), help: "Emit raw JSON instead of human-readable output.")
   var json = false
 
+  @Flag(
+    name: [.customShort("v"), .customLong("verbose")],
+    help: "Trace socket resolution, requests, and replies to stderr (see DebugLog).")
+  var verbose = false
+
   var config: String? { configOptions.config }
+
+  /// The subcommand's ``DebugLog``, built from `--verbose`.
+  var debug: DebugLog { DebugLog(enabled: verbose) }
 }
 
 // MARK: - config show / path
@@ -119,10 +127,13 @@ struct StatusCommand: AsyncParsableCommand {
   @OptionGroup var options: ClientOptions
 
   func run() async throws {
-    guard let client = await ControlClientRuntime.connect(configFlag: options.config) else {
+    let debug = options.debug
+    guard let client = await ControlClientRuntime.connect(configFlag: options.config, debug: debug)
+    else {
       throw ExitCode(1)
     }
-    let response = try await client.send(.status, expecting: StatusData.self)
+    let response = try await ControlClientRuntime.send(
+      .status, expecting: StatusData.self, via: client, debug: debug)
     await client.close()
     let code = OutputFormatting.emit(
       response, json: options.json, humanSuccess: OutputFormatting.humanStatus)
@@ -146,10 +157,13 @@ struct SourcesListCommand: AsyncParsableCommand {
   @OptionGroup var options: ClientOptions
 
   func run() async throws {
-    guard let client = await ControlClientRuntime.connect(configFlag: options.config) else {
+    let debug = options.debug
+    guard let client = await ControlClientRuntime.connect(configFlag: options.config, debug: debug)
+    else {
       throw ExitCode(1)
     }
-    let response = try await client.send(.sourcesList, expecting: SourcesListData.self)
+    let response = try await ControlClientRuntime.send(
+      .sourcesList, expecting: SourcesListData.self, via: client, debug: debug)
     await client.close()
     let code = OutputFormatting.emit(
       response, json: options.json, humanSuccess: OutputFormatting.humanSourcesList)
@@ -165,11 +179,14 @@ struct SourcesEnableCommand: AsyncParsableCommand {
   @Argument(help: "Source id, e.g. mic.") var source: String
 
   func run() async throws {
-    guard let client = await ControlClientRuntime.connect(configFlag: options.config) else {
+    let debug = options.debug
+    guard let client = await ControlClientRuntime.connect(configFlag: options.config, debug: debug)
+    else {
       throw ExitCode(1)
     }
-    let response = try await client.send(
-      .sourcesEnable(source: SourceID(source)), expecting: EmptyData.self)
+    let response = try await ControlClientRuntime.send(
+      .sourcesEnable(source: SourceID(source)), expecting: EmptyData.self, via: client,
+      debug: debug)
     await client.close()
     let code = OutputFormatting.emit(
       response, json: options.json, humanSuccess: OutputFormatting.humanEmpty)
@@ -185,11 +202,14 @@ struct SourcesDisableCommand: AsyncParsableCommand {
   @Argument(help: "Source id, e.g. mic.") var source: String
 
   func run() async throws {
-    guard let client = await ControlClientRuntime.connect(configFlag: options.config) else {
+    let debug = options.debug
+    guard let client = await ControlClientRuntime.connect(configFlag: options.config, debug: debug)
+    else {
       throw ExitCode(1)
     }
-    let response = try await client.send(
-      .sourcesDisable(source: SourceID(source)), expecting: EmptyData.self)
+    let response = try await ControlClientRuntime.send(
+      .sourcesDisable(source: SourceID(source)), expecting: EmptyData.self, via: client,
+      debug: debug)
     await client.close()
     let code = OutputFormatting.emit(
       response, json: options.json, humanSuccess: OutputFormatting.humanEmpty)
@@ -217,12 +237,15 @@ struct SessionOpenCommand: AsyncParsableCommand {
   var vocab: String?
 
   func run() async throws {
-    guard let client = await ControlClientRuntime.connect(configFlag: options.config) else {
+    let debug = options.debug
+    guard let client = await ControlClientRuntime.connect(configFlag: options.config, debug: debug)
+    else {
       throw ExitCode(1)
     }
     let request = ControlRequest.sessionOpen(
       sources: sources.map { SourceID($0) }, slug: slug, start: nil, vocab: vocab)
-    let response = try await client.send(request, expecting: SessionOpenData.self)
+    let response = try await ControlClientRuntime.send(
+      request, expecting: SessionOpenData.self, via: client, debug: debug)
     await client.close()
     let code = OutputFormatting.emit(
       response, json: options.json, humanSuccess: OutputFormatting.humanSessionOpen)
@@ -238,10 +261,13 @@ struct SessionCloseCommand: AsyncParsableCommand {
   @Argument(help: "Session id.") var id: String
 
   func run() async throws {
-    guard let client = await ControlClientRuntime.connect(configFlag: options.config) else {
+    let debug = options.debug
+    guard let client = await ControlClientRuntime.connect(configFlag: options.config, debug: debug)
+    else {
       throw ExitCode(1)
     }
-    let response = try await client.send(.sessionClose(id: id), expecting: EmptyData.self)
+    let response = try await ControlClientRuntime.send(
+      .sessionClose(id: id), expecting: EmptyData.self, via: client, debug: debug)
     await client.close()
     let code = OutputFormatting.emit(
       response, json: options.json, humanSuccess: OutputFormatting.humanEmpty)
@@ -256,10 +282,13 @@ struct SessionListCommand: AsyncParsableCommand {
   @OptionGroup var options: ClientOptions
 
   func run() async throws {
-    guard let client = await ControlClientRuntime.connect(configFlag: options.config) else {
+    let debug = options.debug
+    guard let client = await ControlClientRuntime.connect(configFlag: options.config, debug: debug)
+    else {
       throw ExitCode(1)
     }
-    let response = try await client.send(.sessionList, expecting: SessionListData.self)
+    let response = try await ControlClientRuntime.send(
+      .sessionList, expecting: SessionListData.self, via: client, debug: debug)
     await client.close()
     let code = OutputFormatting.emit(
       response, json: options.json, humanSuccess: OutputFormatting.humanSessionList)
@@ -280,6 +309,7 @@ struct MarkCommand: AsyncParsableCommand {
   @Option(name: .customLong("source"), help: "Source id; repeatable.") var sources: [String] = []
 
   func run() async throws {
+    let debug = options.debug
     let seconds: Double
     switch DurationParsing.seconds(from: last) {
     case .success(let value):
@@ -288,13 +318,16 @@ struct MarkCommand: AsyncParsableCommand {
       ControlClientRuntime.writeStderr("error: \(error)")
       throw ExitCode(1)
     }
+    debug.log("parsed --last \(last) as \(seconds)s")
 
-    guard let client = await ControlClientRuntime.connect(configFlag: options.config) else {
+    guard let client = await ControlClientRuntime.connect(configFlag: options.config, debug: debug)
+    else {
       throw ExitCode(1)
     }
     let request = ControlRequest.mark(
       sources: sources.map { SourceID($0) }, slug: slug, range: .lastSeconds(seconds))
-    let response = try await client.send(request, expecting: SessionOpenData.self)
+    let response = try await ControlClientRuntime.send(
+      request, expecting: SessionOpenData.self, via: client, debug: debug)
     await client.close()
     let code = OutputFormatting.emit(
       response, json: options.json, humanSuccess: OutputFormatting.humanSessionOpen)
@@ -319,22 +352,36 @@ struct WatchCommand: AsyncParsableCommand {
   /// disposition (terminate the process) is a clean-enough exit; no custom
   /// handler is needed to protect any state.
   func run() async throws {
-    guard let client = await ControlClientRuntime.connect(configFlag: options.config) else {
+    let debug = options.debug
+    guard let client = await ControlClientRuntime.connect(configFlag: options.config, debug: debug)
+    else {
       throw ExitCode(1)
     }
-    let kinds = events.split(separator: ",").compactMap { EventKind(rawValue: String($0)) }
+    let tokens = events.split(separator: ",").map(String.init)
+    let kinds = tokens.compactMap { EventKind(rawValue: $0) }
+    let unrecognized = tokens.filter { EventKind(rawValue: $0) == nil }
+    if !unrecognized.isEmpty {
+      debug.log(
+        "ignoring unrecognized event kind(s): \(unrecognized.joined(separator: ", ")) "
+          + "(known: \(EventKind.allCases.map(\.rawValue).joined(separator: ",")))")
+    }
     let request = SubscribeRequest(events: kinds, sources: sources.map { SourceID($0) })
+    debug.log("sending subscribe request: \(debug.json(request))")
 
     let stream: AsyncStream<EarsEvent>
     do {
       stream = try await client.subscribe(request)
     } catch {
+      debug.log("subscribe failed: \(error)")
       ControlClientRuntime.writeStderr("error: could not subscribe: \(error)")
       throw ExitCode(1)
     }
+    debug.log("subscribed; connection is now an event stream")
 
+    var eventCount = 0
     let encoder = JSONEncoder()
     for await event in stream {
+      eventCount += 1
       if options.json {
         if let data = try? encoder.encode(event), let line = String(data: data, encoding: .utf8) {
           print(line)
@@ -343,5 +390,8 @@ struct WatchCommand: AsyncParsableCommand {
         print(OutputFormatting.humanEvent(event))
       }
     }
+    // Reaching here means the daemon (not Ctrl-C) ended the stream — the
+    // signal that distinguishes "no events arrived" from "not connected".
+    debug.log("event stream closed by daemon after \(eventCount) event(s)")
   }
 }
