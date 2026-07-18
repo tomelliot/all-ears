@@ -1,5 +1,11 @@
 import { isCurrentEpoch } from "./epoch";
-import { liveTracks, setTrackSink, type TrackSink } from "./rtc-hook";
+import {
+  liveTracks,
+  setEncodedAudioListener,
+  setTrackSink,
+  type EncodedAudioFrameLike,
+  type TrackSink,
+} from "./rtc-hook";
 import type { PlatformAdapter } from "./identity/adapter";
 import { postToIsolated, type ParticipantId, type Platform } from "./protocol";
 
@@ -7,12 +13,12 @@ import { postToIsolated, type ParticipantId, type Platform } from "./protocol";
 // one isolated pipeline. Identity resolves through the adapter, degrading to a
 // stable speaker-<n> rather than ever blocking audio.
 //
-// Each pipeline: AudioContext(16 kHz) → MediaStreamSource → pcm-16k worklet →
-// Int16 frames → a bounded ring buffer → postToIsolated. The worklet is NEVER
-// connected to ctx.destination: no playback, no feedback into the user's mic.
-
-// TEMP: live-Meet audio diagnostics to the page console. Flip off before ship.
-const EARS_DIAG = true;
+// Each pipeline: a platform-dependent frame source → downmix → resample to
+// 16 kHz mono → Int16 frames → a bounded ring buffer → postToIsolated. Two
+// frame sources feed the same downstream logic (see §Frame sources below):
+// MediaStreamTrackProcessor for Zoom/Teams, and an AudioDecoder fed by
+// rtc-hook.ts's Meet encoded-audio tee for Meet. Neither is ever connected to
+// an AudioContext destination: no playback, no feedback into the user's mic.
 
 const TARGET_SAMPLE_RATE = 16000;
 // Bounded per-participant ring buffer. ~10 frames/s; 50 frames ≈ 5 s of slack
@@ -84,11 +90,12 @@ function startPipeline(
 
   const displayName = cfg.adapter?.displayName?.(participantId);
 
-  // Read decoded audio frames straight off the track (MediaStreamTrackProcessor)
-  // — no AudioContext, no playing-element requirement. This sidesteps the
-  // remote-track→WebAudio silence bug that a hidden <audio> mirror only
-  // unreliably worked around.
-  const capture = new TrackCapture(track, participantId, () => pipeline.generation);
+  // Platform selects the frame source; the standard MediaStreamTrackProcessor
+  // path must never run on Meet (no frames ever reach it there) and the Meet
+  // tee must never run elsewhere (it would double-capture where the standard
+  // path already works).
+  const makeSource = cfg.platform === "meet" ? meetDecodeSource(track) : trackProcessorSource(track);
+  const capture = new TrackCapture(participantId, () => pipeline.generation, makeSource, () => stopPipeline(track));
   const pipeline: Pipeline = {
     participantId,
     generation,
@@ -143,15 +150,25 @@ function resolveIdentity(
   return assigned;
 }
 
-// ── Capture: MediaStreamTrackProcessor → 16 kHz mono pcm_s16le ───────────────
-//
-// Read decoded audio frames straight off the MediaStreamTrack (WebCodecs
-// breakout box). Unlike a WebAudio MediaStreamAudioSourceNode, this needs no
-// AudioContext and no playing media element, so it doesn't hit the remote-track
-// silence bug (verified: on real Meet the WebAudio tap read digital silence
-// even with a playing mirror; the breakout box reads the true audio).
+// ── Shared pipeline: frame source → 16 kHz mono pcm_s16le ───────────────────
 
 const FRAME_SAMPLES = 1600; // 100 ms @ 16 kHz → ~10 frames/s
+
+// Debug instrumentation for live-call verification — off by default, no
+// rebuild needed to use. Enable per-tab from the page's DevTools console:
+//   localStorage.setItem("__earsDebugAudio", "1")   // then reload the tab
+//   localStorage.removeItem("__earsDebugAudio")     // to turn back off
+// Adds a throttled peak/RMS log per participant (proves PCM is non-silent,
+// not just flowing) and dumps recent frame sizes/timestamps if AudioDecoder
+// errors (WebCodecs gives no other way to correlate an error to a frame).
+function debugAudioEnabled(): boolean {
+  try {
+    return localStorage.getItem("__earsDebugAudio") === "1";
+  } catch {
+    return false;
+  }
+}
+const DEBUG_AUDIO = debugAudioEnabled();
 
 // WebCodecs AudioData surface we use (avoids ambient-declaration conflicts).
 interface AudioDataLike {
@@ -162,140 +179,58 @@ interface AudioDataLike {
   copyTo(dest: Float32Array, options: { planeIndex: number; format?: string }): void;
   close(): void;
 }
-type TrackProcessorCtor = new (init: { track: MediaStreamTrack }) => {
-  readable: ReadableStream<AudioDataLike>;
-};
 
-/** One track → its own read loop, resampler, ring buffer, and PCM emitter. */
+interface FrameSource {
+  /** Begin producing frames. Called at most once. */
+  start(): void;
+  /** Stop producing frames and release resources. Idempotent. */
+  stop(): void;
+}
+
+type FrameSourceFactory = (
+  onFrame: (frame: AudioDataLike) => void,
+  onFatalError: (reason: string) => void,
+) => FrameSource;
+
+/** One track → its own frame source, resampler, ring buffer, and PCM emitter. */
 class TrackCapture {
   private stopped = false;
-  private reader?: ReadableStreamDefaultReader<AudioDataLike>;
   private resampler?: LinearResampler;
   private readonly acc: number[] = []; // 16 kHz mono float, awaiting a full frame
   private readonly ring: RingBuffer;
-  private unmuteHandler?: () => void;
-  private frameCount = 0;
-  // diagnostics
-  private diagSum = 0;
-  private diagCount = 0;
-  private diagPeak = 0;
+  private source?: FrameSource;
+  // Debug-only state — see DEBUG_AUDIO above.
+  private vSum = 0;
+  private vPeak = 0;
+  private vCount = 0;
 
   constructor(
-    private readonly track: MediaStreamTrack,
     private readonly participantId: ParticipantId,
     private readonly currentGeneration: () => number,
+    private readonly makeSource: FrameSourceFactory,
+    private readonly onFatal: () => void,
   ) {
     this.ring = new RingBuffer(RING_CAPACITY, participantId);
   }
 
   start(): void {
-    console.log(
-      `[ears/diag] ${this.participantId} start(): muted=${this.track.muted} enabled=${this.track.enabled} readyState=${this.track.readyState}`,
+    this.source = this.makeSource(
+      (frame) => this.consume(frame),
+      (reason) => this.fail(reason),
     );
-    if (this.track.muted) {
-      // A MediaStreamTrackProcessor constructed on a MUTED track never delivers
-      // frames — even after the track unmutes — and a track allows only one
-      // processor ever. So defer construction until the track's first unmute.
-      const onUnmute = () => {
-        this.track.removeEventListener("unmute", onUnmute);
-        this.unmuteHandler = undefined;
-        console.log(`[ears/diag] ${this.participantId} unmute → beginning capture`);
-        if (!this.stopped) this.begin();
-      };
-      this.unmuteHandler = onUnmute;
-      this.track.addEventListener("unmute", onUnmute);
-      return;
-    }
-    this.begin();
-  }
-
-  private begin(): void {
-    const Ctor = (globalThis as unknown as { MediaStreamTrackProcessor?: TrackProcessorCtor })
-      .MediaStreamTrackProcessor;
-    if (!Ctor) {
-      console.error("[ears] MediaStreamTrackProcessor unavailable — cannot capture audio");
-      return;
-    }
-    try {
-      this.reader = new Ctor({ track: this.track }).readable.getReader();
-    } catch (err) {
-      console.error(`[ears] ${this.participantId} failed to construct processor:`, err);
-      return;
-    }
-    console.log(`[ears/diag] ${this.participantId} processor constructed (muted=${this.track.muted}); reading…`);
-    if (EARS_DIAG) this.webAudioProbe();
-    void this.loop();
-  }
-
-  // Compare a parallel WebAudio tap on the same track, to tell whether Meet
-  // routes decoded audio through the raw track at all (both taps see it), only
-  // one path works, or neither (Meet's NetEQ bypasses the track).
-  private webAudioProbe(): void {
-    try {
-      const ac = new AudioContext();
-      const src = ac.createMediaStreamSource(new MediaStream([this.track]));
-      const an = ac.createAnalyser();
-      src.connect(an);
-      const d = new Float32Array(an.fftSize);
-      let n = 0;
-      const iv = setInterval(() => {
-        an.getFloatTimeDomainData(d);
-        let peak = 0;
-        for (const v of d) if (Math.abs(v) > peak) peak = Math.abs(v);
-        console.log(`[ears/diag] ${this.participantId} WEBAUDIO peak=${peak.toFixed(4)} state=${ac.state} (${peak > 0.001 ? "AUDIO" : "silent"})`);
-        if (++n > 20 || this.stopped) {
-          clearInterval(iv);
-          ac.close().catch(() => {});
-        }
-      }, 1000);
-    } catch (err) {
-      console.warn(`[ears/diag] ${this.participantId} webaudio probe failed:`, err);
-    }
+    this.source.start();
   }
 
   stop(): void {
+    if (this.stopped) return;
     this.stopped = true;
-    if (this.unmuteHandler) {
-      this.track.removeEventListener("unmute", this.unmuteHandler);
-      this.unmuteHandler = undefined;
-    }
-    this.reader?.cancel().catch(() => {});
+    this.source?.stop();
   }
 
-  private async loop(): Promise<void> {
-    const reader = this.reader!;
-    let first = true;
-    while (!this.stopped) {
-      let value: AudioDataLike | undefined;
-      let done = false;
-      try {
-        ({ done, value } = await reader.read());
-      } catch (err) {
-        console.error(`[ears] ${this.participantId} reader.read() threw:`, err);
-        break;
-      }
-      if (done) {
-        console.warn(`[ears] ${this.participantId} track reader closed (done=true)`);
-        break;
-      }
-      if (!value) continue;
-      this.frameCount++;
-      if (first) {
-        first = false;
-        console.log(
-          `[ears/diag] ${this.participantId} FIRST frame: fmt=${value.format} rate=${value.sampleRate} ch=${value.numberOfChannels} n=${value.numberOfFrames}`,
-        );
-      } else if (this.frameCount % 200 === 0) {
-        console.log(`[ears/diag] ${this.participantId} ${this.frameCount} frames read`);
-      }
-      try {
-        this.consume(value);
-      } catch (err) {
-        console.error(`[ears] ${this.participantId} consume() threw:`, err);
-      } finally {
-        value.close();
-      }
-    }
+  private fail(reason: string): void {
+    console.error(`[ears] ${this.participantId} capture failed: ${reason}`);
+    this.stop();
+    this.onFatal();
   }
 
   private consume(frame: AudioDataLike): void {
@@ -322,7 +257,7 @@ class TrackCapture {
       }
     }
 
-    if (EARS_DIAG) this.diag(mono, inRate, nCh, format);
+    if (DEBUG_AUDIO) this.debugLog(mono, inRate);
 
     // Resample native → 16 kHz and slice into fixed frames.
     if (!this.resampler) this.resampler = new LinearResampler(inRate, TARGET_SAMPLE_RATE);
@@ -345,31 +280,238 @@ class TrackCapture {
     }
   }
 
-  private diag(mono: Float32Array, inRate: number, nCh: number, format: string): void {
+  // Throttled to ~1 log/s/participant — frame counts alone don't prove the
+  // samples aren't all-zero, so this checks actual amplitude. DEBUG_AUDIO-gated.
+  private debugLog(mono: Float32Array, inRate: number): void {
     for (let i = 0; i < mono.length; i++) {
       const a = Math.abs(mono[i]!);
-      if (a > this.diagPeak) this.diagPeak = a;
-      this.diagSum += mono[i]! * mono[i]!;
+      if (a > this.vPeak) this.vPeak = a;
+      this.vSum += mono[i]! * mono[i]!;
     }
-    this.diagCount += mono.length;
-    if (this.diagCount >= inRate) {
-      const rms = Math.sqrt(this.diagSum / this.diagCount);
+    this.vCount += mono.length;
+    if (this.vCount >= inRate) {
+      const rms = Math.sqrt(this.vSum / this.vCount);
       console.log(
-        `[ears/diag] ${this.participantId} track-rms=${rms.toFixed(5)} peak=${this.diagPeak.toFixed(4)} ` +
-          `(${this.diagPeak > 0.001 ? "AUDIO" : "silent"}) rate=${inRate} ch=${nCh} fmt=${format}`,
+        `[ears/debug] ${this.participantId} rms=${rms.toFixed(4)} peak=${this.vPeak.toFixed(4)} ` +
+          `(${this.vPeak > 0.005 ? "AUDIO" : "silent"})`,
       );
-      this.diagSum = 0;
-      this.diagCount = 0;
-      this.diagPeak = 0;
+      this.vSum = 0;
+      this.vPeak = 0;
+      this.vCount = 0;
     }
   }
 }
 
+// ── Standard path: MediaStreamTrackProcessor (Zoom, Teams) ─────────────────
+//
+// Read decoded audio frames straight off the MediaStreamTrack (WebCodecs
+// breakout box). Unlike a WebAudio MediaStreamAudioSourceNode, this needs no
+// AudioContext and no playing media element, so it doesn't hit the remote-track
+// silence bug (verified: on real Meet the WebAudio tap read digital silence
+// even with a playing mirror; the breakout box reads the true audio — though
+// on Meet even this reads nothing at all, see MeetDecodeSource below).
+
+type TrackProcessorCtor = new (init: { track: MediaStreamTrack }) => {
+  readable: ReadableStream<AudioDataLike>;
+};
+
+class TrackProcessorSource implements FrameSource {
+  private stopped = false;
+  private reader?: ReadableStreamDefaultReader<AudioDataLike>;
+  private unmuteHandler?: () => void;
+
+  constructor(
+    private readonly track: MediaStreamTrack,
+    private readonly onFrame: (frame: AudioDataLike) => void,
+    private readonly onFatalError: (reason: string) => void,
+  ) {}
+
+  start(): void {
+    if (this.track.muted) {
+      // A MediaStreamTrackProcessor constructed on a MUTED track never delivers
+      // frames — even after the track unmutes — and a track allows only one
+      // processor ever. So defer construction until the track's first unmute.
+      const onUnmute = () => {
+        this.track.removeEventListener("unmute", onUnmute);
+        this.unmuteHandler = undefined;
+        if (!this.stopped) this.begin();
+      };
+      this.unmuteHandler = onUnmute;
+      this.track.addEventListener("unmute", onUnmute);
+      return;
+    }
+    this.begin();
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.unmuteHandler) {
+      this.track.removeEventListener("unmute", this.unmuteHandler);
+      this.unmuteHandler = undefined;
+    }
+    this.reader?.cancel().catch(() => {});
+  }
+
+  private begin(): void {
+    const Ctor = (globalThis as unknown as { MediaStreamTrackProcessor?: TrackProcessorCtor })
+      .MediaStreamTrackProcessor;
+    if (!Ctor) {
+      this.onFatalError("MediaStreamTrackProcessor unavailable");
+      return;
+    }
+    try {
+      this.reader = new Ctor({ track: this.track }).readable.getReader();
+    } catch (err) {
+      this.onFatalError(`failed to construct processor: ${String(err)}`);
+      return;
+    }
+    void this.loop();
+  }
+
+  private async loop(): Promise<void> {
+    const reader = this.reader!;
+    while (!this.stopped) {
+      let done = false;
+      let value: AudioDataLike | undefined;
+      try {
+        ({ done, value } = await reader.read());
+      } catch (err) {
+        if (!this.stopped) this.onFatalError(`reader.read() threw: ${String(err)}`);
+        return;
+      }
+      if (done) {
+        if (!this.stopped) this.onFatalError("track reader closed");
+        return;
+      }
+      if (!value) continue;
+      try {
+        this.onFrame(value);
+      } finally {
+        value.close();
+      }
+    }
+  }
+}
+
+function trackProcessorSource(track: MediaStreamTrack): FrameSourceFactory {
+  return (onFrame, onFatalError) => new TrackProcessorSource(track, onFrame, onFatalError);
+}
+
+// ── Meet path: AudioDecoder fed by rtc-hook.ts's encoded-audio tee ─────────
+//
+// Standard path never works on Meet (confirmed empirically — see rtc-hook.ts
+// and specs/extension.md §Audio extraction). Readiness here is "rtc-hook.ts
+// has a tee'd branch for this track and is willing to dispatch frames to us",
+// not track-mute state: once createEncodedStreams() is in play, Meet's own
+// decode pipeline owns track.muted and it stops reflecting anything
+// meaningful for our purposes.
+
+interface EncodedAudioChunkInit {
+  type: "key" | "delta";
+  timestamp: number;
+  data: ArrayBuffer;
+}
+type EncodedAudioChunkCtor = new (init: EncodedAudioChunkInit) => unknown;
+
+interface AudioDecoderLike {
+  configure(config: { codec: string; sampleRate: number; numberOfChannels: number }): void;
+  decode(chunk: unknown): void;
+  close(): void;
+}
+type AudioDecoderCtor = new (init: {
+  output: (frame: AudioDataLike) => void;
+  error: (err: Error) => void;
+}) => AudioDecoderLike;
+
+class MeetDecodeSource implements FrameSource {
+  private stopped = false;
+  private decoder?: AudioDecoderLike;
+  private chunkCtor?: EncodedAudioChunkCtor;
+  // Debug-only forensics — see DEBUG_AUDIO above. AudioDecoder's error
+  // callback gets a generic DOMException with no reference to which chunk
+  // failed, so keep a small rolling window of what we recently fed it to
+  // correlate by eye after the fact.
+  private recentFrames: { byteLength: number; timestamp: number }[] = [];
+
+  constructor(
+    private readonly track: MediaStreamTrack,
+    private readonly onFrame: (frame: AudioDataLike) => void,
+    private readonly onFatalError: (reason: string) => void,
+  ) {}
+
+  start(): void {
+    const DecoderCtor = (globalThis as unknown as { AudioDecoder?: AudioDecoderCtor }).AudioDecoder;
+    const ChunkCtor = (globalThis as unknown as { EncodedAudioChunk?: EncodedAudioChunkCtor }).EncodedAudioChunk;
+    if (!DecoderCtor || !ChunkCtor) {
+      // Not expected to trigger (AudioDecoder opus support confirmed on-build),
+      // but fall back cleanly: skip this participant, don't crash the hook.
+      this.onFatalError("AudioDecoder/EncodedAudioChunk unavailable — cannot decode Meet audio");
+      return;
+    }
+    this.chunkCtor = ChunkCtor;
+    try {
+      this.decoder = new DecoderCtor({
+        output: (frame) => this.onFrame(frame),
+        error: (err) => {
+          if (DEBUG_AUDIO) {
+            console.error(
+              `[ears/debug] ${this.track.id} decoder error — last ${this.recentFrames.length} frames fed:`,
+              this.recentFrames,
+            );
+          }
+          this.onFatalError(`AudioDecoder error: ${err.message ?? String(err)}`);
+        },
+      });
+      this.decoder.configure({ codec: "opus", sampleRate: 48000, numberOfChannels: 1 });
+    } catch (err) {
+      this.onFatalError(`failed to construct AudioDecoder: ${String(err)}`);
+      return;
+    }
+    setEncodedAudioListener(this.track, (frame) => this.onEncodedFrame(frame));
+  }
+
+  stop(): void {
+    if (this.stopped) return;
+    this.stopped = true;
+    setEncodedAudioListener(this.track, null);
+    try {
+      this.decoder?.close();
+    } catch {
+      // already closed
+    }
+  }
+
+  private onEncodedFrame(frame: EncodedAudioFrameLike): void {
+    if (this.stopped || !this.decoder || !this.chunkCtor) return;
+    if (DEBUG_AUDIO) {
+      this.recentFrames.push({ byteLength: frame.data.byteLength, timestamp: frame.timestamp });
+      if (this.recentFrames.length > 8) this.recentFrames.shift();
+    }
+    try {
+      // Opus has no inter-frame prediction — every chunk is a keyframe.
+      this.decoder.decode(new this.chunkCtor({ type: "key", timestamp: frame.timestamp, data: frame.data }));
+    } catch (err) {
+      if (DEBUG_AUDIO) {
+        console.error(
+          `[ears/debug] ${this.track.id} decode() threw on frame byteLength=${frame.data.byteLength} timestamp=${frame.timestamp} — last ${this.recentFrames.length} frames:`,
+          this.recentFrames,
+        );
+      }
+      this.onFatalError(`decode() threw: ${String(err)}`);
+    }
+  }
+}
+
+function meetDecodeSource(track: MediaStreamTrack): FrameSourceFactory {
+  return (onFrame, onFatalError) => new MeetDecodeSource(track, onFrame, onFatalError);
+}
+
 /**
  * Streaming linear resampler (inRate → outRate), phase-continuous across chunks.
- * Linear interpolation is adequate for speech at these rates.
+ * Linear interpolation is adequate for speech at these rates. Shared unmodified
+ * by every frame source — TrackCapture doesn't know or care where a frame came from.
  */
-class LinearResampler {
+export class LinearResampler {
   private readonly step: number; // input samples advanced per output sample
   private cursor = 0; // fractional read position within the pending buffer
   private buf = new Float32Array(0);
@@ -406,12 +548,12 @@ export function __devCaptureStream(stream: MediaStream, participantId: Participa
   const track = stream.getAudioTracks()[0];
   if (!track) return;
   postToIsolated({ kind: "participant-joined", platform: cfg?.platform ?? "meet", participantId, generation: 1 });
-  new TrackCapture(track, participantId, () => 1).start();
+  new TrackCapture(participantId, () => 1, trackProcessorSource(track), () => {}).start();
 }
 
 // Bounded ring buffer, drop-oldest, with a logged dropped counter — never grows
 // unbounded. Drop-oldest keeps the freshest audio when the consumer stalls.
-class RingBuffer {
+export class RingBuffer {
   private q: Int16Array[] = [];
   private dropped = 0;
   constructor(
