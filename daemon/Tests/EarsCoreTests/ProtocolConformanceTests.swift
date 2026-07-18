@@ -97,6 +97,47 @@ struct NullConformanceTests {
   }
 }
 
+@Suite("FakeLLMBackend")
+struct FakeLLMBackendTests {
+  @Test("default fake echoes the dynamic suffix and records the prompt")
+  func echoesByDefault() async throws {
+    let backend = FakeLLMBackend()
+    let prompt = LLMPrompt(stablePrefix: "system prompt\n\n", dynamicSuffix: "raw transcript text")
+    let result = try await backend.complete(prompt)
+    #expect(result.text == "raw transcript text")
+    let received = await backend.receivedPrompts
+    #expect(received == [prompt])
+  }
+
+  @Test("scripted results are returned in order")
+  func scriptedResults() async throws {
+    let backend = FakeLLMBackend(results: [
+      .success(LLMCompletionResult(text: "first")),
+      .success(LLMCompletionResult(text: "second")),
+    ])
+    let first = try await backend.complete(LLMPrompt(stablePrefix: "", dynamicSuffix: "a"))
+    let second = try await backend.complete(LLMPrompt(stablePrefix: "", dynamicSuffix: "b"))
+    #expect(first.text == "first")
+    #expect(second.text == "second")
+  }
+
+  @Test("a scripted failure propagates as a thrown LLMBackendError")
+  func scriptedFailure() async throws {
+    let backend = FakeLLMBackend(results: [
+      .failure(LLMBackendError.nonZeroExit(code: 1, stderr: "boom"))
+    ])
+    await #expect(throws: LLMBackendError.nonZeroExit(code: 1, stderr: "boom")) {
+      try await backend.complete(LLMPrompt(stablePrefix: "", dynamicSuffix: "a"))
+    }
+  }
+
+  @Test("info is exposed unchanged")
+  func infoExposed() {
+    let backend = FakeLLMBackend(info: LLMBackendInfo(name: "fake", model: "test-model"))
+    #expect(backend.info == LLMBackendInfo(name: "fake", model: "test-model"))
+  }
+}
+
 @Suite("ManualClock")
 struct ManualClockTests {
   @Test("stays fixed until advanced, never touching wall time")
