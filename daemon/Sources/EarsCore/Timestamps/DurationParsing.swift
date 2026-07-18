@@ -1,18 +1,21 @@
 /// Parses a duration string like `"30m"` or `"2h"` (the shape
-/// `docs/specs/capture-daemon.md`'s `ears mark --last 30m` uses) into
-/// seconds, for `mark`'s `MarkRange.lastSeconds` wire field.
+/// `docs/specs/capture-daemon.md`'s `ears mark --last 30m` and
+/// `docs/specs/transcribe.md`'s `transcribe --last 20m` both use) into
+/// seconds.
 ///
 /// Pure and dependency-free, so it's unit-tested directly rather than only
-/// through a spawned `ears` process.
-enum DurationParsing {
+/// through a spawned process. Lives in `EarsCore` (promoted from `ears`,
+/// which had the only caller until `transcribe` needed the same `--last`
+/// parsing) so neither tool duplicates it.
+public enum DurationParsing {
   /// Recognised unit suffixes, in the order tried: `s` (seconds), `m`
   /// (minutes), `h` (hours). A bare integer with no suffix is treated as
   /// seconds, matching the least-surprising reading of a plain number.
-  enum ParseError: Error, Equatable, CustomStringConvertible {
+  public enum ParseError: Error, Equatable, CustomStringConvertible {
     case empty
     case malformed(String)
 
-    var description: String {
+    public var description: String {
       switch self {
       case .empty:
         return "duration is empty"
@@ -22,7 +25,7 @@ enum DurationParsing {
     }
   }
 
-  static func seconds(from duration: String) -> Result<Double, ParseError> {
+  public static func seconds(from duration: String) -> Result<Double, ParseError> {
     guard !duration.isEmpty else { return .failure(.empty) }
 
     let unit = duration.last!

@@ -1,6 +1,6 @@
 import Testing
 
-@testable import ears
+@testable import EarsCore
 
 @Suite("DurationParsing")
 struct DurationParsingTests {
