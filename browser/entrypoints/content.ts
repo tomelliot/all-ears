@@ -1,14 +1,25 @@
 import { defineContentScript } from "#imports";
 import { browser } from "wxt/browser";
-import { isMainEnvelope, type MainMessage, type Platform, type PortMessage } from "../lib/protocol";
+import { CAPTURE_ENABLED_KEY, resolveCaptureToggleState } from "../lib/capture-toggle";
+import { ReconnectingPort } from "../lib/pcm-port";
+import {
+  isMainEnvelope,
+  postToMain,
+  type MainMessage,
+  type Platform,
+} from "../lib/protocol";
 
 // Isolated-world relay. The MAIN-world hook (hook.content.ts) generates PCM and
 // lifecycle events and posts them across the world boundary; this script is the
 // only context with chrome.runtime, so it:
 //   1. publishes the worklet's extension URL to the MAIN world (via the DOM,
-//      the only shared surface — window globals don't cross worlds), and
-//   2. forwards PCM frames and participant-left to the background over a
-//      long-lived port, tagging PCM with its platform for the source label.
+//      the only shared surface — window globals don't cross worlds),
+//   2. reads the capture toggle from storage.local and mirrors it (and every
+//      later change) into the MAIN world as a `capture-state` control message —
+//      the MAIN world has no storage access of its own, and
+//   3. forwards PCM frames and participant-left to the background over a
+//      long-lived port (lazily reconnected if the service worker respawns —
+//      see pcm-port.ts), tagging PCM with its platform for the source label.
 export default defineContentScript({
   matches: [
     "https://meet.google.com/*",
@@ -23,8 +34,23 @@ export default defineContentScript({
     // Hand the worklet URL to the MAIN world (it has no chrome.runtime).
     document.documentElement.dataset.earsWorklet = browser.runtime.getURL("/pcm-worklet.js");
 
+    // Mirror the persisted capture toggle into the MAIN world, now and on
+    // every change. postMessage delivery is async, so even though both content
+    // scripts run at document_start, the hook's listener is registered by the
+    // time the initial state arrives.
+    const publishToggle = (raw: unknown) =>
+      postToMain({ kind: "capture-state", enabled: resolveCaptureToggleState(raw) });
+    browser.storage.local
+      .get(CAPTURE_ENABLED_KEY)
+      .then((v) => publishToggle((v as Record<string, unknown>)[CAPTURE_ENABLED_KEY]))
+      .catch(() => publishToggle(undefined)); // unreadable ⇒ default (on)
+    browser.storage.local.onChanged?.addListener?.((changes) => {
+      const c = changes[CAPTURE_ENABLED_KEY];
+      if (c) publishToggle(c.newValue);
+    });
+
     // Dedicated PCM/lifecycle port to the background.
-    const port = browser.runtime.connect({ name: "pcm" });
+    const port = new ReconnectingPort(() => browser.runtime.connect({ name: "pcm" }));
     // participantId → platform, learned from participant-joined (which precedes
     // the participant's first PCM), so PCM frames can carry their platform.
     const platforms = new Map<string, Platform>();
@@ -37,11 +63,7 @@ export default defineContentScript({
   },
 });
 
-function relay(
-  msg: MainMessage,
-  port: ReturnType<typeof browser.runtime.connect>,
-  platforms: Map<string, Platform>,
-): void {
+function relay(msg: MainMessage, port: ReconnectingPort, platforms: Map<string, Platform>): void {
   switch (msg.kind) {
     case "participant-joined":
       platforms.set(msg.participantId, msg.platform);
@@ -49,7 +71,7 @@ function relay(
       break;
     case "participant-left":
       platforms.delete(msg.participantId);
-      post(port, { type: "left", participantId: msg.participantId });
+      port.post({ type: "left", participantId: msg.participantId });
       console.log(`[ears/relay] left ${msg.participantId} gen${msg.generation}`);
       break;
     case "status":
@@ -59,20 +81,9 @@ function relay(
       const platform = platforms.get(msg.participantId);
       if (!platform) return; // no join seen yet; drop until identity is known
       const bytes = new Uint8Array(msg.samples.buffer, msg.samples.byteOffset, msg.samples.byteLength);
-      post(port, { type: "pcm", participantId: msg.participantId, platform, b64: bytesToBase64(bytes) });
+      port.post({ type: "pcm", participantId: msg.participantId, platform, b64: bytesToBase64(bytes) });
       break;
     }
-  }
-}
-
-function post(port: ReturnType<typeof browser.runtime.connect>, msg: PortMessage): void {
-  // The port dies when the extension reloads/updates while this tab lives on
-  // ("disconnected port" / "Extension context invalidated"). Swallow it — the
-  // stale content script stops emitting; a tab reload re-wires to the new SW.
-  try {
-    port.postMessage(msg);
-  } catch {
-    /* port disconnected — extension context gone; ignore until tab reload */
   }
 }
 
