@@ -19,6 +19,9 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/LebJe/TOMLKit", exact: "0.6.0"),
     .package(url: "https://github.com/apple/swift-argument-parser", exact: "1.8.2"),
+    // Native Parakeet/ASR backend (`docs/product/specs/model-interface.md`'s
+    // "Backend 1 -- native"): Core ML/ANE inference via FluidAudio.
+    .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.15.5"),
   ],
   targets: [
     // MARK: - Libraries
