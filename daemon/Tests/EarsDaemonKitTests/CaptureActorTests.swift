@@ -3,6 +3,7 @@ import EarsCore
 import EarsCoreTestSupport
 import EarsDataStore
 import Foundation
+import Synchronization
 import Testing
 
 @testable import EarsDaemonKit
@@ -57,7 +58,8 @@ struct CaptureActorTests {
     buffers: [AudioBuffer],
     chunkSeconds: Double = 1.0,
     timeCapSeconds: Int = 7_200,
-    backend: (any CaptureBackend)? = nil
+    backend: (any CaptureBackend)? = nil,
+    eventSink: EventSink? = nil
   ) throws -> CaptureActor {
     let descriptor = makeDescriptor(timeCapSeconds: timeCapSeconds)
     let indexAppender = IndexAppender(
@@ -81,7 +83,8 @@ struct CaptureActorTests {
       encoder: encoder,
       indexAppender: indexAppender,
       vad: EnergyVAD(),
-      clock: clock
+      clock: clock,
+      eventSink: eventSink
     )
   }
 
@@ -149,6 +152,86 @@ struct CaptureActorTests {
     // translated to wall clock against the buffer's start).
     #expect(first.0 >= Instant(secondsSinceEpoch: startEpoch))
     #expect(first.1 <= Instant(secondsSinceEpoch: startEpoch + 0.5).advanced(by: 0.0001))
+  }
+
+  @Test("live vad events publish coarse state transitions only, never per-buffer repeats")
+  func publishesVADStateTransitions() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
+    let recorded = Mutex<[EarsEvent]>([])
+    let actor = try makeActor(
+      dataRoot: dataRoot, clock: clock,
+      buffers: [
+        makeBuffer(seconds: 0.5),  // speech: published
+        makeBuffer(seconds: 0.5),  // still speech: not re-published
+        makeBuffer(seconds: 0.5, value: 0.0),  // silence: published
+        makeBuffer(seconds: 0.5, value: 0.0),  // still silence: not re-published
+        makeBuffer(seconds: 0.5),  // speech again: published
+      ],
+      chunkSeconds: 30,
+      eventSink: { event in recorded.withLock { $0.append(event) } })
+
+    try await actor.start()
+    await actor.drainForTesting()
+
+    // Each transition is stamped on the buffer-derived timeline: speech at the
+    // first speech span's start (0 within its fully-voiced buffer), silence at
+    // its buffer's start.
+    #expect(
+      recorded.withLock { $0 } == [
+        .vad(source: "mic", state: .speech, t: Instant(secondsSinceEpoch: startEpoch)),
+        .vad(source: "mic", state: .silence, t: Instant(secondsSinceEpoch: startEpoch + 1.0)),
+        .vad(source: "mic", state: .speech, t: Instant(secondsSinceEpoch: startEpoch + 2.0)),
+      ])
+  }
+
+  @Test("the initial silence baseline is not announced to the live feed")
+  func initialSilencePublishesNothing() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
+    let recorded = Mutex<[EarsEvent]>([])
+    let actor = try makeActor(
+      dataRoot: dataRoot, clock: clock,
+      buffers: [makeBuffer(seconds: 0.5, value: 0.0), makeBuffer(seconds: 0.5, value: 0.0)],
+      chunkSeconds: 30,
+      eventSink: { event in recorded.withLock { $0.append(event) } })
+
+    try await actor.start()
+    await actor.drainForTesting()
+
+    #expect(recorded.withLock { $0 }.isEmpty)
+  }
+
+  @Test("pause/resume re-announces speech instead of assuming continuity across the gap")
+  func resumeReannouncesVADState() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
+    let recorded = Mutex<[EarsEvent]>([])
+    // SyntheticCaptureBackend replays its script on every start(), so the
+    // resumed generation delivers speech again.
+    let actor = try makeActor(
+      dataRoot: dataRoot, clock: clock,
+      buffers: [makeBuffer(seconds: 0.5)],
+      chunkSeconds: 30,
+      eventSink: { event in recorded.withLock { $0.append(event) } })
+
+    try await actor.start()
+    await actor.drainForTesting()
+    try await actor.pause()
+    clock.advance(by: 10)
+    try await actor.resume()
+    await actor.drainForTesting()
+
+    let events = recorded.withLock { $0 }
+    #expect(events.count == 2)
+    for event in events {
+      guard case .vad(let source, let state, _) = event else {
+        Issue.record("expected only vad events, got \(event)")
+        continue
+      }
+      #expect(source == "mic")
+      #expect(state == .speech)
+    }
   }
 
   @Test("start() while already capturing throws alreadyCapturing")

@@ -44,6 +44,9 @@ public actor SessionRegistry {
   /// The validation seam: returns the ids of every currently-known source, so
   /// `open`/`mark` can reject unknown ones without referencing `CaptureActor`.
   private let knownSourceIDs: @Sendable () async -> Set<SourceID>
+  /// Where live-feed `session` lifecycle events are published (the spec's
+  /// `{"ev":"session","id":...,"state":...}`); `nil` publishes nothing.
+  private let eventSink: EventSink?
 
   /// Open and recently-closed sessions, keyed by id.
   private var sessions: [String: SessionDescriptor] = [:]
@@ -56,16 +59,21 @@ public actor SessionRegistry {
   ///   - knownSourceIDs: The source-validation seam (see the type doc).
   ///   - clock: Wall-clock seam; supplies `start` when a request omits it and
   ///     `end` on close. Injected so tests never touch real time.
+  ///   - eventSink: Where live-feed `session` events are published
+  ///     (``EarsDaemon`` supplies its ``EventBus``'s `publish`); `nil` (the
+  ///     default) publishes nothing — persistence is unaffected either way.
   public init(
     dataRoot: URL,
     schema: Int = ActorContracts.sessionSchemaVersion,
     knownSourceIDs: @escaping @Sendable () async -> Set<SourceID>,
-    clock: any NowProviding = SystemClock()
+    clock: any NowProviding = SystemClock(),
+    eventSink: EventSink? = nil
   ) {
     self.dataRoot = dataRoot
     self.schema = schema
     self.knownSourceIDs = knownSourceIDs
     self.clock = clock
+    self.eventSink = eventSink
   }
 
   /// Open a session over `sources`, named `slug`.
@@ -107,6 +115,7 @@ public actor SessionRegistry {
     )
     try SessionStore.write(descriptor, dataRoot: dataRoot)
     sessions[descriptor.id] = descriptor
+    await eventSink?(.session(id: descriptor.id, state: .open))
     return descriptor
   }
 
@@ -128,6 +137,7 @@ public actor SessionRegistry {
     descriptor.state = .closed
     try SessionStore.write(descriptor, dataRoot: dataRoot)
     sessions[id] = descriptor
+    await eventSink?(.session(id: id, state: .closed))
     return descriptor
   }
 
@@ -171,6 +181,9 @@ public actor SessionRegistry {
     )
     try SessionStore.write(descriptor, dataRoot: dataRoot)
     sessions[descriptor.id] = descriptor
+    // A mark comes into existence already closed, so a single `closed` event
+    // announces it — there was never an open interval to announce.
+    await eventSink?(.session(id: descriptor.id, state: .closed))
     return descriptor
   }
 

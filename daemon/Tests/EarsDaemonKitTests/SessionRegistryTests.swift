@@ -2,6 +2,7 @@ import EarsCore
 import EarsCoreTestSupport
 import EarsDataStore
 import Foundation
+import Synchronization
 import Testing
 
 @testable import EarsDaemonKit
@@ -26,12 +27,14 @@ struct SessionRegistryTests {
   private func makeRegistry(
     dataRoot: URL,
     known: Set<SourceID> = [mic, system],
-    clock: ManualClock
+    clock: ManualClock,
+    eventSink: EventSink? = nil
   ) -> SessionRegistry {
     SessionRegistry(
       dataRoot: dataRoot,
       knownSourceIDs: { known },
-      clock: clock
+      clock: clock,
+      eventSink: eventSink
     )
   }
 
@@ -251,5 +254,58 @@ struct SessionRegistryTests {
     await #expect(throws: SessionRegistryError.unknownSource("bogus")) {
       try await registry.mark(sources: ["bogus"], slug: "retro", range: .lastSeconds(60))
     }
+  }
+
+  // MARK: - live-feed session events
+
+  @Test("open then close publish matching session lifecycle events")
+  func openAndClosePublishEvents() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_784_284_200))
+    let recorded = Mutex<[EarsEvent]>([])
+    let registry = makeRegistry(
+      dataRoot: dataRoot, clock: clock,
+      eventSink: { event in recorded.withLock { $0.append(event) } })
+
+    let opened = try await registry.open(
+      sources: [Self.mic], slug: "standup", start: nil, vocab: nil)
+    _ = try await registry.close(id: opened.id)
+
+    #expect(
+      recorded.withLock { $0 } == [
+        .session(id: opened.id, state: .open),
+        .session(id: opened.id, state: .closed),
+      ])
+  }
+
+  @Test("mark publishes a single closed event — there was never an open interval")
+  func markPublishesClosedEvent() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_784_284_200))
+    let recorded = Mutex<[EarsEvent]>([])
+    let registry = makeRegistry(
+      dataRoot: dataRoot, clock: clock,
+      eventSink: { event in recorded.withLock { $0.append(event) } })
+
+    let marked = try await registry.mark(
+      sources: [Self.mic], slug: "retro", range: .lastSeconds(60))
+
+    #expect(recorded.withLock { $0 } == [.session(id: marked.id, state: .closed)])
+  }
+
+  @Test("a failed open publishes nothing")
+  func failedOpenPublishesNothing() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_784_284_200))
+    let recorded = Mutex<[EarsEvent]>([])
+    let registry = makeRegistry(
+      dataRoot: dataRoot, known: [Self.mic], clock: clock,
+      eventSink: { event in recorded.withLock { $0.append(event) } })
+
+    await #expect(throws: SessionRegistryError.unknownSource("bogus")) {
+      try await registry.open(sources: ["bogus"], slug: "standup", start: nil, vocab: nil)
+    }
+
+    #expect(recorded.withLock { $0 }.isEmpty)
   }
 }

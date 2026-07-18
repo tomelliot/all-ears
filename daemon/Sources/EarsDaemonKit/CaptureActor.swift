@@ -109,6 +109,7 @@ public actor CaptureActor {
   private let indexAppender: IndexAppender
   private let vad: any VAD
   private let clock: any NowProviding
+  private let eventSink: EventSink?
 
   /// Current runtime state, reported by ``status()``.
   private var runtimeState: SourceRuntimeState = .disabled
@@ -127,6 +128,13 @@ public actor CaptureActor {
   /// buffer-derived timeline the encoder rolls chunks on — no wall-clock read
   /// per buffer.
   private var playhead: Instant = Instant(secondsSinceEpoch: 0)
+  /// The coarse VAD state most recently published to ``eventSink``, so the
+  /// live feed carries *transitions* only (the spec's `vad` event is a state
+  /// change, not a per-buffer heartbeat). `nil` until the first speech is
+  /// published — the silence baseline is never announced — and reset by
+  /// ``teardownCapture()`` so the first speech after a resume/restart is
+  /// re-announced rather than assumed continuous across the gap.
+  private var lastPublishedVADState: VADState?
 
   /// - Parameters:
   ///   - descriptor: This source's `meta.toml` model — supplies `codec`,
@@ -140,6 +148,10 @@ public actor CaptureActor {
   ///   - indexAppender: This source's shared `index.jsonl` writer.
   ///   - vad: The voice-activity index for this source.
   ///   - clock: Wall-clock seam; injected so tests never touch real time.
+  ///   - eventSink: Where live-feed `vad` state-change events are published
+  ///     (``EarsDaemon`` supplies its ``EventBus``'s `publish`); `nil` (the
+  ///     default) publishes nothing — the on-disk index is unaffected either
+  ///     way.
   public init(
     descriptor: SourceDescriptor,
     dataRoot: URL,
@@ -147,7 +159,8 @@ public actor CaptureActor {
     encoder: ChunkEncoder,
     indexAppender: IndexAppender,
     vad: any VAD,
-    clock: any NowProviding = SystemClock()
+    clock: any NowProviding = SystemClock(),
+    eventSink: EventSink? = nil
   ) {
     self.sourceID = descriptor.id
     self.descriptor = descriptor
@@ -157,6 +170,7 @@ public actor CaptureActor {
     self.indexAppender = indexAppender
     self.vad = vad
     self.clock = clock
+    self.eventSink = eventSink
   }
 
   /// Begin continuous capture: append a startup `gap` for any downtime since
@@ -324,6 +338,7 @@ public actor CaptureActor {
             start: bufferStart.advanced(by: span.start),
             end: bufferStart.advanced(by: span.end)))
       }
+      await publishVADTransition(spans: spans, bufferStart: bufferStart)
     }
 
     let chunkStartBefore = await encoder.currentChunkStart
@@ -347,6 +362,31 @@ public actor CaptureActor {
     }
   }
 
+  /// Publishes this buffer's coarse VAD state to ``eventSink`` iff it differs
+  /// from the last published one — the live feed's `vad` event is a *state
+  /// change* (`docs/specs/capture-daemon.md`'s
+  /// `{"ev":"vad","source":"mic","state":"speech","t":...}`), not the
+  /// per-span index record.
+  ///
+  /// Coarseness is buffer-granular, matching the spec's "coarse VAD state":
+  /// a buffer containing any speech span is `speech` (stamped at the first
+  /// speech span's start), a buffer with none is `silence` (stamped at the
+  /// buffer's start). The `VAD` conformances only *emit* speech spans
+  /// (``EnergyVAD`` never yields a silence span), so silence is derived from
+  /// their absence rather than read off a span. The initial silence baseline
+  /// is not announced — subscribers hear the first transition *into* speech,
+  /// per ``lastPublishedVADState``'s doc.
+  private func publishVADTransition(spans: [VADSpan], bufferStart: Instant) async {
+    guard let eventSink else { return }
+    let firstSpeechStart = spans.first { $0.state == .speech }?.start
+    let state: VADState = firstSpeechStart == nil ? .silence : .speech
+    guard state != lastPublishedVADState else { return }
+    if state == .silence && lastPublishedVADState == nil { return }
+    lastPublishedVADState = state
+    await eventSink(
+      .vad(source: sourceID, state: state, t: bufferStart.advanced(by: firstSpeechStart ?? 0)))
+  }
+
   // MARK: - Teardown / rollover / eviction
 
   /// Stops the backend, drains the in-flight consume loop, and flushes the
@@ -363,6 +403,9 @@ public actor CaptureActor {
     await backend.stop()
     await consumerTask?.value
     consumerTask = nil
+    // Forget the published VAD state across the stop/pause gap, so the first
+    // speech after a resume/restart is re-announced to live subscribers.
+    lastPublishedVADState = nil
 
     let before = await encoder.currentChunkStart
     try? await encoder.flush()
