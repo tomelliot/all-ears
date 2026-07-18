@@ -145,6 +145,10 @@ public actor EarsDaemon {
       startInstant: clock.now(),
       clock: clock)
 
+    let socketDirectory = URL(fileURLWithPath: configuration.socketPath).deletingLastPathComponent()
+    try FileManager.default.createDirectory(
+      at: socketDirectory, withIntermediateDirectories: true)
+
     let listener = try await NetworkSocketListener.bind(toPath: configuration.socketPath)
     let socketServer = ControlSocketServer(
       listener: listener, log: log, handler: controlServer.makeHandler())
