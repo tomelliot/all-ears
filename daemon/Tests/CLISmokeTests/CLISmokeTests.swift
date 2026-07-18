@@ -427,6 +427,70 @@ struct CLISmokeTests {
     #expect(hasChunkEvent, "expected a 't':'chunk' event in index.jsonl:\n\(indexContents)")
   }
 
+  // MARK: - ears: config show / path (day-one config discovery, subcommand spelling)
+
+  @Test("ears config show reflects file -> env layering, and a flag on top of that")
+  func earsConfigShowReflectsLayering() throws {
+    let temp = TempDirectory()
+    let configPath = temp.write(
+      """
+      data_root = "/from-file/data"
+
+      [log]
+      level = "debug"
+      format = "json"
+      """,
+      named: "config.toml"
+    )
+
+    // env overrides the file's "debug".
+    let envResult = try Self.runEars(
+      ["config", "show", "--config", configPath],
+      environment: ["EARS_LOG__LEVEL": "notice"]
+    )
+    #expect(envResult.exitCode == 0)
+    #expect(envResult.stdout.contains("data_root = '/from-file/data'"))
+    #expect(envResult.stdout.contains("level = 'notice'"))
+    #expect(envResult.stdout.contains("format = 'json'"))
+
+    // --log-level overrides the env layer on top of that.
+    let flagResult = try Self.runEars(
+      ["config", "show", "--config", configPath, "--log-level", "error"],
+      environment: ["EARS_LOG__LEVEL": "notice"]
+    )
+    #expect(flagResult.exitCode == 0)
+    #expect(flagResult.stdout.contains("level = 'error'"))
+  }
+
+  @Test("ears config path reports the resolved file, or clearly that none was found")
+  func earsConfigPathReportsResolvedFile() throws {
+    let temp = TempDirectory()
+    let configPath = temp.write("data_root = \"/from-file/data\"", named: "config.toml")
+
+    let found = try Self.runEars(["config", "path", "--config", configPath])
+    #expect(found.exitCode == 0)
+    #expect(found.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == configPath)
+
+    let missingPath = temp.url.appendingPathComponent("does-not-exist.toml").path
+    let missing = try Self.runEars(["config", "path", "--config", missingPath])
+    #expect(missing.exitCode == 0)
+    #expect(missing.stdout.contains(missingPath))
+    #expect(missing.stdout.contains("no config file found"))
+  }
+
+  @Test("ears with no subcommand is a pure dispatcher: it prints help, not a stub run")
+  func earsRootIsAPureDispatcher() throws {
+    let result = try Self.runEars([])
+    // ArgumentParser's default run() for a command that declares
+    // subcommands but no behavior of its own is a help request, so the
+    // subcommand list must be shown and no former root flag may survive.
+    let output = result.stdout + result.stderr
+    #expect(output.contains("SUBCOMMANDS"))
+    #expect(output.contains("config"))
+    #expect(output.contains("status"))
+    #expect(!output.contains("--print-config"))
+  }
+
   // MARK: - ears: real subcommands against a live earsd (always source-free)
 
   @Test("ears status reflects a real earsd over the real control socket")
