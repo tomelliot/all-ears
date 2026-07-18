@@ -46,6 +46,38 @@ export function isMainEnvelope(data: unknown): data is MainEnvelope {
   );
 }
 
+// ── Isolated-world → main-world control messages ─────────────────────────────
+
+/** Marker for the reverse direction, distinct from EARS_MARKER so neither
+ * listener ever mistakes its own outbound envelope for inbound traffic. */
+export const EARS_CTL_MARKER = "__earsCtl" as const;
+
+/**
+ * Isolated → main-world messages. The MAIN world has no extension APIs, so
+ * anything it needs from storage/runtime arrives on this channel — today
+ * that's just the capture toggle (see capture-toggle.ts).
+ */
+export type ControlMessage = { kind: "capture-state"; enabled: boolean };
+
+export interface ControlEnvelope {
+  [EARS_CTL_MARKER]: true;
+  msg: ControlMessage;
+}
+
+export function postToMain(msg: ControlMessage): void {
+  const envelope: ControlEnvelope = { [EARS_CTL_MARKER]: true, msg };
+  window.postMessage(envelope, "*");
+}
+
+export function isControlEnvelope(data: unknown): data is ControlEnvelope {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    (data as Record<string, unknown>)[EARS_CTL_MARKER] === true &&
+    typeof (data as ControlEnvelope).msg === "object"
+  );
+}
+
 // ── Isolated → background port (content.ts → background.ts) ──────────────────
 
 /**

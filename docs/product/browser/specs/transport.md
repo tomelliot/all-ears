@@ -74,8 +74,8 @@ The page→content→background hops are unchanged from [`extension.md`](extensi
 
 ### Per-browser lifetime
 
-- **Chrome (MV3 service worker):** `background.ts` holds the WebSocket. Continuous PCM traffic keeps the worker alive (Chrome 116+ WebSocket keepalive); add a `chrome.alarms` backstop for silent calls. On worker respawn, reconnect and re-open streams lazily; recover capture state from `storage` session.
-- **Firefox (MV3 persistent background page):** no suspension; the background page holds the WebSocket for the call. Same code, stronger lifetime guarantee.
+- **Chrome (MV3 service worker):** `background.ts` holds the WebSocket. Continuous PCM traffic keeps the worker alive (Chrome 116+ WebSocket keepalive), but silence produces no traffic — `EarsSocket` sends nothing between PCM frames — so a `chrome.alarms` keepalive (30 s period, `lib/session-state.ts`) is armed while a capture session is active (≥1 live participant) and cleared the moment the last leaves: an idle extension schedules zero wakes. On worker respawn, the module top level reconnects, streams re-open lazily on the next frame, and the persisted `storage.session` state re-arms the alarm.
+- **Firefox (MV3):** the built manifest emits `background.scripts` — an **event page**, not the persistent background page this spec originally assumed (MV3 dropped `persistent: true`). Firefox can also suspend it after idle, so the same keepalive + lazy port-reconnect hardening applies there; the code path stays identical, just exercised less often. (Whether Firefox's idle accounting differs in practice is part of the Phase 7 live-verification checklist — see the roadmap.)
 
 ## Security
 

@@ -8,7 +8,14 @@
   <body>
     <main style="min-width: 220px; font-family: system-ui; padding: 12px">
       <h1 style="font-size: 14px; margin: 0 0 8px">ears capture</h1>
-      <p id="status" style="margin: 0; font-size: 12px">loading…</p>
+      <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer">
+        <input type="checkbox" id="toggle" disabled />
+        <span id="toggle-label">capture</span>
+      </label>
+      <p id="status" style="margin: 8px 0 0; font-size: 12px; display: flex; align-items: center; gap: 6px">
+        <span id="status-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #999; display: inline-block"></span>
+        <span id="status-text">loading…</span>
+      </p>
     </main>
     <script type="module" src="./main.ts"></script>
   </body>
