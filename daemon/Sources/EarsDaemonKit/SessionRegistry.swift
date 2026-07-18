@@ -1,0 +1,208 @@
+import EarsCore
+import EarsDataStore
+import Foundation
+
+/// Errors surfaced by ``SessionRegistry``. `ControlServer` maps these to
+/// `ControlError` messages on the wire.
+public enum SessionRegistryError: Error, Sendable, Hashable {
+  /// `session.open`/`mark` named a source id this daemon doesn't know.
+  case unknownSource(SourceID)
+  /// `session.open`/`mark` named no sources.
+  case noSources
+  /// `session.close` named an id with no open session.
+  case sessionNotFound(String)
+  /// `session.close` named a session that is already closed.
+  case sessionAlreadyClosed(String)
+}
+
+/// Owns session lifecycle: the in-memory map of session id → `SessionDescriptor`
+/// plus their `session.toml` persistence. This is the actor `docs/architecture.md`
+/// calls the "`SessionStore` actor".
+///
+/// ## Naming-collision resolution
+///
+/// `EarsDataStore` already has a type named `SessionStore` — a thin *enum* of
+/// static `session.toml` read/write helpers. This lifecycle actor is therefore
+/// named **`SessionRegistry`** to avoid the collision, and it *uses*
+/// `EarsDataStore.SessionStore.write(_:dataRoot:)` / `.read(sessionID:dataRoot:)`
+/// internally for the actual file I/O. Registry = the stateful lifecycle owner;
+/// `SessionStore` = the stateless byte-level persistence it delegates to.
+///
+/// ## No `CaptureActor` coupling
+///
+/// A session is metadata over the ring buffer, not a separate recording (see
+/// ``ActorContracts``), so opening/closing a session never starts, stops, or
+/// pauses capture. This actor holds **no `CaptureActor` reference**. It still
+/// has to validate that requested source ids are real, but does so through an
+/// injected value seam (``init(dataRoot:schema:knownSourceIDs:clock:)``'s
+/// `knownSourceIDs` closure) — deliberately *not* a `CaptureActor` handle — so
+/// the coupling the spec doesn't require never creeps in.
+public actor SessionRegistry {
+  private let dataRoot: URL
+  private let schema: Int
+  private let clock: any NowProviding
+  /// The validation seam: returns the ids of every currently-known source, so
+  /// `open`/`mark` can reject unknown ones without referencing `CaptureActor`.
+  private let knownSourceIDs: @Sendable () async -> Set<SourceID>
+
+  /// Open and recently-closed sessions, keyed by id.
+  private var sessions: [String: SessionDescriptor] = [:]
+
+  /// - Parameters:
+  ///   - dataRoot: The suite's data root; descriptors persist under
+  ///     `<data-root>/sessions/<id>/session.toml` via `DataStoreLayout`.
+  ///   - schema: The `session.toml` schema version new sessions are written
+  ///     with (defaults to ``ActorContracts/sessionSchemaVersion``).
+  ///   - knownSourceIDs: The source-validation seam (see the type doc).
+  ///   - clock: Wall-clock seam; supplies `start` when a request omits it and
+  ///     `end` on close. Injected so tests never touch real time.
+  public init(
+    dataRoot: URL,
+    schema: Int = ActorContracts.sessionSchemaVersion,
+    knownSourceIDs: @escaping @Sendable () async -> Set<SourceID>,
+    clock: any NowProviding = SystemClock()
+  ) {
+    self.dataRoot = dataRoot
+    self.schema = schema
+    self.knownSourceIDs = knownSourceIDs
+    self.clock = clock
+  }
+
+  /// Open a session over `sources`, named `slug`.
+  ///
+  /// Validates every id in `sources` against ``knownSourceIDs`` (and that
+  /// `sources` is non-empty), allocates the id `<start-timestamp>_<slug>` per
+  /// `docs/data-formats.md` (the timestamp via `FilenameTimestampCodec`),
+  /// records an open descriptor (`end = nil`, `state = .open`), persists it via
+  /// `EarsDataStore.SessionStore.write`, and returns it.
+  ///
+  /// - Parameters:
+  ///   - start: The session's start; defaults to `clock.now()` when `nil`.
+  ///   - vocab: Optional per-session vocabulary path, relative to the data root.
+  ///   - trigger: What opened the session (`.manual` for `ears session open`;
+  ///     `.appSignal` for an auto-trigger).
+  /// - Returns: The new open `SessionDescriptor` (domain type; `ControlServer`
+  ///   maps it to `SessionOpenData`).
+  /// - Throws: ``SessionRegistryError/noSources`` /
+  ///   ``SessionRegistryError/unknownSource(_:)`` on validation failure.
+  public func open(
+    sources: [SourceID],
+    slug: String,
+    start: Instant?,
+    vocab: String?,
+    trigger: TriggerKind = .manual
+  ) async throws -> SessionDescriptor {
+    try await validate(sources: sources)
+    let startInstant = start ?? clock.now()
+    let descriptor = SessionDescriptor(
+      schema: schema,
+      id: sessionID(start: startInstant, slug: slug),
+      slug: slug,
+      sources: sources,
+      start: startInstant,
+      end: nil,
+      state: .open,
+      trigger: trigger,
+      vocab: vocab
+    )
+    try SessionStore.write(descriptor, dataRoot: dataRoot)
+    sessions[descriptor.id] = descriptor
+    return descriptor
+  }
+
+  /// Close an open session by id: set `end = clock.now()`, `state = .closed`,
+  /// persist, and return the closed descriptor.
+  ///
+  /// - Throws: ``SessionRegistryError/sessionNotFound(_:)`` if no session has
+  ///   that id; ``SessionRegistryError/sessionAlreadyClosed(_:)`` if it's
+  ///   already closed.
+  /// - Returns: The now-closed `SessionDescriptor`.
+  public func close(id: String) async throws -> SessionDescriptor {
+    guard var descriptor = sessions[id] else {
+      throw SessionRegistryError.sessionNotFound(id)
+    }
+    guard descriptor.state == .open else {
+      throw SessionRegistryError.sessionAlreadyClosed(id)
+    }
+    descriptor.end = clock.now()
+    descriptor.state = .closed
+    try SessionStore.write(descriptor, dataRoot: dataRoot)
+    sessions[id] = descriptor
+    return descriptor
+  }
+
+  /// Open and recently-closed sessions, for the `session.list` reply.
+  /// `ControlServer` maps each to a `SessionSummary`. Sorted by `start` so
+  /// the reply order is deterministic rather than dictionary-iteration order.
+  public func list() -> [SessionDescriptor] {
+    sessions.values.sorted { $0.start < $1.start }
+  }
+
+  /// Retroactively define an already-elapsed range as a session — the `mark`
+  /// convenience.
+  ///
+  /// Resolves `range` to a concrete `[start, end)`: ``MarkRange/lastSeconds(_:)``
+  /// becomes `[now - seconds, now)`, ``MarkRange/absolute(start:end:)`` is used
+  /// as-is. Because the range is already in the past, this behaves like an
+  /// ``open(sources:slug:start:vocab:trigger:)`` immediately followed by a
+  /// ``close(id:)``: it writes a single **closed** descriptor (`state =
+  /// .closed`, `end` set) in one step. Same source validation as `open`.
+  ///
+  /// - Returns: The closed `SessionDescriptor`. `ControlServer` maps it to
+  ///   `SessionOpenData` (the same "returns a session id" shape as `open`).
+  public func mark(
+    sources: [SourceID],
+    slug: String,
+    range: MarkRange,
+    trigger: TriggerKind = .manual
+  ) async throws -> SessionDescriptor {
+    try await validate(sources: sources)
+    let (startInstant, endInstant) = resolve(range)
+    let descriptor = SessionDescriptor(
+      schema: schema,
+      id: sessionID(start: startInstant, slug: slug),
+      slug: slug,
+      sources: sources,
+      start: startInstant,
+      end: endInstant,
+      state: .closed,
+      trigger: trigger,
+      vocab: nil
+    )
+    try SessionStore.write(descriptor, dataRoot: dataRoot)
+    sessions[descriptor.id] = descriptor
+    return descriptor
+  }
+
+  /// Validates `sources` per `open`/`mark`'s shared rule: non-empty, and
+  /// every id known to ``knownSourceIDs``.
+  ///
+  /// - Throws: ``SessionRegistryError/noSources`` if `sources` is empty;
+  ///   ``SessionRegistryError/unknownSource(_:)`` for the first id
+  ///   ``knownSourceIDs`` doesn't recognize.
+  private func validate(sources: [SourceID]) async throws {
+    guard !sources.isEmpty else { throw SessionRegistryError.noSources }
+    let known = await knownSourceIDs()
+    for source in sources where !known.contains(source) {
+      throw SessionRegistryError.unknownSource(source)
+    }
+  }
+
+  /// Resolves a `mark` request's ``MarkRange`` to a concrete `[start, end)`
+  /// pair using ``clock``.
+  private func resolve(_ range: MarkRange) -> (start: Instant, end: Instant) {
+    switch range {
+    case .lastSeconds(let seconds):
+      let now = clock.now()
+      return (now.advanced(by: -seconds), now)
+    case .absolute(let start, let end):
+      return (start, end)
+    }
+  }
+
+  /// Allocates a session id per `docs/data-formats.md`'s
+  /// `<start-timestamp>_<slug>` convention.
+  private func sessionID(start: Instant, slug: String) -> String {
+    "\(FilenameTimestampCodec.string(for: start))_\(slug)"
+  }
+}

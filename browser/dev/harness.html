@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>ears synthetic meeting harness</title>
+    <script>
+      // ── Zoom-style bootstrap: cache the RTCPeerConnection constructor at the
+      //    earliest possible moment. If the extension's hook did NOT win the
+      //    race, this captures the native constructor and every connection we
+      //    build below bypasses the hook — the true Zoom cold-load failure mode.
+      window.__earsProbe = {
+        wrappedAtHead: !!(window.RTCPeerConnection && window.RTCPeerConnection.__earsWrapped),
+        cachedCtor: window.RTCPeerConnection,
+      };
+      console.log("[harness] head inline ran; hook already installed =", window.__earsProbe.wrappedAtHead);
+    </script>
+  </head>
+  <body>
+    <h1>ears synthetic meeting harness</h1>
+    <pre id="log"></pre>
+    <script src="/harness.js"></script>
+  </body>
+</html>

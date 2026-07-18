@@ -1,0 +1,7 @@
+.build/
+.swiftpm/
+.DS_Store
+*.xcodeproj
+docs/**/journal.db
+docs/**/journal.db-shm
+docs/**/journal.db-wal
