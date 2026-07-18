@@ -23,8 +23,8 @@ struct Ears: AsyncParsableCommand {
     commandName: "ears",
     abstract: "Control client for the earsd capture daemon.",
     subcommands: [
-      ConfigCommand.self, StatusCommand.self, SourcesCommand.self, SessionCommand.self,
-      MarkCommand.self, WatchCommand.self,
+      ConfigCommand.self, StatusCommand.self, SourcesCommand.self, CaptureCommand.self,
+      SessionCommand.self, MarkCommand.self, WatchCommand.self, FlushCommand.self,
     ]
   )
 }
@@ -146,7 +146,10 @@ struct StatusCommand: AsyncParsableCommand {
 struct SourcesCommand: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "sources",
-    subcommands: [SourcesListCommand.self, SourcesEnableCommand.self, SourcesDisableCommand.self]
+    subcommands: [
+      SourcesListCommand.self, SourcesAddCommand.self, SourcesRemoveCommand.self,
+      SourcesEnableCommand.self, SourcesDisableCommand.self,
+    ]
   )
 }
 
@@ -167,6 +170,90 @@ struct SourcesListCommand: AsyncParsableCommand {
     await client.close()
     let code = OutputFormatting.emit(
       response, json: options.json, humanSuccess: OutputFormatting.humanSourcesList)
+    if code != 0 { throw ExitCode(code) }
+  }
+}
+
+struct SourcesAddCommand: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    commandName: "add",
+    abstract:
+      "Add a source at runtime (currently rejected: Phase 4 seam, see docs/specs/capture-daemon.md)."
+  )
+
+  @OptionGroup var options: ClientOptions
+  @Argument(help: "Source id, e.g. app:us.zoom.xos.") var source: String
+
+  @Option(name: .customLong("class"), help: "Source class: mic|system|app|browser|device.")
+  var sourceClass: String
+
+  @Option(name: .customLong("label"), help: "Human-readable label.") var label: String?
+  @Option(name: .customLong("device-uid"), help: "Core Audio device UID.") var deviceUID: String?
+  @Option(name: .customLong("native-sample-rate"), help: "Native capture sample rate, in Hz.")
+  var nativeSampleRate: Int?
+  @Option(name: .customLong("asr-sample-rate"), help: "ASR-rate sample rate, in Hz.")
+  var asrSampleRate: Int?
+  @Flag(name: .customLong("store-native"), help: "Also store the native-rate chunk stream.")
+  var storeNative = false
+  @Option(name: .customLong("channels"), help: "Channel count.") var channels: Int?
+  @Option(name: .customLong("codec"), help: "Chunk codec, e.g. aac.") var codec: String?
+  @Option(name: .customLong("bitrate"), help: "Chunk encoder bitrate.") var bitrate: Int?
+  @Option(name: .customLong("time-cap-seconds"), help: "Per-source retention override, in seconds.")
+  var timeCapSeconds: Int?
+
+  func run() async throws {
+    let debug = options.debug
+    guard let sourceClass = SourceClass(rawValue: sourceClass) else {
+      ControlClientRuntime.writeStderr(
+        "error: '\(sourceClass)' is not a recognised source class "
+          + "(expected one of: \(SourceClass.allCases.map(\.rawValue).joined(separator: ", ")))")
+      throw ExitCode(1)
+    }
+    guard let client = await ControlClientRuntime.connect(configFlag: options.config, debug: debug)
+    else {
+      throw ExitCode(1)
+    }
+    let spec = SourceSpec(
+      id: SourceID(source),
+      sourceClass: sourceClass,
+      label: label,
+      deviceUID: deviceUID,
+      nativeSampleRate: nativeSampleRate,
+      asrSampleRate: asrSampleRate,
+      storeNative: storeNative ? true : nil,
+      channels: channels,
+      codec: codec,
+      bitrate: bitrate,
+      timeCapSeconds: timeCapSeconds
+    )
+    let response = try await ControlClientRuntime.send(
+      .sourcesAdd(spec), expecting: EmptyData.self, via: client, debug: debug)
+    await client.close()
+    let code = OutputFormatting.emit(
+      response, json: options.json, humanSuccess: OutputFormatting.humanEmpty)
+    if code != 0 { throw ExitCode(code) }
+  }
+}
+
+struct SourcesRemoveCommand: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    commandName: "remove", abstract: "Remove a source at runtime.")
+
+  @OptionGroup var options: ClientOptions
+  @Argument(help: "Source id, e.g. mic.") var source: String
+
+  func run() async throws {
+    let debug = options.debug
+    guard let client = await ControlClientRuntime.connect(configFlag: options.config, debug: debug)
+    else {
+      throw ExitCode(1)
+    }
+    let response = try await ControlClientRuntime.send(
+      .sourcesRemove(source: SourceID(source)), expecting: EmptyData.self, via: client,
+      debug: debug)
+    await client.close()
+    let code = OutputFormatting.emit(
+      response, json: options.json, humanSuccess: OutputFormatting.humanEmpty)
     if code != 0 { throw ExitCode(code) }
   }
 }
@@ -209,6 +296,62 @@ struct SourcesDisableCommand: AsyncParsableCommand {
     }
     let response = try await ControlClientRuntime.send(
       .sourcesDisable(source: SourceID(source)), expecting: EmptyData.self, via: client,
+      debug: debug)
+    await client.close()
+    let code = OutputFormatting.emit(
+      response, json: options.json, humanSuccess: OutputFormatting.humanEmpty)
+    if code != 0 { throw ExitCode(code) }
+  }
+}
+
+// MARK: - capture pause / resume
+
+struct CaptureCommand: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    commandName: "capture",
+    subcommands: [CapturePauseCommand.self, CaptureResumeCommand.self]
+  )
+}
+
+struct CapturePauseCommand: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    commandName: "pause",
+    abstract: "Pause a source, or every source when omitted (records a gap).")
+
+  @OptionGroup var options: ClientOptions
+  @Argument(help: "Source id, e.g. mic. Omit to pause every source.") var source: String?
+
+  func run() async throws {
+    let debug = options.debug
+    guard let client = await ControlClientRuntime.connect(configFlag: options.config, debug: debug)
+    else {
+      throw ExitCode(1)
+    }
+    let response = try await ControlClientRuntime.send(
+      .capturePause(source: source.map { SourceID($0) }), expecting: EmptyData.self, via: client,
+      debug: debug)
+    await client.close()
+    let code = OutputFormatting.emit(
+      response, json: options.json, humanSuccess: OutputFormatting.humanEmpty)
+    if code != 0 { throw ExitCode(code) }
+  }
+}
+
+struct CaptureResumeCommand: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    commandName: "resume", abstract: "Resume a source, or every source when omitted.")
+
+  @OptionGroup var options: ClientOptions
+  @Argument(help: "Source id, e.g. mic. Omit to resume every source.") var source: String?
+
+  func run() async throws {
+    let debug = options.debug
+    guard let client = await ControlClientRuntime.connect(configFlag: options.config, debug: debug)
+    else {
+      throw ExitCode(1)
+    }
+    let response = try await ControlClientRuntime.send(
+      .captureResume(source: source.map { SourceID($0) }), expecting: EmptyData.self, via: client,
       debug: debug)
     await client.close()
     let code = OutputFormatting.emit(
@@ -393,5 +536,29 @@ struct WatchCommand: AsyncParsableCommand {
     // Reaching here means the daemon (not Ctrl-C) ended the stream — the
     // signal that distinguishes "no events arrived" from "not connected".
     debug.log("event stream closed by daemon after \(eventCount) event(s)")
+  }
+}
+
+// MARK: - flush
+
+struct FlushCommand: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    commandName: "flush",
+    abstract: "Force-flush in-flight chunks and the index for every enabled source.")
+
+  @OptionGroup var options: ClientOptions
+
+  func run() async throws {
+    let debug = options.debug
+    guard let client = await ControlClientRuntime.connect(configFlag: options.config, debug: debug)
+    else {
+      throw ExitCode(1)
+    }
+    let response = try await ControlClientRuntime.send(
+      .flush, expecting: EmptyData.self, via: client, debug: debug)
+    await client.close()
+    let code = OutputFormatting.emit(
+      response, json: options.json, humanSuccess: OutputFormatting.humanEmpty)
+    if code != 0 { throw ExitCode(code) }
   }
 }

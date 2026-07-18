@@ -606,4 +606,144 @@ struct CLISmokeTests {
     #expect(result.exitCode != 0)
     #expect(result.stderr.contains("could not reach earsd"))
   }
+
+  // MARK: - ears: sources add/remove, capture pause/resume, flush (live earsd)
+
+  @Test("ears sources add sends sources.add and surfaces the not-yet-supported failure")
+  func earsSourcesAddAgainstLiveDaemon() throws {
+    let temp = TempDirectory()
+    let configPath = temp.write(
+      """
+      data_root = "\(temp.url.path)/data"
+
+      [earsd]
+      source = []
+      """,
+      named: "config.toml"
+    )
+
+    let run = try Self.withRunningDaemon(configPath: configPath) { socketPath in
+      try Self.runEars(
+        ["sources", "add", "mic", "--class", "mic", "--config", configPath, "--json"],
+        environment: ["EARS_SOCKET_PATH": socketPath])
+    }
+    #expect(run.socketBecameReady)
+    // ControlServer's locked decision: sources.add always fails in this
+    // build (Phase 4 seam) -- this proves the CLI reaches the daemon and
+    // surfaces that failure rather than silently accepting it.
+    #expect(run.result.exitCode != 0)
+    #expect(run.result.stderr.contains("sources.add is not supported"))
+  }
+
+  @Test("ears sources add rejects an unrecognized --class before it reaches the socket")
+  func earsSourcesAddRejectsUnknownClass() throws {
+    let temp = TempDirectory()
+    let configPath = temp.write(
+      """
+      data_root = "\(temp.url.path)/data"
+
+      [earsd]
+      source = []
+      """,
+      named: "config.toml"
+    )
+
+    let result = try Self.runEars([
+      "sources", "add", "mic", "--class", "bogus", "--config", configPath,
+    ])
+    #expect(result.exitCode != 0)
+    #expect(result.stderr.contains("'bogus' is not a recognised source class"))
+  }
+
+  @Test("ears sources remove reports an unknown source clearly against a live earsd")
+  func earsSourcesRemoveAgainstLiveDaemon() throws {
+    let temp = TempDirectory()
+    let configPath = temp.write(
+      """
+      data_root = "\(temp.url.path)/data"
+
+      [earsd]
+      source = []
+      """,
+      named: "config.toml"
+    )
+
+    let run = try Self.withRunningDaemon(configPath: configPath) { socketPath in
+      try Self.runEars(
+        ["sources", "remove", "mic", "--config", configPath, "--json"],
+        environment: ["EARS_SOCKET_PATH": socketPath])
+    }
+    #expect(run.socketBecameReady)
+    #expect(run.result.exitCode != 0)
+    #expect(run.result.stderr.contains("unknown source 'mic'"))
+  }
+
+  @Test("ears capture pause with no source pauses every source (a no-op against zero sources)")
+  func earsCapturePauseAllAgainstLiveDaemon() throws {
+    let temp = TempDirectory()
+    let configPath = temp.write(
+      """
+      data_root = "\(temp.url.path)/data"
+
+      [earsd]
+      source = []
+      """,
+      named: "config.toml"
+    )
+
+    let run = try Self.withRunningDaemon(configPath: configPath) { socketPath in
+      try Self.runEars(
+        ["capture", "pause", "--config", configPath, "--json"],
+        environment: ["EARS_SOCKET_PATH": socketPath])
+    }
+    #expect(run.socketBecameReady)
+    #expect(run.result.exitCode == 0)
+    #expect(run.result.stdout.contains("{}"))
+  }
+
+  @Test("ears capture resume with an explicit unknown source reports the failure clearly")
+  func earsCaptureResumeUnknownSourceAgainstLiveDaemon() throws {
+    let temp = TempDirectory()
+    let configPath = temp.write(
+      """
+      data_root = "\(temp.url.path)/data"
+
+      [earsd]
+      source = []
+      """,
+      named: "config.toml"
+    )
+
+    let run = try Self.withRunningDaemon(configPath: configPath) { socketPath in
+      try Self.runEars(
+        ["capture", "resume", "mic", "--config", configPath, "--json"],
+        environment: ["EARS_SOCKET_PATH": socketPath])
+    }
+    #expect(run.socketBecameReady)
+    #expect(run.result.exitCode != 0)
+    #expect(run.result.stderr.contains("unknown source 'mic'"))
+  }
+
+  @Test("ears flush finalizes every source's in-progress chunk (a no-op against zero sources)")
+  func earsFlushAgainstLiveDaemon() throws {
+    let temp = TempDirectory()
+    let configPath = temp.write(
+      """
+      data_root = "\(temp.url.path)/data"
+
+      [earsd]
+      source = []
+      """,
+      named: "config.toml"
+    )
+
+    let run = try Self.withRunningDaemon(configPath: configPath) { socketPath in
+      try Self.runEars(
+        ["flush", "--config", configPath, "--json"],
+        environment: ["EARS_SOCKET_PATH": socketPath])
+    }
+    #expect(run.socketBecameReady)
+    #expect(run.result.exitCode == 0)
+    #expect(run.result.stdout.contains("{}"))
+  }
 }
