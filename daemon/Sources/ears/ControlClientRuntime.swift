@@ -19,20 +19,50 @@ enum ControlClientRuntime {
   /// already cover `data_root`/`socket_path`) and connects. On any failure
   /// (bad config, unreachable daemon) this writes a clear message to stderr
   /// and returns `nil`, so a subcommand can exit non-zero without dumping a
-  /// raw Swift error.
-  static func connect(configFlag: String?) async -> ControlSocketClient? {
+  /// raw Swift error. `debug` traces each resolution/connection step when
+  /// `--verbose` is set.
+  static func connect(
+    configFlag: String?, debug: DebugLog = DebugLog(enabled: false)
+  ) async -> ControlSocketClient? {
+    debug.log(
+      "resolving control socket path (config: \(configFlag ?? "<default search path>"))")
     switch resolveSocketPath(configFlag: configFlag) {
     case .failure(let error):
       writeStderr(error.description)
       return nil
     case .success(let path):
+      debug.log("resolved control socket path: \(path)")
       do {
-        return try await ControlSocketClient.connect(toPath: path)
+        let client = try await ControlSocketClient.connect(toPath: path)
+        debug.log("connected to earsd at \(path)")
+        return client
       } catch {
+        debug.log("connect failed: \(error)")
         writeStderr(
           "error: could not reach earsd at \(path): \(error). Is the daemon running?")
         return nil
       }
+    }
+  }
+
+  /// `ControlSocketClient.send` plus `--verbose` tracing of the request and
+  /// reply JSON (and any transport failure) -- the one seam every
+  /// request/response subcommand routes through, so none of them re-implement
+  /// the trace lines.
+  static func send<Payload: Codable & Sendable & Hashable>(
+    _ request: ControlRequest,
+    expecting: Payload.Type,
+    via client: ControlSocketClient,
+    debug: DebugLog
+  ) async throws -> ControlResponse<Payload> {
+    debug.log("sending request: \(debug.json(request))")
+    do {
+      let response = try await client.send(request, expecting: Payload.self)
+      debug.log("received reply: \(debug.json(response))")
+      return response
+    } catch {
+      debug.log("request failed: \(error)")
+      throw error
     }
   }
 
