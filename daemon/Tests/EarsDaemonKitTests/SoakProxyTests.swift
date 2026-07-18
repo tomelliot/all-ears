@@ -21,8 +21,10 @@ import Testing
 /// *memory* over multiple real days, nor real restarts/sleep/wake/device
 /// unplug (`CaptureActorTests`/`EarsDaemonTests` separately cover gap
 /// recording with real event assertions using a handful of cycles). Real
-/// multi-day validation of the roadmap criterion remains a separate manual
-/// or checked-in operational step — nothing here claims to substitute for it.
+/// multi-day validation of the roadmap criterion is a manual operational
+/// step, not something any suite here can substitute for — see
+/// `docs/operations/capture-soak-runbook.md` for the actual procedure (what
+/// to run, how long, what to watch on a real machine).
 @Suite("Soak proxy")
 struct SoakProxyTests {
   private let nativeRate = 48_000

@@ -34,6 +34,7 @@ Each is a separate binary. They share nothing but the documented [data formats](
 - [Logging](./logging.md) — the unified-logging standard every tool follows.
 - [Engineering practices](./engineering-practices.md) — mandatory TDD and small-incremental-commit discipline, test tiers, CI.
 - [Distribution & packaging](./distribution.md) — Developer ID + notarization, the launchd agent, model assets.
+- [Capture soak-test runbook](./operations/capture-soak-runbook.md) — the manual, multi-day procedure for checking the Phase 1 exit criterion no automated test can prove.
 - Specs:
   - [`earsd` + `ears` — capture daemon](./specs/capture-daemon.md)
   - [`transcribe` — transcription](./specs/transcribe.md)
