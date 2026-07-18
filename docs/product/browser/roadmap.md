@@ -18,9 +18,10 @@ Phased so each stage is independently verifiable in a real call. Every phase car
 
 ## Phase 2 — Audio → PCM
 
-- `pcm-worklet.ts` (`AudioWorkletProcessor`) loaded via `addModule(runtime.getURL("/pcm-worklet.js"))`; per-stream `AudioContext` → source → worklet → 16 kHz mono `Int16Array`; **never** connected to `destination`.
+- **Standard path** (Zoom, Teams — assumed, verify per platform): `MediaStreamTrackProcessor` reads decoded `AudioData` directly off each remote `MediaStreamTrack` (construction deferred to first `unmute`); a streaming linear resampler (native rate → 16 kHz mono); `pcm-worklet.ts` retained only as a fallback if `MediaStreamTrackProcessor` is unavailable. **Never** connected to `destination`.
+- **Meet path (validated, required — standard path produces zero audio on Meet):** wrap `RTCRtpReceiver.prototype.createEncodedStreams` in `lib/rtc-hook.ts` (same MAIN-world/`document_start` hook as the `RTCPeerConnection` wrap); on `kind === "audio"`, `.tee()` the pre-decode `readable`, return Meet's branch untouched, and decode our branch with the native `AudioDecoder` (`{codec:"opus", sampleRate:48000, numberOfChannels:1}`) into the same `AudioData` interface `MediaStreamTrackProcessor` yields, feeding the same downmix/resample/ring-buffer pipeline. Gate this path on `location.host === "meet.google.com"` — applying it elsewhere double-captures platforms where the standard path already works. Full rationale, evidence, and the ruled-out alternatives (WASM reverse-engineering) are in [`specs/extension.md`](specs/extension.md#audio-extraction) and journal entries `#28`–`#31`.
 - `lib/audio-tap.ts` emits tagged PCM to `content.ts` → `background.ts`; bounded per-participant ring buffer with a logged dropped counter.
-- **Exit:** `background.ts` receives ~10 `pcm_s16le` frames/s/participant with monotonic `seq`; dumping one participant's frames to a `.wav` plays back that participant only; no audio is played by the extension and no echo enters the user's mic.
+- **Exit:** `background.ts` receives ~10 `pcm_s16le` frames/s/participant with monotonic `seq` on **both** paths; dumping one participant's frames to a `.wav` plays back that participant only; no audio is played by the extension and no echo enters the user's mic. On Meet specifically: verified with 2 simultaneous remote participants, zero cross-talk, zero errors, and Meet's own call unaffected by the tee.
 
 ## Phase 3 — WebSocket transport + earsd ingest contract
 
@@ -31,6 +32,7 @@ Phased so each stage is independently verifiable in a real call. Every phase car
 
 ## Phase 4 — Meet identity
 
+- **Depends on Phase 2's Meet audio path** (the `createEncodedStreams` tee) — without it there is no PCM to attach identity to on Meet; the `track`/`transceiver` correlation this phase uses is unaffected by the tee (the standard `track` event still fires normally).
 - `lib/identity/meet.ts`: tile `MutationObserver` correlating each captured stream to its tile, reading `data-participant-id` + display name; `Speaker N` fallback; CSRC `audioLevel` path documented as fallback.
 - **Verify empirically** whether the current Meet build exposes per-tile `<audio srcObject>` (preferred) or requires CSRC attribution; pick the least-fragile path that holds.
 - **Exit:** in a ≥3-person Meet call, each speaker's earsd source carries their real name/id and only their audio; a participant who mutes and unmutes keeps the same id (new segment, same source).

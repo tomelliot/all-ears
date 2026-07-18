@@ -145,3 +145,15 @@ Roughly a dozen source files. The fragile surfaces (identity, per-platform quirk
 13. **Swallowing injection-order errors in a promise chain** — records zero audio while reporting success. Surface errors, enforce install order. (Vexa)
 14. **`ScriptProcessorNode` / `MediaRecorder` for raw PCM** — deprecated main-thread node / wrong (encoded) output. Use `AudioWorklet`. (Vexa/recallai)
 15. **Unbounded PCM queues** — apply bounded ring buffers with drop-oldest + a logged counter for back-pressure.
+
+---
+
+## 5. Addendum — Meet audio delivery, resolved (post-v1 live validation)
+
+§2 "Participant identity" flagged an open question: *"the two repos disagree on whether Meet exposes per-participant audio; verify empirically in v1."* Verified — and the answer is more specific than either repo assumed:
+
+- **Meet does expose a genuine per-participant track** per remote audio receiver (the `track` event fires once per participant, as this brief assumed for identity purposes). DOM tile correlation and CSRC `audioLevel` both remain valid identity strategies, unaffected by the finding below.
+- **But no `MediaStreamTrack`-based mechanism can ever read that track's audio.** Meet's client calls `receiver.createEncodedStreams()` on every audio receiver ~2s after connect, diverting the encoded RTP to its own WASM NetEQ decode pipeline *before* the browser's native decoder touches it. `AudioWorklet`, `MediaStreamTrackProcessor`, and a hidden `<audio>` element all read pure silence — confirmed via `getStats()` (`decoderImplementation=undefined`, `jitterBufferEmittedCount=0` throughout live speech) and by direct instrumentation. This means §2's "Audio extraction" recommendation (`AudioWorklet` universally) is correct for Zoom/Teams but **does not hold for Meet at all** — not a fidelity degradation, zero audio.
+- **The fix:** intercept the same `createEncodedStreams()` call Meet makes, `.tee()` the pre-decode readable stream (Meet's own branch passes through untouched — validated transparent, including with 2 simultaneous remote participants and zero cross-talk), and decode our branch independently with the browser's native `AudioDecoder` (WebCodecs; confirmed Opus support via `AudioDecoder.isConfigSupported`). No WASM reverse-engineering needed or possible from this hook's realm — Meet's real decoder never instantiates in the main-world page context reachable by our `document_start` hook.
+
+Full technical detail and the validated implementation sketch are in [`specs/extension.md`](specs/extension.md#audio-extraction). Evidence trail: journal entries `#28`–`#31`.

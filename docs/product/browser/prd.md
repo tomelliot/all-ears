@@ -20,9 +20,11 @@ Three meeting platforms and two browsers, all in v1, behind one `PlatformAdapter
 
 | Platform | Audio delivery | Identity strategy | Fidelity |
 |----------|----------------|-------------------|----------|
-| Google Meet | per-participant streams (per-tile `<audio srcObject>`) | tile DOM `data-participant-id` + name; CSRC `audioLevel` fallback | high |
+| Google Meet | per-participant tracks, but **not** capturable via any `MediaStreamTrack`-based path (AudioWorklet, `MediaStreamTrackProcessor`, `<audio>`) — Meet's client steals the encoded RTP off each audio receiver via `receiver.createEncodedStreams()` before the browser ever decodes it, and decodes it itself off the standard pipeline. Validated live (journal #28–#31): capture instead by wrapping `createEncodedStreams()`, `.tee()`-ing the encoded stream (Meet's own branch untouched), and decoding our branch with the native `AudioDecoder` (opus). See [`specs/extension.md`](specs/extension.md#audio-extraction). | tile DOM `data-participant-id` + name; CSRC `audioLevel` fallback | high |
 | Zoom (web) | 1 track / participant | participant id parsed from MSID (`nodeId >> 10 << 10`) | high, intrinsic |
 | Teams | 1 mixed track | dominant-speaker at timestamp → `Speaker N` | degraded |
+
+**Google Meet is a platform constraint, not a bug in our capture code:** on the current Meet build, standard track-based audio capture reads pure silence for every remote participant, confirmed via `getStats()` (`decoderImplementation=undefined`, `jitterBufferEmittedCount=0` throughout live speech) and independently via a `MediaStreamTrackProcessor`/WebAudio tap that never receives a single frame. The encoded-stream tee is the only mechanism that works, and it does — validated with real Opus frames flowing continuously, zero errors, zero disruption to Meet's own call, and clean per-participant isolation at 2 simultaneous remote speakers. Reverse-engineering Meet's own WASM decoder was considered and ruled out: it doesn't even instantiate in the page's main-world realm (almost certainly runs inside a Worker), and is unnecessary anyway since the browser's native `AudioDecoder` already supports Opus decode.
 
 | Browser | Transport host | Notes |
 |---------|----------------|-------|

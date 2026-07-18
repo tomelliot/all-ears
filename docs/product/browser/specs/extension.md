@@ -56,8 +56,11 @@ browser/
     popup/              # on/off toggle + connection indicator.
     pcm-worklet.ts      # AudioWorkletProcessor. Emitted as a web-accessible asset.
   lib/
-    rtc-hook.ts         # constructor/track interception (imported by hook.content.ts).
-    audio-tap.ts        # per-stream AudioContext → worklet pipeline + N→N map.
+    rtc-hook.ts         # constructor/track interception + RTCRtpReceiver.createEncodedStreams
+                        # tee (Meet audio path — see §Audio extraction). Imported by hook.content.ts.
+    audio-tap.ts        # per-track pipeline + N→N map. Frame source is platform-dependent:
+                        # MediaStreamTrackProcessor (standard) or the tee'd/decoded encoded
+                        # stream (Meet) — see §Audio extraction.
     identity/
       adapter.ts        # PlatformAdapter interface + registry/detection.
       meet.ts  zoom.ts  teams.ts
@@ -197,21 +200,44 @@ Do **not** decode any app's private protobuf or Redux store for identity (Meet `
 
 ## Audio extraction
 
-`pcm-worklet.ts` is an `AudioWorkletProcessor` that downsamples its input to 16 kHz mono and posts `Int16Array` frames (`pcm_s16le`) to `audio-tap.ts`.
+Two capture mechanisms, selected per platform. Both terminate in the same resample → 16 kHz mono `pcm_s16le` → bounded ring buffer pipeline in `audio-tap.ts`; only the *frame source* differs.
+
+### Standard path — `MediaStreamTrackProcessor` (Zoom, Teams; assumed — verify per platform)
+
+Read decoded audio frames directly off the remote `MediaStreamTrack` via the WebCodecs breakout box (`new MediaStreamTrackProcessor({ track }).readable`), not `AudioWorklet`. This supersedes the original design (`AudioWorkletNode` fed by `ctx.createMediaStreamSource(stream)`): a `MediaStreamAudioSourceNode` needs a live-playing `<audio>` element and, in this codebase's testing, read digital silence off remote tracks; `MediaStreamTrackProcessor` needs neither and reads real audio directly.
+
+- Construction is **deferred until the track's first `unmute`** — a `MediaStreamTrackProcessor` built on a muted track never delivers frames, even after the track unmutes, and a track allows only one processor ever.
+- Each `AudioData` frame is downmixed to mono, run through a streaming linear resampler (native rate → 16 kHz, phase-continuous across chunks), sliced into fixed-size frames, and pushed onto the per-participant ring buffer.
+- `pcm-worklet.ts` (the original `AudioWorkletProcessor` approach) is retained only as a fallback if `MediaStreamTrackProcessor` is ever unavailable on a target browser — do not build new capture logic against it.
+
+### Meet path — encoded-stream interception (validated; standard path does not work on Meet)
+
+**Empirically confirmed** (journal `#28`–`#31`, live-call testing): Google Meet's client calls `receiver.createEncodedStreams()` on every audio receiver (the legacy pre-standard insertable-streams API) roughly 2 seconds after connect, diverting the raw encoded RTP to its own WASM NetEQ decode + playback pipeline *before* the browser's native decoder ever sees it. Evidence: `getStats()` inbound-rtp shows `decoderImplementation=undefined` and `jitterBufferEmittedCount=0` for the entire call, including active speech, while `bytesReceived`/`packetsReceived` climb normally; a `MediaStreamTrackProcessor` on the raw track delivers zero frames; a `MediaStreamAudioSourceNode` WebAudio tap reads `peak=0.0000` throughout. **No `MediaStreamTrack`-based mechanism — `AudioWorklet`, `MediaStreamTrackProcessor`, or an `<audio>` element — can ever produce audio for a Meet remote participant on this build.** This is a platform constraint, not a capture bug; do not spend further effort debugging the standard path against Meet.
+
+The validated fix: intercept the same call Meet makes, before it does any damage.
 
 ```ts
-// audio-tap.ts (per stream)
-const ctx = new AudioContext();                       // one shared context is fine
-await ctx.audioWorklet.addModule(browser.runtime.getURL("/pcm-worklet.js"));
-const src = ctx.createMediaStreamSource(stream);
-const node = new AudioWorkletNode(ctx, "pcm-16k");
-src.connect(node);
-// DO NOT connect node → ctx.destination. No playback, no feedback.
-node.port.onmessage = (e) => emitPcm(participantId, e.data /* Int16Array */);
+// lib/rtc-hook.ts — wrapping RTCRtpReceiver.prototype.createEncodedStreams,
+// installed in the same MAIN-world/document_start hook as the RTCPeerConnection wrap.
+proto.createEncodedStreams = function (...args) {
+  const streams = nativeCreateEncodedStreams.apply(this, args); // { readable, writable }
+  if (this.track?.kind !== "audio") return streams;             // video: pass through untouched
+  const [ours, theirs] = streams.readable.tee();
+  decodeEncodedAudio(ours, this.track);   // our independent Opus decode → PCM, keyed by track
+  return { readable: theirs, writable: streams.writable };      // Meet's own branch, untouched
+};
 ```
 
-- **AudioWorklet caveat (differs from the WXT `web-worker-setup` example):** an AudioWorklet is **not** a Web Worker; the `?worker` import does not load it. It must be a URL passed to `audioWorklet.addModule`. Ship `pcm-worklet.ts` as a WXT entrypoint bundled to a web-accessible `pcm-worklet.js` and load it via `runtime.getURL`.
-- **No playback:** never connect the worklet (or the mirrored `<audio>`'s graph) to `destination`. The hidden `<audio>` element used for Zoom/Teams normalization must have its output routed into the muted worklet graph only — double-playback and echo into the user's mic are the failure this prevents.
+- `.tee()` on the pre-decode `readable` is **transparent**: validated live that Meet's branch keeps working normally (call never drops, `getStats` bytes/packets keep climbing, video/UI unaffected) with 1 and 2 simultaneous remote participants and zero cross-talk between their tee'd streams.
+- Decode the tee'd branch's frames (`{data: ArrayBuffer, timestamp}`, raw Opus payload) with the native `AudioDecoder` (WebCodecs): `new AudioDecoder({ output, error }).configure({ codec: "opus", sampleRate: 48000, numberOfChannels: 1 })`, then `decode(new EncodedAudioChunk({ type: "key", timestamp: frame.timestamp, data: frame.data }))` per frame (Opus has no inter-frame prediction, so every chunk is `"key"`). Confirmed supported on this build via `AudioDecoder.isConfigSupported(...)` → `{supported: true}` — no bundled/reverse-engineered decoder needed.
+- `AudioDecoder`'s `output` callback delivers real `AudioData` objects — the **same interface** `MediaStreamTrackProcessor`'s reader yields — so the existing downmix → resample → ring-buffer logic in `audio-tap.ts` needs no Meet-specific branch once frames reach it. Only the *source* (processor-reader vs. decoder-output) differs; design `audio-tap.ts`'s per-track pipeline around a pluggable frame source so both platforms share one consumer.
+- **Wiring the tee to the right pipeline:** the tee happens inside the `createEncodedStreams` wrap (which only has `this` = the `RTCRtpReceiver`, hence `this.track`), while `audio-tap.ts` builds its per-participant pipeline off the separate `track` event. These fire independently (close in time, not ordered). Use a small registry keyed on the `MediaStreamTrack` — analogous to `rtc-hook.ts`'s existing `liveTracks()` pattern — so `audio-tap.ts` can look up "does this track have a tee'd encoded-audio source" when it builds the pipeline, on Meet.
+- **Do not** attempt to call into or reverse-engineer Meet's own WASM NetEQ decoder. A `WebAssembly.instantiate`/`instantiateStreaming`/`Instance` probe installed in the same MAIN-world realm confirmed the real decoder never instantiates there — only one small, unrelated zero-export WASM blob was observed — so it almost certainly runs inside a Worker/AudioWorklet global scope this hook architecture can't reach without much higher effort (worker-script rewriting or CDP `Debugger` domain). It's unneeded anyway: native `AudioDecoder` already covers Opus decode.
+- Gate this path on the resolved platform (Meet only) at hook-install time — `location.host === "meet.google.com"`, not through `audio-tap.ts`'s capture-epoch config, which isn't populated until after `installHook()` runs. Applying the tee unconditionally would double-capture on platforms where the standard path already works.
+
+### Shared constraints (both paths)
+
+- **No playback:** never connect any capture path (worklet, processor, or decoder output) to `AudioContext.destination`, and never let the hidden `<audio>` element used for Zoom/Teams normalization play to the user's speakers — double-playback and echo into the user's own mic are the failure this prevents.
 - **Format:** 16 kHz, 1 channel, signed 16-bit little-endian. Declared to earsd verbatim as `{"sample_rate":16000,"channels":1,"encoding":"pcm_s16le"}`. earsd derives its own ASR rate; sending 16 kHz directly is accepted.
 - **Back-pressure:** `audio-tap.ts` holds a bounded ring buffer per participant. On overflow, drop the oldest frame and increment a logged `dropped` counter — never grow an unbounded queue. Mirrors earsd's own dropped-sample-counter policy.
 
@@ -241,5 +267,8 @@ The anti-patterns from [`DESIGN_BRIEF.md`](../DESIGN_BRIEF.md) §4, as enforceab
 11. No `Object.keys` static copy on the constructor — use `Object.setPrototypeOf`.
 12. No install without the idempotent guard and capture epoch.
 13. No swallowing injection-order errors — surface them; a silent failure records zero audio while reporting success.
-14. No `ScriptProcessorNode` or `MediaRecorder` for PCM — `AudioWorklet` only.
+14. No `ScriptProcessorNode` or `MediaRecorder` for PCM — `MediaStreamTrackProcessor` (standard path) or the `AudioDecoder`-fed pipeline (Meet path) only.
 15. No unbounded PCM queues — bounded ring buffer, drop-oldest, logged counter.
+16. No relying on `AudioWorklet`/`MediaStreamTrackProcessor`/`<audio>` for Meet audio — confirmed empirically that none of them ever receive a frame there (§Audio extraction). Use the `createEncodedStreams()` tee.
+17. No reverse-engineering or calling into Meet's own WASM NetEQ decoder — confirmed unreachable from the main-world realm and unnecessary given native `AudioDecoder` Opus support (§Audio extraction).
+18. No applying the `createEncodedStreams()` tee outside Meet — it would double-capture platforms where the standard `MediaStreamTrackProcessor` path already works. Gate on platform at hook-install time.
