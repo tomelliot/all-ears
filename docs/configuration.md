@@ -128,4 +128,4 @@ global = "vocab/global.txt"   # relative to data_root
 - **Paths** support `~` expansion and are resolved relative to `data_root` when not absolute (except `data_root`/`output_root` themselves).
 - **Zero-config:** with no file present, the daemon captures `mic` with the defaults above; transcription uses Parakeet on the ANE; LLM stages use the `llm` CLI with its default model.
 - **Validation:** each tool validates its config at startup and exits non-zero with a precise message (key path + reason) on any unknown key or invalid value. No silent fallback.
-- **Discovery:** every tool supports `--print-config` (resolved, merged config as TOML) and `--config-path` (which file was loaded), for debugging the layering.
+- **Discovery:** every tool can print the resolved, merged config as TOML and report which file was loaded, for debugging the layering. The single-purpose tools (`earsd`, `transcribe`, `cleanup`, `summarize`) spell it `--print-config` / `--config-path`; `ears`, whose root is a pure subcommand dispatcher, spells it `ears config show` / `ears config path`.

@@ -8,34 +8,66 @@ import Foundation
 /// live event feed, over the control socket. See
 /// `docs/specs/capture-daemon.md`'s "`ears` — control client" section.
 ///
-/// With no subcommand, `ears` keeps Phase 0's day-one config/logging
-/// contract (`--print-config`/`--config-path`, per `EarsCLI.run`) — every
-/// tool supports those independent of what else it does. Each real
-/// subcommand below is a thin `ClientOptions`-driven wrapper around
+/// The root is a pure dispatcher — it declares no flags of its own, so no
+/// root option can collide with a subcommand's. Phase 0's day-one
+/// config-discovery contract (per `docs/configuration.md` and
+/// `EarsCLI.run`) lives on the `config` subcommand: `ears config show` /
+/// `ears config path`, where the single-flag tools spell it
+/// `--print-config` / `--config-path`. Each real subcommand below is a
+/// thin `ClientOptions`-driven wrapper around
 /// ``ControlClientRuntime``/``OutputFormatting``, so none of them duplicate
 /// socket-connection or output-formatting logic.
 @main
 struct Ears: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "ears",
+    abstract: "Control client for the earsd capture daemon.",
     subcommands: [
-      StatusCommand.self, SourcesCommand.self, SessionCommand.self, MarkCommand.self,
-      WatchCommand.self,
+      ConfigCommand.self, StatusCommand.self, SourcesCommand.self, SessionCommand.self,
+      MarkCommand.self, WatchCommand.self,
     ]
   )
+}
 
+/// The one declaration site for `--config` in this tool. Every subcommand
+/// that needs it composes this via `@OptionGroup` — directly, or through
+/// ``ClientOptions`` — so the flag is never redeclared with the same
+/// string in two places.
+struct ConfigOptions: ParsableArguments {
   @Option(name: .customLong("config"), help: "Path to a TOML config file.")
   var config: String?
+}
 
-  @Flag(
-    name: .customLong("print-config"), help: "Print the resolved, merged config as TOML and exit.")
-  var printConfig = false
+/// Options every daemon-facing subcommand shares: which config to resolve
+/// the socket path from (via ``ConfigOptions``), and whether to emit raw
+/// JSON instead of a human-readable summary. `--json` per
+/// `docs/specs/capture-daemon.md`: "Output is human-readable by default,
+/// `--json` for scripting."
+struct ClientOptions: ParsableArguments {
+  @OptionGroup var configOptions: ConfigOptions
 
-  @Flag(
-    name: .customLong("config-path"),
-    help: "Print which config file would be loaded (or that none was found) and exit."
+  @Flag(name: .customLong("json"), help: "Emit raw JSON instead of human-readable output.")
+  var json = false
+
+  var config: String? { configOptions.config }
+}
+
+// MARK: - config show / path
+
+struct ConfigCommand: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    commandName: "config",
+    abstract: "Inspect config discovery and the resolved, merged config.",
+    subcommands: [ConfigShowCommand.self, ConfigPathCommand.self]
   )
-  var configPath = false
+}
+
+struct ConfigShowCommand: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    commandName: "show",
+    abstract: "Print the resolved, merged config as TOML.")
+
+  @OptionGroup var options: ConfigOptions
 
   @Option(
     name: .customLong("log-level"),
@@ -50,9 +82,8 @@ struct Ears: AsyncParsableCommand {
       tool: "ears",
       version: "0.1.0",
       arguments: EarsCLI.Arguments(
-        config: config,
-        printConfig: printConfig,
-        configPath: configPath,
+        config: options.config,
+        printConfig: true,
         logLevel: logLevel,
         logFile: logFile
       )
@@ -61,16 +92,21 @@ struct Ears: AsyncParsableCommand {
   }
 }
 
-/// Options every real subcommand shares: which config to resolve the
-/// socket path from, and whether to emit raw JSON instead of a
-/// human-readable summary. `--json` per `docs/specs/capture-daemon.md`:
-/// "Output is human-readable by default, `--json` for scripting."
-struct ClientOptions: ParsableArguments {
-  @Option(name: .customLong("config"), help: "Path to a TOML config file.")
-  var config: String?
+struct ConfigPathCommand: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    commandName: "path",
+    abstract: "Print which config file would be loaded (or that none was found).")
 
-  @Flag(name: .customLong("json"), help: "Emit raw JSON instead of human-readable output.")
-  var json = false
+  @OptionGroup var options: ConfigOptions
+
+  func run() async throws {
+    let exitCode = await EarsCLI.run(
+      tool: "ears",
+      version: "0.1.0",
+      arguments: EarsCLI.Arguments(config: options.config, configPath: true)
+    )
+    guard exitCode == 0 else { throw ExitCode(exitCode) }
+  }
 }
 
 // MARK: - status

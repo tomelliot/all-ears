@@ -5,7 +5,9 @@ import Foundation
 
 /// Shared entry point for every Phase 0 executable stub (`earsd`, `ears`,
 /// `transcribe`, `cleanup`, `summarize`): config discovery
-/// (`--print-config`/`--config-path`, per `docs/configuration.md`), config
+/// (`--print-config`/`--config-path` on the single-purpose tools, `ears
+/// config show`/`ears config path` on `ears`, per `docs/configuration.md`),
+/// config
 /// loading with the full flag/env/file/default layering, and the day-one
 /// logging requirements from `docs/logging.md` — bootstrap a `LogSink`, log
 /// a `run.start` startup event (resolved config path, effective log level,
