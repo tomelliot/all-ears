@@ -15,14 +15,8 @@ import type { TransportStatus } from "../../lib/transport";
 
 const toggleEl = document.getElementById("toggle") as HTMLInputElement | null;
 const toggleLabelEl = document.getElementById("toggle-label");
-const dotEl = document.getElementById("status-dot") as HTMLElement | null;
+const badgeEl = document.getElementById("status-badge");
 const textEl = document.getElementById("status-text");
-
-const STATUS_COLOR: Record<TransportStatus, string> = {
-  connected: "var(--ok)",
-  connecting: "var(--accent)",
-  disconnected: "var(--bad)",
-};
 
 const STATUS_TEXT: Record<TransportStatus, string> = {
   connected: "connected to earsd",
@@ -31,8 +25,12 @@ const STATUS_TEXT: Record<TransportStatus, string> = {
 };
 
 function renderStatus(status: TransportStatus): void {
-  if (dotEl) dotEl.style.background = STATUS_COLOR[status] ?? "#999";
-  if (textEl) textEl.textContent = STATUS_TEXT[status] ?? String(status);
+  // The badge's dot colour is keyed off data-status in CSS; the text only
+  // shows when the badge is expanded on hover.
+  if (badgeEl) badgeEl.dataset.status = status;
+  const text = STATUS_TEXT[status] ?? String(status);
+  if (textEl) textEl.textContent = text;
+  badgeEl?.setAttribute("title", text);
 }
 
 function renderToggle(enabled: boolean): void {

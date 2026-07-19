@@ -9,6 +9,7 @@
         --ink: #1c1b1a;
         --paper: #f7f4ee;
         --paper-2: #efe9df;
+        --card: #fffdf8;
         --fg: #1c1b1a;
         --bg: #f7f4ee;
         --line: #ded7ca;
@@ -23,6 +24,7 @@
           --fg: #f2efe8;
           --bg: #151413;
           --paper-2: #1e1c1a;
+          --card: #1c1a18;
           --line: #312e2a;
           --muted: #948d81;
           --ok: #8fce9e;
@@ -35,7 +37,7 @@
       }
       body {
         margin: 0;
-        min-width: 240px;
+        min-width: 248px;
         background: var(--bg);
         color: var(--fg);
         font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
@@ -44,11 +46,18 @@
       main {
         padding: 14px 16px 16px;
       }
-      .brand {
+
+      /* ── Header: brand lockup left, status badge top right ─────────────── */
+      header {
         display: flex;
         align-items: center;
         gap: 8px;
         margin-bottom: 12px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
       }
       .brand svg {
         width: 20px;
@@ -56,81 +65,163 @@
         display: block;
         color: var(--fg);
         flex: none;
+        /* Optical alignment: the mark's ink (arc + lobe dot) spans 13–87 of
+           the viewBox, so its centre sits ~2px below the wordmark's glyph
+           centre when the boxes are flex-centred. Lift it to match. */
+        transform: translateY(-1.5px);
       }
       .brand b {
         font-size: 15px;
         font-weight: 700;
-        letter-spacing: -0.1px;
+        letter-spacing: -0.3px;
+        line-height: 1;
       }
       .brand b .dot {
         color: var(--accent);
       }
+
+      /* ── Status badge (shadcn badge, brand-tuned) ──────────────────────────
+         Collapsed: a 20px circle showing only the status dot. On hover the
+         pill expands leftward (right edge is flex-anchored) revealing the
+         label to the left of the dot. */
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        margin-left: auto;
+        flex: none;
+        height: 20px;
+        padding: 0 5px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--card);
+        overflow: hidden;
+        cursor: default;
+      }
+      .badge-text {
+        max-width: 0;
+        margin-right: 0;
+        opacity: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        font-size: 11px;
+        font-weight: 500;
+        color: var(--muted);
+        transition:
+          max-width 0.28s ease,
+          margin-right 0.28s ease,
+          opacity 0.2s ease;
+      }
+      .badge:hover .badge-text {
+        max-width: 150px;
+        margin-right: 6px;
+        opacity: 1;
+      }
+      .badge-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--muted);
+        flex: none;
+        transition: background 0.2s ease;
+      }
+      .badge[data-status="connected"] .badge-dot {
+        background: var(--ok);
+      }
+      .badge[data-status="connecting"] .badge-dot {
+        background: var(--accent);
+      }
+      .badge[data-status="disconnected"] .badge-dot {
+        background: var(--bad);
+      }
+
+      /* ── Capture row with switch (shadcn switch, brand-tuned) ──────────── */
       .row {
         display: flex;
         align-items: center;
-        gap: 8px;
-        padding: 8px 10px;
+        gap: 10px;
+        padding: 9px 12px;
         border: 1px solid var(--line);
         border-radius: 10px;
         background: var(--paper-2);
-      }
-      label.toggle {
-        display: flex;
-        align-items: center;
-        gap: 8px;
         font-size: 13px;
         cursor: pointer;
         user-select: none;
       }
-      label.toggle input {
-        accent-color: var(--accent);
-        width: 15px;
-        height: 15px;
-        margin: 0;
-        cursor: pointer;
-      }
-      label.toggle input:disabled {
+      .row:has(input:disabled) {
         cursor: default;
-        opacity: 0.5;
       }
-      p#status {
-        margin: 10px 2px 0;
-        font-size: 12px;
-        color: var(--muted);
-        display: flex;
-        align-items: center;
-        gap: 6px;
-      }
-      #status-dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: var(--muted);
-        display: inline-block;
+      .switch {
+        position: relative;
+        display: inline-flex;
         flex: none;
+      }
+      .switch input {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        opacity: 0;
+        cursor: inherit;
+      }
+      .switch-track {
+        display: inline-flex;
+        align-items: center;
+        width: 34px;
+        height: 20px;
+        border-radius: 999px;
+        background: var(--line);
+        transition: background 0.2s ease;
+        pointer-events: none;
+      }
+      .switch-thumb {
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background: var(--card);
+        box-shadow: 0 1px 2px rgba(28, 27, 26, 0.25);
+        transform: translateX(2px);
+        transition: transform 0.2s ease;
+      }
+      .switch input:checked + .switch-track {
+        background: var(--accent);
+      }
+      .switch input:checked + .switch-track .switch-thumb {
+        transform: translateX(16px);
+      }
+      .switch input:focus-visible + .switch-track {
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent);
+      }
+      .switch input:disabled + .switch-track {
+        opacity: 0.5;
       }
     </style>
   </head>
   <body>
     <main>
-      <div class="brand">
-        <svg viewBox="0 0 100 100" aria-hidden="true">
-          <g transform="matrix(1 0 0 -1 0 100)" fill="currentColor" stroke="currentColor">
-            <path fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"
-              d="M62,33 C43,31 29,43 29,54 C29,68 43,79 62,81"/>
-            <circle cx="61" cy="20" r="7.5" stroke="none" fill="var(--accent)"/>
-          </g>
-        </svg>
-        <b>All<span class="dot">&#183;</span>Ears</b>
-      </div>
-      <label class="row toggle">
-        <input type="checkbox" id="toggle" disabled />
+      <header>
+        <div class="brand">
+          <svg viewBox="0 0 100 100" aria-hidden="true">
+            <g transform="matrix(1 0 0 -1 0 100)">
+              <path fill="none" stroke="currentColor" stroke-width="12" stroke-linecap="round"
+                stroke-linejoin="round" d="M62,33 C43,31 29,43 29,54 C29,68 43,79 62,81"/>
+              <circle cx="61" cy="20" r="7" fill="var(--accent)"/>
+            </g>
+          </svg>
+          <b>All<span class="dot">&#183;</span>Ears</b>
+        </div>
+        <div class="badge" id="status-badge" data-status="loading" aria-live="polite">
+          <span class="badge-text" id="status-text">loading&hellip;</span>
+          <span class="badge-dot" id="status-dot" aria-hidden="true"></span>
+        </div>
+      </header>
+      <label class="row">
+        <span class="switch">
+          <input type="checkbox" role="switch" id="toggle" disabled />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </span>
         <span id="toggle-label">capture</span>
       </label>
-      <p id="status">
-        <span id="status-dot"></span>
-        <span id="status-text">loading&hellip;</span>
-      </p>
     </main>
     <script type="module" src="./main.ts"></script>
   </body>
