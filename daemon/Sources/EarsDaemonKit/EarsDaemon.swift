@@ -265,9 +265,18 @@ public actor EarsDaemon {
       }
     }
 
+    // `knownSourceIDs` is a *live* lookup back into this actor, not a
+    // snapshot of `captureActors`: a `browser:<label>` source built by a
+    // later `ingest.open` (see `openIngestSource(label:format:)`) must be
+    // nameable by a session opened at any point afterwards. `[weak self]`
+    // because this daemon retains the registry (via `controlServer`), and a
+    // strong capture here would cycle; a deallocated daemon has no sources.
     let sessions = SessionRegistry(
       dataRoot: configuration.dataRoot,
-      knownSourceIDs: { [captureActors] in Set(captureActors.keys) },
+      knownSourceIDs: { [weak self] in
+        guard let self else { return [] }
+        return await self.currentSourceIDs()
+      },
       clock: clock,
       eventSink: { [eventBus] event in await eventBus.publish(event) })
     let controlServer = ControlServer(
@@ -275,7 +284,10 @@ public actor EarsDaemon {
       sessions: sessions,
       dataRoot: configuration.dataRoot,
       startInstant: clock.now(),
-      clock: clock)
+      clock: clock,
+      // `segment.publish` → the live feed, through the same bus every other
+      // event producer publishes into.
+      eventSink: { [eventBus] event in await eventBus.publish(event) })
 
     let socketDirectory = URL(fileURLWithPath: configuration.socketPath).deletingLastPathComponent()
     try FileManager.default.createDirectory(
@@ -394,13 +406,16 @@ public actor EarsDaemon {
   /// equal native/ASR rate fine (verified: it builds an `AVAudioConverter`
   /// with ratio 1.0, not a special-cased failure).
   ///
-  /// Known gap: `SessionRegistry.knownSourceIDs` and `PowerObserver` were
-  /// each handed a snapshot of `captureActors` at `start()`, so a session
-  /// can't reference a browser source opened after start, and the power
-  /// observer won't pause/resume it on sleep/wake. Only `ControlServer`'s
-  /// copy is kept in sync (via `registerDynamicSource`), since `status`/
-  /// `sources.list` visibility is this task's actual exit bar; the other two
-  /// are a follow-up, not silently assumed fixed.
+  /// Visibility of a dynamically-created source elsewhere in the daemon:
+  /// `ControlServer`'s map is kept in sync via `registerDynamicSource`
+  /// (`status`/`sources.list`), and `SessionRegistry.knownSourceIDs` is a
+  /// live lookup back into this actor (see `start()`), so a session opened
+  /// at any point can name a browser source created by a later
+  /// `ingest.open`. Known remaining gap: `PowerObserver` still holds the
+  /// `captureActors` *snapshot* it was built with at `start()`, so a
+  /// dynamic source created afterwards is not paused/resumed on sleep/wake
+  /// — a documented follow-up (Phase 6 scoped it out as separable), not
+  /// silently assumed fixed.
   public func openIngestSource(label: SourceID, format: AudioFormatSpec) async throws -> String {
     guard label.sourceClass == .browser else {
       throw IngestError.notABrowserSource(label)
@@ -468,6 +483,13 @@ public actor EarsDaemon {
     if let actor = captureActors[label] {
       await actor.stop()
     }
+  }
+
+  /// The ids of every source this daemon currently knows — config-declared
+  /// sources plus any dynamically-created `browser:<label>` sources — read
+  /// live for ``SessionRegistry``'s `knownSourceIDs` validation seam.
+  private func currentSourceIDs() -> Set<SourceID> {
+    Set(captureActors.keys)
   }
 
   /// Every source's current status, keyed by id — a test-only seam so an

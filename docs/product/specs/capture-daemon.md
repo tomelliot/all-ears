@@ -98,6 +98,7 @@ Commands:
 | `session.list` | Open/recent sessions. |
 | `mark` | Convenience: retroactively define a range (e.g. "last 30m") as a session. |
 | `ingest.open` / `ingest.close` | **Not usable here** — always fail clearly. Browser audio ingestion is a separate loopback WebSocket, not the Unix socket; see [Audio ingestion](#audio-ingestion) below. |
+| `segment.publish` | Publish one finalised `segment` event onto the live feed: `{session, speaker, start, end, text}`, the same fields the event carries. Sent by a `transcribe --follow` process (see [Live feed](#live-feed-pubsub)). Notification only — the daemon persists nothing and validates nothing beyond the wire shape; the durable transcript is the publisher's on-disk file. |
 | `flush` | Finalizes and indexes each enabled source's in-progress chunk, then opens a fresh one — not a bare fsync of an unindexed partial. |
 
 ### Audio ingestion
@@ -138,7 +139,7 @@ Full client-side detail — the browser extension's connection lifecycle, reconn
 {"ev":"segment","session":"...standup","speaker":"You","start":604.1,"end":611.9,"text":"..."}  // published by a streaming transcriber
 ```
 
-`segment` events originate from a `transcribe --follow` process that publishes back to the daemon, letting many consumers watch one live transcript.
+`segment` events originate from a `transcribe --follow` process that publishes back to the daemon (the `segment.publish` command above), letting many consumers watch one live transcript. The socket is notification only: a subscriber that connects late gets no replay — the durable transcript is the on-disk file.
 
 ## `ears` — control client
 

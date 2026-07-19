@@ -3,7 +3,7 @@ import Testing
 
 @testable import EarsCore
 
-/// Covers ``ControlRequest``: the fourteen `cmd`s in
+/// Covers ``ControlRequest``: the sixteen `cmd`s in
 /// `docs/specs/capture-daemon.md`'s control-socket command table, discriminated
 /// on the wire by the `"cmd"` field (mirroring ``IndexEvent``'s `"t"`-tag
 /// pattern for `index.jsonl`).
@@ -173,6 +173,20 @@ struct ControlRequestTests {
           format: AudioFormatSpec(sampleRate: 48000, channels: 1, encoding: "pcm_s16le")))
   }
 
+  // MARK: - segment.publish
+
+  @Test("decodes segment.publish with the same fields as the segment event")
+  func decodesSegmentPublish() throws {
+    let json = """
+      {"cmd":"segment.publish","session":"2026-07-17T10-30-00Z_standup","speaker":"You","start":604.1,"end":611.9,"text":"ship it"}
+      """
+    #expect(
+      try decode(json)
+        == .segmentPublish(
+          session: "2026-07-17T10-30-00Z_standup", speaker: "You", start: 604.1, end: 611.9,
+          text: "ship it"))
+  }
+
   // MARK: - Round trips and error handling
 
   @Test(
@@ -208,6 +222,9 @@ struct ControlRequestTests {
       .ingestOpen(
         source: "browser:meet",
         format: AudioFormatSpec(sampleRate: 48000, channels: 1, encoding: "pcm_s16le")),
+      .segmentPublish(
+        session: "2026-07-17T10-30-00Z_standup", speaker: "Speaker 2", start: 604.1, end: 611.9,
+        text: "ship it"),
       .flush,
     ])
   func roundTrips(request: ControlRequest) throws {

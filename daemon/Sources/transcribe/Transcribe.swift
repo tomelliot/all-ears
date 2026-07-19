@@ -12,8 +12,10 @@ import EarsCLISupport
 /// invocation (neither flag set) that clears that step then runs
 /// ``TranscribeRuntime``: it resolves `--last`/`--source`/`--out` into a
 /// requested range and sources, reads each source's real ring-buffer audio,
-/// runs the ASR backend, and writes the transcript. See
-/// `docs/specs/transcribe.md`.
+/// runs the ASR backend, and writes the transcript. `--follow <source>`
+/// instead runs ``FollowRuntime``/``TranscribeFollowPipeline``: attach to a
+/// live source and stream finalised segments (stdout + transcript file +
+/// the daemon's live feed) until signalled. See `docs/specs/transcribe.md`.
 @main
 struct Transcribe: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
@@ -50,6 +52,16 @@ struct Transcribe: AsyncParsableCommand {
   @Option(name: .customLong("out"), help: "Override the output transcript path.")
   var out: String?
 
+  @Option(
+    name: .customLong("follow"),
+    help: "Attach to a live source by id and stream finalised segments until signalled.")
+  var follow: String?
+
+  @Flag(
+    name: .customLong("json"),
+    help: "(follow) Emit JSON segment lines to stdout instead of plain text.")
+  var json = false
+
   func run() async throws {
     let arguments = EarsCLI.Arguments(
       config: config,
@@ -62,6 +74,24 @@ struct Transcribe: AsyncParsableCommand {
     let exitCode = await EarsCLI.run(tool: "transcribe", version: "0.1.0", arguments: arguments)
     guard exitCode == 0 else { throw ExitCode(exitCode) }
     guard !printConfig, !configPath else { return }
+
+    if let follow {
+      // Follow is attach-and-tail; batch is resolve-a-range-and-exit. The
+      // flags that shape a batch range make no sense here, so mixing them
+      // is a precise error rather than a silent ignore.
+      guard last == nil, sources.isEmpty else {
+        throw ValidationError("--follow cannot be combined with --last/--source")
+      }
+      let followExitCode = await FollowRuntime.run(
+        arguments: arguments,
+        inputs: TranscribeFollowPipeline.Inputs(source: follow, json: json, out: out)
+      )
+      guard followExitCode == 0 else { throw ExitCode(followExitCode) }
+      return
+    }
+    guard !json else {
+      throw ValidationError("--json is only meaningful with --follow")
+    }
 
     let transcribeExitCode = await TranscribeRuntime.run(
       arguments: arguments,

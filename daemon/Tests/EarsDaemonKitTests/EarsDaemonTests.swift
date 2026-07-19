@@ -360,6 +360,103 @@ struct EarsDaemonTests {
     await daemon.stop()
   }
 
+  @Test(
+    "a session opened after daemon start can name a browser source created by a later ingest.open")
+  func sessionCanReferenceDynamicIngestSource() async throws {
+    let dataRoot = try makeDataRoot()
+    let socketPath = tempSocketPath()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_000))
+
+    let configuration = EarsDaemonConfiguration(
+      sources: [],
+      dataRoot: dataRoot,
+      socketPath: socketPath)
+
+    let daemon = try EarsDaemon(
+      configuration: configuration,
+      backendFactory: { descriptor in SyntheticCaptureBackend(source: descriptor.id, buffers: []) },
+      clock: clock)
+    try await daemon.start()
+
+    let client = try await ControlSocketClient.connect(toPath: socketPath)
+
+    // Before the source's first ingest.open, naming it is (correctly) an
+    // unknown-source failure.
+    let early = try await client.send(
+      .sessionOpen(sources: ["browser:meet:jane-a1b2"], slug: "call", start: nil, vocab: nil),
+      expecting: SessionOpenData.self)
+    guard case .failure(let earlyError) = early else {
+      Issue.record("expected an unknown-source failure before ingest.open, got \(early)")
+      return
+    }
+    #expect(earlyError.message.contains("browser:meet:jane-a1b2"))
+
+    // The source joins mid-call. SessionRegistry's knownSourceIDs is a live
+    // lookup into the daemon's captureActors — with the pre-fix snapshot,
+    // this session.open threw unknownSource.
+    let format = AudioFormatSpec(sampleRate: 16000, channels: 1, encoding: "pcm_s16le")
+    _ = try await daemon.openIngestSource(label: "browser:meet:jane-a1b2", format: format)
+
+    let reply = try await client.send(
+      .sessionOpen(sources: ["browser:meet:jane-a1b2"], slug: "call", start: nil, vocab: nil),
+      expecting: SessionOpenData.self)
+    guard case .success(let opened) = reply else {
+      Issue.record("expected session.open to accept the dynamic source, got \(reply)")
+      return
+    }
+    #expect(opened.id.hasSuffix("_call"))
+
+    await client.close()
+    await daemon.stop()
+  }
+
+  @Test("a published segment.publish reaches a subscribed client end to end")
+  func endToEndSegmentPublish() async throws {
+    let dataRoot = try makeDataRoot()
+    let socketPath = tempSocketPath()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_000))
+
+    let configuration = EarsDaemonConfiguration(
+      sources: [makeDescriptor(id: "mic", sourceClass: .mic)],
+      dataRoot: dataRoot,
+      socketPath: socketPath)
+
+    let daemon = try EarsDaemon(
+      configuration: configuration,
+      backendFactory: { descriptor in
+        SyntheticCaptureBackend(source: descriptor.id, buffers: [])
+      },
+      clock: clock)
+    try await daemon.start()
+
+    let watcher = try await ControlSocketClient.connect(toPath: socketPath)
+    let events = try await watcher.subscribe(SubscribeRequest(events: [.segment], sources: []))
+    while await daemon.subscriberCountForTesting() == 0 { await Task.yield() }
+
+    // A second connection publishes — mirroring a real `transcribe --follow`
+    // process, which needs its own publish connection because subscribe is
+    // terminal for a connection.
+    let publisher = try await ControlSocketClient.connect(toPath: socketPath)
+    let reply = try await publisher.send(
+      .segmentPublish(session: "s_call", speaker: "You", start: 604.1, end: 611.9, text: "ship it"),
+      expecting: EmptyData.self)
+    #expect(reply == .success(EmptyData()))
+    await publisher.close()
+
+    var received: [EarsEvent] = []
+    for await event in events {
+      received.append(event)
+      break
+    }
+    #expect(
+      received == [
+        .segment(session: "s_call", speaker: "You", start: 604.1, end: 611.9, text: "ship it")
+      ])
+
+    await watcher.close()
+    await daemon.stop()
+  }
+
   @Test("openIngestSource rejects a label that isn't a browser:* source")
   func rejectsNonBrowserLabel() async throws {
     let dataRoot = try makeDataRoot()

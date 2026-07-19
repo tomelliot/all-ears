@@ -8,7 +8,11 @@
 /// epoch-seconds → civil calendar conversion (Howard Hinnant's
 /// `civil_from_days` algorithm), which is exact integer math and needs no
 /// `Foundation.Date`/`Calendar`.
-enum UTCCalendar {
+///
+/// `public` (the enum and ``timeOfDay(_:)``) so `transcribe --follow`'s
+/// plain-stdout segment lines render the same `[HH:MM:SS]` prefix the
+/// Markdown headings use, from the same calendar math.
+public enum UTCCalendar {
   struct CivilTime {
     var year: Int
     var month: Int
@@ -42,7 +46,7 @@ enum UTCCalendar {
   }
 
   /// `HH:MM:SS`.
-  static func timeOfDay(_ instant: Instant) -> String {
+  public static func timeOfDay(_ instant: Instant) -> String {
     let c = civilTime(for: instant)
     return "\(pad(c.hour, 2)):\(pad(c.minute, 2)):\(pad(c.second, 2))"
   }

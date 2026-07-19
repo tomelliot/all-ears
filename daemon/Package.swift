@@ -186,6 +186,11 @@ let package = Package(
         // For ParakeetTranscriber, the real FluidAudio-backed Transcriber
         // TranscribePipeline.Dependencies.production() wires in.
         "EarsTranscribeKit",
+        // For ControlSocketClient: `--follow` publishes each finalised
+        // segment back to the daemon's live feed via `segment.publish`
+        // (SegmentEventPublisher), best-effort per the notification-only
+        // rule in docs/specs/transcribe.md.
+        "EarsIPC",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
     ),

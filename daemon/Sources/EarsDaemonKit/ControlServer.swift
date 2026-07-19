@@ -20,7 +20,7 @@ import Foundation
 /// single handler can't name every command's concrete `ControlResponse<Payload>`
 /// (see `EarsIPC.ControlReply`).
 ///
-/// ## Command routing (the fifteen `ControlRequest` cases)
+/// ## Command routing (the sixteen `ControlRequest` cases)
 ///
 /// | command | routed to | reply payload |
 /// |---|---|---|
@@ -38,6 +38,7 @@ import Foundation
 /// | `mark` | ``SessionRegistry/mark(sources:slug:range:trigger:)`` | `SessionOpenData` |
 /// | `ingest.open` | — (WebSocket-only, see below) | failure: "use the WebSocket ingest endpoint" |
 /// | `ingest.close` | — (WebSocket-only, see below) | failure: "use the WebSocket ingest endpoint" |
+/// | `segment.publish` | the injected `eventSink` (``EventBus``, → live feed) | `EmptyData` |
 /// | `flush` | ``CaptureActor/flush()`` on every enabled source | `EmptyData` |
 ///
 /// ### Locked routing decisions (re-confirmed from the spec)
@@ -72,6 +73,12 @@ public actor ControlServer {
   private let clock: any NowProviding
   /// The daemon's start instant, for the `status` reply's `uptime_s`.
   private let startInstant: Instant
+  /// Where `segment.publish` forwards its event (``EarsDaemon`` supplies its
+  /// ``EventBus``'s `publish`) — the same closure seam every other live-feed
+  /// producer uses. `nil` publishes nothing; the command still replies
+  /// `ok:true` either way, matching the live feed's drop-when-unattached
+  /// semantics (the event is a notification, not persisted state).
+  private let eventSink: EventSink?
 
   /// - Parameters:
   ///   - captureActors: The per-source actors, keyed by source id. Mutable —
@@ -80,18 +87,22 @@ public actor ControlServer {
   ///   - dataRoot: The suite's data root (for `sources.add`'s `meta.toml`).
   ///   - startInstant: When the daemon started, for `uptime_s`.
   ///   - clock: Wall-clock seam; injected so tests never touch real time.
+  ///   - eventSink: Live-feed publish seam for `segment.publish` (see the
+  ///     property doc); `nil` (the default) drops published segments.
   public init(
     captureActors: [SourceID: CaptureActor],
     sessions: SessionRegistry,
     dataRoot: URL,
     startInstant: Instant,
-    clock: any NowProviding = SystemClock()
+    clock: any NowProviding = SystemClock(),
+    eventSink: EventSink? = nil
   ) {
     self.captureActors = captureActors
     self.sessions = sessions
     self.dataRoot = dataRoot
     self.startInstant = startInstant
     self.clock = clock
+    self.eventSink = eventSink
   }
 
   /// The `@Sendable` closure to hand `ControlSocketServer` as its `handler`.
@@ -168,6 +179,14 @@ public actor ControlServer {
           "ingest.close is not supported on the control socket — use the WebSocket ingest endpoint"
         )
       )
+    case .segmentPublish(let session, let speaker, let start, let end, let text):
+      // A pass-through to the live feed, not a new source of truth: no
+      // session/source validation beyond the wire shape, no persistence —
+      // the durable transcript is the on-disk file the publishing
+      // `transcribe --follow` process writes itself.
+      await eventSink?(
+        .segment(session: session, speaker: speaker, start: start, end: end, text: text))
+      return ControlReply(ControlResponse<EmptyData>.success(EmptyData()))
     case .flush:
       return await fanOut { try await $0.flush() }
     }

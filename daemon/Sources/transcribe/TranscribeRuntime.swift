@@ -83,7 +83,9 @@ enum TranscribeRuntime {
   /// FluidAudio's shim (``resolveComputeUnits(for:)``) already understands.
   /// Anything else (including the unset default) is `.automatic`, letting
   /// the backend choose -- never a silent, wrong-but-plausible guess.
-  private static func computePreference(_ raw: String) -> ComputePreference {
+  /// Internal (not private) so ``FollowRuntime`` resolves the same key the
+  /// same way instead of duplicating the mapping.
+  static func computePreference(_ raw: String) -> ComputePreference {
     switch raw {
     case "ane": return .neuralEngine
     case "gpu": return .gpu
