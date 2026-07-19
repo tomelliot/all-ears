@@ -95,7 +95,8 @@ struct ControlRequestTests {
     #expect(
       try decode(json)
         == .sessionOpen(
-          sources: ["mic", "app:us.zoom.xos"], slug: "standup", start: nil, vocab: nil)
+          sources: ["mic", "app:us.zoom.xos"], slug: "standup", start: nil, vocab: nil,
+          trigger: nil)
     )
   }
 
@@ -106,7 +107,41 @@ struct ControlRequestTests {
       """
     #expect(
       try decode(json)
-        == .sessionOpen(sources: ["mic"], slug: "standup", start: base, vocab: "standup.txt"))
+        == .sessionOpen(
+          sources: ["mic"], slug: "standup", start: base, vocab: "standup.txt", trigger: nil))
+  }
+
+  @Test("decodes session.open with an explicit trigger")
+  func decodesSessionOpenWithTrigger() throws {
+    let json = """
+      {"cmd":"session.open","sources":["mic"],"slug":"call","trigger":"browser-extension"}
+      """
+    #expect(
+      try decode(json)
+        == .sessionOpen(
+          sources: ["mic"], slug: "call", start: nil, vocab: nil, trigger: .browserExtension))
+  }
+
+  // MARK: - session.add_source
+
+  @Test("decodes session.add_source")
+  func decodesSessionAddSource() throws {
+    let json = """
+      {"cmd":"session.add_source","id":"2026-07-17T10-30-00Z_standup","source":"browser:meet:jane"}
+      """
+    #expect(
+      try decode(json)
+        == .sessionAddSource(id: "2026-07-17T10-30-00Z_standup", source: "browser:meet:jane"))
+  }
+
+  // MARK: - meeting.resolve
+
+  @Test("decodes meeting.resolve")
+  func decodesMeetingResolve() throws {
+    let json = """
+      {"cmd":"meeting.resolve","platform":"meet","external_id":"AbCdEfGhIjKl"}
+      """
+    #expect(try decode(json) == .meetingResolve(platform: "meet", externalID: "AbCdEfGhIjKl"))
   }
 
   // MARK: - session.close
@@ -202,15 +237,20 @@ struct ControlRequestTests {
       .capturePause(source: nil),
       .captureResume(source: "mic"),
       .captureResume(source: nil),
-      .sessionOpen(sources: ["mic", "app:us.zoom.xos"], slug: "standup", start: nil, vocab: nil),
+      .sessionOpen(
+        sources: ["mic", "app:us.zoom.xos"], slug: "standup", start: nil, vocab: nil,
+        trigger: nil),
       .sessionOpen(
         sources: ["mic"],
         slug: "standup",
         start: Instant(secondsSinceEpoch: 1_784_284_200),
-        vocab: "standup.txt"
+        vocab: "standup.txt",
+        trigger: .browserExtension
       ),
       .sessionClose(id: "2026-07-17T10-30-00Z_standup"),
       .sessionList,
+      .sessionAddSource(id: "2026-07-17T10-30-00Z_standup", source: "browser:meet:jane"),
+      .meetingResolve(platform: "meet", externalID: "AbCdEfGhIjKl"),
       .mark(sources: ["mic"], slug: "hallway-chat", range: .lastSeconds(1800)),
       .mark(
         sources: ["mic"],

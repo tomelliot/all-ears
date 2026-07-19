@@ -97,6 +97,7 @@ enum DaemonConfigResolution {
       bitrate: defaults.bitrate,
       defaultTimeCapSeconds: defaults.defaultTimeCapSeconds,
       ingestWebSocket: resolveIngestWebSocket(earsd),
+      controlWebSocket: resolveControlWebSocket(earsd),
       triggers: triggers,
       outputRoot: URL(fileURLWithPath: outputRootPath.isEmpty ? "." : outputRootPath)
     )
@@ -111,6 +112,8 @@ enum DaemonConfigResolution {
   {
     let triggersTable = nestedTable(root, "triggers")
     let enabled = bool(triggersTable, "enabled", default: false)
+    let transcribeOnBrowserClose = bool(
+      triggersTable, "transcribe_on_browser_session_close", default: false)
 
     var rules: [TriggerRuleConfiguration] = []
     var skipped: [SkippedTriggerRule] = []
@@ -120,7 +123,12 @@ enum DaemonConfigResolution {
       case .skipped(let skip): skipped.append(skip)
       }
     }
-    return (TriggersConfiguration(enabled: enabled, rules: rules), skipped)
+    return (
+      TriggersConfiguration(
+        enabled: enabled, rules: rules,
+        transcribeOnBrowserSessionClose: transcribeOnBrowserClose),
+      skipped
+    )
   }
 
   private enum TriggerRuleResolution {
@@ -173,6 +181,19 @@ enum DaemonConfigResolution {
     let port = int(table, "port", default: 47_811)
     let origins = stringArray(table, "allowed_origins")
     return IngestWebSocketConfiguration(port: UInt16(clamping: port), allowedOrigins: origins)
+  }
+
+  /// `[earsd.control_ws]` → ``ControlWebSocketConfiguration``, or `nil` when
+  /// `enabled` isn't `true` — mirrors ``resolveIngestWebSocket(_:)`` exactly
+  /// (opt-in, fail-closed allowlist, distinct default port).
+  private static func resolveControlWebSocket(
+    _ earsd: [String: ConfigValue]
+  ) -> ControlWebSocketConfiguration? {
+    let table = nestedTable(earsd, "control_ws")
+    guard bool(table, "enabled", default: false) else { return nil }
+    let port = int(table, "port", default: 47_812)
+    let origins = stringArray(table, "allowed_origins")
+    return ControlWebSocketConfiguration(port: UInt16(clamping: port), allowedOrigins: origins)
   }
 
   // MARK: - Per-source resolution

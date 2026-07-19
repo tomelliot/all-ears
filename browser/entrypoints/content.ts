@@ -77,6 +77,22 @@ function relay(msg: MainMessage, port: ReconnectingPort, platforms: Map<string, 
     case "status":
       console.log(`[ears/relay] status: ${msg.text}`);
       break;
+    case "meeting-started":
+      port.post({
+        type: "meeting-started",
+        platform: msg.platform,
+        externalMeetingId: msg.externalMeetingId,
+      });
+      console.log(`[ears/relay] meeting started: ${msg.platform}/${msg.externalMeetingId}`);
+      break;
+    case "meeting-ended":
+      port.post({
+        type: "meeting-ended",
+        platform: msg.platform,
+        externalMeetingId: msg.externalMeetingId,
+      });
+      console.log(`[ears/relay] meeting ended: ${msg.platform}/${msg.externalMeetingId}`);
+      break;
     case "pcm": {
       const platform = platforms.get(msg.participantId);
       if (!platform) return; // no join seen yet; drop until identity is known

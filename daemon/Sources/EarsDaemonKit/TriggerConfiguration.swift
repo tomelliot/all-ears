@@ -50,13 +50,25 @@ public struct TriggerRuleConfiguration: Sendable, Hashable {
 }
 
 /// `[triggers]`'s resolved shape: whether auto-triggers are enabled at all,
-/// and the configured rules.
+/// the configured rules, and whether a browser-extension-triggered session
+/// close runs the transcribe stage automatically.
 public struct TriggersConfiguration: Sendable, Hashable {
   public var enabled: Bool
   public var rules: [TriggerRuleConfiguration]
+  /// `[triggers].transcribe_on_browser_session_close`: when `true`, a session
+  /// closed with `trigger == .browserExtension` runs the `transcribe` stage
+  /// via the shared ``OnClosePipelineRunner`` — the browser-side analogue of
+  /// a rule's `on_close`, which only fires on app-signal rule matches.
+  /// Default `false` (no behavior change unless opted in).
+  public var transcribeOnBrowserSessionClose: Bool
 
-  public init(enabled: Bool = false, rules: [TriggerRuleConfiguration] = []) {
+  public init(
+    enabled: Bool = false,
+    rules: [TriggerRuleConfiguration] = [],
+    transcribeOnBrowserSessionClose: Bool = false
+  ) {
     self.enabled = enabled
     self.rules = rules
+    self.transcribeOnBrowserSessionClose = transcribeOnBrowserSessionClose
   }
 }

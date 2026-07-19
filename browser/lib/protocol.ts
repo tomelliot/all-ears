@@ -22,7 +22,13 @@ export type MainMessage =
   | { kind: "participant-joined"; platform: Platform; participantId: ParticipantId; generation: number; displayName?: string }
   | { kind: "participant-left"; participantId: ParticipantId; generation: number }
   | { kind: "pcm"; participantId: ParticipantId; generation: number; samples: Int16Array }
-  | { kind: "status"; text: string };
+  | { kind: "status"; text: string }
+  // Fired once per call (not per participant): the platform's own meeting id
+  // resolved (Meet's spaces/<space> segment — see identity/meet-meeting-id.ts),
+  // and the call ended (capture toggled off / teardown). May arrive after
+  // capture starts — sessions never gate capture.
+  | { kind: "meeting-started"; platform: Platform; externalMeetingId: string }
+  | { kind: "meeting-ended"; platform: Platform; externalMeetingId: string };
 
 /** The envelope actually posted; `event.source === window` + marker gate it. */
 export interface MainEnvelope {
@@ -87,7 +93,9 @@ export function isControlEnvelope(data: unknown): data is ControlEnvelope {
  */
 export type PortMessage =
   | { type: "pcm"; participantId: ParticipantId; platform: Platform; b64: string }
-  | { type: "left"; participantId: ParticipantId };
+  | { type: "left"; participantId: ParticipantId }
+  | { type: "meeting-started"; platform: Platform; externalMeetingId: string }
+  | { type: "meeting-ended"; platform: Platform; externalMeetingId: string };
 
 // ── earsd wire (background.ts → earsd) ───────────────────────────────────────
 
@@ -103,6 +111,27 @@ export function sanitizeLabel(id: string): string {
 export function sourceLabel(platform: Platform, participantId: ParticipantId): string {
   return `browser:${platform}:${sanitizeLabel(participantId)}`;
 }
+
+// ── earsd control-plane wire (background.ts → earsd ws://…/control) ──────────
+
+/** Provenance recorded on daemon sessions this extension opens (earsd's
+ * TriggerKind.browserExtension). */
+export const BROWSER_TRIGGER = "browser-extension" as const;
+
+/**
+ * JSON builders for the control-plane requests the extension sends over the
+ * control WebSocket (control-transport.ts) — the same ControlRequest wire
+ * shapes the CLI speaks over the Unix socket.
+ */
+export const controlRequest = {
+  meetingResolve: (platform: Platform, externalMeetingId: string) =>
+    ({ cmd: "meeting.resolve", platform, external_id: externalMeetingId }) as const,
+  sessionOpen: (sources: readonly string[], slug: string) =>
+    ({ cmd: "session.open", sources, slug, trigger: BROWSER_TRIGGER }) as const,
+  sessionClose: (id: string) => ({ cmd: "session.close", id }) as const,
+  sessionAddSource: (id: string, source: string) =>
+    ({ cmd: "session.add_source", id, source }) as const,
+};
 
 /**
  * Binary PCM frame: [u8 idLen][stream_id ASCII][pcm_s16le bytes]. stream_id is

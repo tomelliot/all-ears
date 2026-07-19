@@ -1,12 +1,20 @@
 import { defineBackground } from "#imports";
 import { browser } from "wxt/browser";
 import { EarsSocket, type TransportStatus } from "../lib/transport";
+import { ControlSocket } from "../lib/control-transport";
+import { MeetingTracker, type BadgeState, type MeetingState } from "../lib/meeting-tracker";
 import { KEEPALIVE_ALARM, SessionTracker } from "../lib/session-state";
 import type { PortMessage } from "../lib/protocol";
 
-// Background context: owns the one WebSocket to earsd. Accepts the "pcm" port
-// from the isolated relay, decodes each frame, and hands it to the transport,
-// which lazily ingest.opens a stream per participant and streams binary PCM.
+// Background context: owns the two WebSockets to earsd. The ingest socket
+// accepts the "pcm" port from the isolated relay, decodes each frame, and
+// hands it to the transport, which lazily ingest.opens a stream per
+// participant and streams binary PCM. The control socket
+// (ws://127.0.0.1:<port>/control) carries meeting/session commands: the
+// MeetingTracker resolves each started meeting to a daemon-owned meeting UUID
+// and opens/closes daemon sessions around it (including the popup's
+// pause-transcription toggle — capture is never touched, sessions are
+// metadata over the ring buffer).
 //
 // Chrome runs this as a suspendable MV3 service worker; Firefox as a
 // persistent background page. Everything here is written for the weaker
@@ -14,23 +22,64 @@ import type { PortMessage } from "../lib/protocol";
 // only while a capture session is active (silence produces no socket traffic,
 // so WebSocket-activity keepalive alone can't be relied on), and persists the
 // session flag to storage.session so a respawned worker re-arms it. The rest
-// of respawn recovery is free: this module's top level reconnects EarsSocket,
-// streams re-open lazily on the next PCM frame, and the content relay
-// re-establishes its port on the next post (pcm-port.ts).
+// of respawn recovery is free: this module's top level reconnects both
+// sockets, streams re-open lazily on the next PCM frame, and the content
+// relay re-establishes its port on the next post (pcm-port.ts).
 
 const DEFAULT_PORT = 47811;
 const PORT_STORAGE_KEY = "earsdPort";
+const DEFAULT_CONTROL_PORT = 47812;
+const CONTROL_PORT_STORAGE_KEY = "earsdControlPort";
 
 export default defineBackground(() => {
   console.log("[ears] background loaded");
 
+  // ── Badge state: transport status composed with meeting state ─────────────
+  // Transport problems win outright; otherwise the meeting layer's
+  // recording/paused/transcribing, else plain "connected".
   let status: TransportStatus = "disconnected";
+  let meetingState: MeetingState = "idle";
+
+  function badgeState(): BadgeState {
+    if (status !== "connected") return status;
+    if (meetingState === "idle") return "connected";
+    return meetingState;
+  }
+
+  function broadcastStatus(): void {
+    // Best-effort: tell any open popup. Ignored if none is listening.
+    browser.runtime
+      .sendMessage({
+        kind: "status",
+        status: badgeState(),
+        meeting: { active: meetings.meetingActive, paused: meetings.paused },
+      })
+      .catch(() => {});
+  }
+
   const socket = new EarsSocket(DEFAULT_PORT, (s) => {
     status = s;
     console.log(`[ears] transport status: ${s}`);
-    // Best-effort: tell any open popup. Ignored if none is listening.
-    browser.runtime.sendMessage({ kind: "status", status: s }).catch(() => {});
+    broadcastStatus();
   });
+
+  const control = new ControlSocket(DEFAULT_CONTROL_PORT, (s) => {
+    console.log(`[ears] control transport status: ${s}`);
+  });
+
+  const meetings = new MeetingTracker(control, (s) => {
+    meetingState = s;
+    console.log(`[ears] meeting state: ${s}`);
+    broadcastStatus();
+  });
+
+  // participantId → the port (tab) its PCM arrives on, so an ingest-stream
+  // open can be routed to that tab's meeting record.
+  const participantPorts = new Map<string, string>();
+  socket.onStreamOpened = (participantId, platform) => {
+    const portId = participantPorts.get(participantId);
+    if (portId) meetings.streamOpened(portId, platform, participantId);
+  };
 
   const tracker = new SessionTracker(browser.alarms, browser.storage.session);
   // Respawn path: re-arm the keepalive if a session was active when the old
@@ -43,20 +92,29 @@ export default defineBackground(() => {
     if (alarm.name === KEEPALIVE_ALARM) console.log("[ears] keepalive tick");
   });
 
-  // Apply the configured port, then connect.
+  // Apply the configured ports, then connect both sockets.
   browser.storage.local
-    .get(PORT_STORAGE_KEY)
+    .get([PORT_STORAGE_KEY, CONTROL_PORT_STORAGE_KEY])
     .then((v) => {
-      const p = Number((v as Record<string, unknown>)[PORT_STORAGE_KEY]);
+      const record = v as Record<string, unknown>;
+      const p = Number(record[PORT_STORAGE_KEY]);
       if (Number.isInteger(p) && p > 0) socket.setPort(p);
+      const cp = Number(record[CONTROL_PORT_STORAGE_KEY]);
+      if (Number.isInteger(cp) && cp > 0) control.setPort(cp);
       socket.connect();
+      control.connect();
     })
-    .catch(() => socket.connect());
+    .catch(() => {
+      socket.connect();
+      control.connect();
+    });
 
   // React to a port change from the options/popup UI.
   browser.storage.local.onChanged?.addListener?.((changes) => {
     const c = changes[PORT_STORAGE_KEY];
     if (c && Number.isInteger(Number(c.newValue))) socket.setPort(Number(c.newValue));
+    const cc = changes[CONTROL_PORT_STORAGE_KEY];
+    if (cc && Number.isInteger(Number(cc.newValue))) control.setPort(Number(cc.newValue));
   });
 
   const counts = new Map<string, number>();
@@ -68,24 +126,41 @@ export default defineBackground(() => {
     console.log(`[ears] pcm port connected (${portId})`);
     port.onMessage.addListener((raw) => {
       const msg = raw as PortMessage;
-      if (msg.type === "left") {
-        tracker.participantLeft(portId, msg.participantId);
-        socket.participantLeft(msg.participantId);
-        return;
+      switch (msg.type) {
+        case "left":
+          tracker.participantLeft(portId, msg.participantId);
+          socket.participantLeft(msg.participantId);
+          meetings.participantLeft(portId, msg.participantId);
+          participantPorts.delete(msg.participantId);
+          return;
+        case "meeting-started":
+          meetings.meetingStarted(portId, msg.platform, msg.externalMeetingId);
+          return;
+        case "meeting-ended":
+          meetings.meetingEnded(msg.externalMeetingId);
+          return;
+        case "pcm": {
+          tracker.participantActive(portId, msg.participantId, msg.platform);
+          participantPorts.set(msg.participantId, portId);
+          const pcm = base64ToBytes(msg.b64);
+          socket.sendPcm(msg.participantId, msg.platform, pcm);
+          const n = (counts.get(msg.participantId) ?? 0) + 1;
+          counts.set(msg.participantId, n);
+          if (n % 50 === 0) console.log(`[ears] forwarded ${n} frames for ${msg.participantId}`);
+          return;
+        }
       }
-      // type === "pcm"
-      tracker.participantActive(portId, msg.participantId, msg.platform);
-      const pcm = base64ToBytes(msg.b64);
-      socket.sendPcm(msg.participantId, msg.platform, pcm);
-      const n = (counts.get(msg.participantId) ?? 0) + 1;
-      counts.set(msg.participantId, n);
-      if (n % 50 === 0) console.log(`[ears] forwarded ${n} frames for ${msg.participantId}`);
     });
     port.onDisconnect.addListener(() => {
       // Tab closed / navigated away mid-call: close its participants' streams
-      // now rather than leaking them on earsd until the socket reconnects.
+      // now rather than leaking them on earsd until the socket reconnects —
+      // and end its meetings (which closes their daemon sessions).
       const orphaned = tracker.portDisconnected(portId);
-      for (const id of orphaned) socket.participantLeft(id);
+      for (const id of orphaned) {
+        socket.participantLeft(id);
+        participantPorts.delete(id);
+      }
+      meetings.portDisconnected(portId);
       console.log(
         `[ears] pcm port disconnected (${portId})` +
           (orphaned.length ? ` — closed ${orphaned.length} orphaned stream(s)` : ""),
@@ -93,10 +168,22 @@ export default defineBackground(() => {
     });
   });
 
-  // Let the popup query current status.
+  // Popup queries and the pause-transcription toggle.
   browser.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if ((msg as { kind?: string }).kind === "get-status") {
-      sendResponse({ status });
+    const m = msg as { kind?: string; paused?: boolean };
+    if (m.kind === "get-status") {
+      sendResponse({
+        status: badgeState(),
+        meeting: { active: meetings.meetingActive, paused: meetings.paused },
+      });
+      return true;
+    }
+    if (m.kind === "set-transcription-paused") {
+      void meetings
+        .setPaused(m.paused === true)
+        .then(() => broadcastStatus())
+        .catch((err) => console.warn("[ears] pause toggle failed:", err));
+      sendResponse({ ok: true });
       return true;
     }
     return undefined;

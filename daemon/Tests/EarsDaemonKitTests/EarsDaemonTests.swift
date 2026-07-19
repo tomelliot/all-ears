@@ -241,7 +241,7 @@ struct EarsDaemonTests {
 
     let controller = try await ControlSocketClient.connect(toPath: socketPath)
     let openReply = try await controller.send(
-      .sessionOpen(sources: ["mic"], slug: "standup", start: nil, vocab: nil),
+      .sessionOpen(sources: ["mic"], slug: "standup", start: nil, vocab: nil, trigger: nil),
       expecting: SessionOpenData.self)
     guard case .success(let opened) = openReply else {
       Issue.record("expected a successful session.open reply, got \(openReply)")
@@ -383,7 +383,8 @@ struct EarsDaemonTests {
     // Before the source's first ingest.open, naming it is (correctly) an
     // unknown-source failure.
     let early = try await client.send(
-      .sessionOpen(sources: ["browser:meet:jane-a1b2"], slug: "call", start: nil, vocab: nil),
+      .sessionOpen(
+        sources: ["browser:meet:jane-a1b2"], slug: "call", start: nil, vocab: nil, trigger: nil),
       expecting: SessionOpenData.self)
     guard case .failure(let earlyError) = early else {
       Issue.record("expected an unknown-source failure before ingest.open, got \(early)")
@@ -398,7 +399,8 @@ struct EarsDaemonTests {
     _ = try await daemon.openIngestSource(label: "browser:meet:jane-a1b2", format: format)
 
     let reply = try await client.send(
-      .sessionOpen(sources: ["browser:meet:jane-a1b2"], slug: "call", start: nil, vocab: nil),
+      .sessionOpen(
+        sources: ["browser:meet:jane-a1b2"], slug: "call", start: nil, vocab: nil, trigger: nil),
       expecting: SessionOpenData.self)
     guard case .success(let opened) = reply else {
       Issue.record("expected session.open to accept the dynamic source, got \(reply)")

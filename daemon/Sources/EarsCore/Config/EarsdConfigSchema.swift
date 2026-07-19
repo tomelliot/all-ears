@@ -34,6 +34,11 @@ public enum EarsdConfigSchema {
         "port": .int(47811),
         "allowed_origins": .array([]),
       ]),
+      "control_ws": .table([
+        "enabled": .bool(false),
+        "port": .int(47812),
+        "allowed_origins": .array([]),
+      ]),
       "source": .array([
         .table([
           "id": .string("mic"),
@@ -44,6 +49,7 @@ public enum EarsdConfigSchema {
     ]),
     "triggers": .table([
       "enabled": .bool(false),
+      "transcribe_on_browser_session_close": .bool(false),
       "rule": .array([]),
     ]),
   ])
@@ -127,6 +133,19 @@ public enum EarsdConfigSchema {
                 ]
               )
             ),
+            // The loopback control-plane WebSocket — same shape and
+            // fail-closed Origin allowlist as `ingest_ws`, distinct default
+            // port. See `EarsIPC.ControlWebSocketServer`.
+            "control_ws": ConfigSchema.Field(
+              type: .table,
+              children: ConfigSchema(
+                fields: [
+                  "enabled": ConfigSchema.Field(type: .bool),
+                  "port": ConfigSchema.Field(type: .int),
+                  "allowed_origins": ConfigSchema.Field(type: .array),
+                ]
+              )
+            ),
             "source": ConfigSchema.Field(type: .array, elementSchema: sourceElementSchema),
           ]
         )
@@ -136,6 +155,11 @@ public enum EarsdConfigSchema {
         children: ConfigSchema(
           fields: [
             "enabled": ConfigSchema.Field(type: .bool),
+            // Run the transcribe stage automatically when a session opened by
+            // the browser extension (`trigger = "browser-extension"`) closes
+            // — the browser-side analogue of a rule's `on_close`, which only
+            // fires on app-signal rule matches.
+            "transcribe_on_browser_session_close": ConfigSchema.Field(type: .bool),
             "rule": ConfigSchema.Field(type: .array, elementSchema: triggerRuleElementSchema),
           ]
         )

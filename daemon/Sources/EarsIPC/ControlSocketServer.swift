@@ -13,6 +13,11 @@ import Foundation
 /// is `(ControlRequest) async -> ControlReply` — the seam where business logic
 /// attaches. See ``ControlReply`` for why the reply is type-erased.
 ///
+/// The per-connection subscribe/queue/backpressure/fan-out state lives in the
+/// shared ``ControlConnectionTable`` — the same core
+/// ``ControlWebSocketServer`` runs on — so this actor is just the NDJSON
+/// transport adapter: accept, line-frame, dispatch, close.
+///
 /// ## Subscribe is terminal for a connection
 ///
 /// A connection is request/response until it sends a `subscribe`; from then it
@@ -46,21 +51,11 @@ public actor ControlSocketServer {
 
   private let listener: any SocketListener
   private let handler: Handler
-  private let queueBound: Int
-  private let log: @Sendable (String) -> Void
   private let encoder = JSONEncoder()
   private let decoder = JSONDecoder()
 
-  private var connections: [Int: Connection] = [:]
-  private var nextConnectionID = 0
-  private var dropped = 0
-
-  private struct Connection {
-    let socket: any SocketConnection
-    let outbound: AsyncStream<[UInt8]>.Continuation
-    let writer: Task<Void, Never>
-    var subscription: SubscribeRequest?
-  }
+  private var table: ControlConnectionTable
+  private var sockets: [Int: any SocketConnection] = [:]
 
   public init(
     listener: any SocketListener,
@@ -69,22 +64,20 @@ public actor ControlSocketServer {
     handler: @escaping Handler
   ) {
     self.listener = listener
-    self.queueBound = outboundQueueBound
-    self.log = log
     self.handler = handler
+    self.table = ControlConnectionTable(
+      queueBound: outboundQueueBound, label: "control socket", log: log)
   }
 
   /// Total lines dropped across all connections because their outbound queue
   /// was full (the backpressure counter, surfaced for tests and diagnostics).
-  public var droppedLineCount: Int { dropped }
+  public var droppedLineCount: Int { table.dropped }
 
   /// Number of currently-open connections.
-  public var connectionCount: Int { connections.count }
+  public var connectionCount: Int { table.count }
 
   /// Number of open connections currently in event-stream (subscribed) mode.
-  public var subscriberCount: Int {
-    connections.values.filter { $0.subscription != nil }.count
-  }
+  public var subscriberCount: Int { table.subscriberCount }
 
   /// Accept connections until the listener closes. Returns when
   /// ``shutdown()`` (or the listener itself) finishes the connection stream.
@@ -97,43 +90,25 @@ public actor ControlSocketServer {
   /// Fan `event` out to every subscribed connection whose filter matches,
   /// encoding it once. Dropped deliveries (full queue) are counted and logged.
   public func publish(_ event: EarsEvent) {
-    var encoded: [UInt8]?
-    for (id, connection) in connections {
-      guard let subscription = connection.subscription,
-        EventFilter.matches(event, subscription)
-      else { continue }
-      if encoded == nil { encoded = try? LineFramer.encodeLine(event, using: encoder) }
-      guard let line = encoded else { return }
-      deliver(line, to: id, connection: connection, what: "event")
-    }
+    table.publish(event, using: encoder)
   }
 
   /// Stop listening and close every open connection.
   public func shutdown() async {
     await listener.close()
-    let open = connections
-    connections = [:]
-    for (_, connection) in open {
-      connection.writer.cancel()
-      connection.outbound.finish()
-      await connection.socket.close()
+    table.removeAll()
+    let open = sockets
+    sockets = [:]
+    for (_, socket) in open {
+      await socket.close()
     }
   }
 
   private func accept(_ socket: any SocketConnection) {
-    let id = nextConnectionID
-    nextConnectionID += 1
-
-    let (stream, continuation) = AsyncStream.makeStream(
-      of: [UInt8].self, bufferingPolicy: .bufferingNewest(queueBound))
-    let writer = Task.detached {
-      for await line in stream {
-        try? await socket.send(line)
-      }
-    }
-    connections[id] = Connection(
-      socket: socket, outbound: continuation, writer: writer, subscription: nil)
-
+    let id = table.register(
+      send: { bytes in try await socket.send(bytes) },
+      encodeWire: { data in Array(data) + [0x0A] })
+    sockets[id] = socket
     Task { await self.readLoop(id: id, socket: socket) }
   }
 
@@ -155,55 +130,27 @@ public actor ControlSocketServer {
   /// during the await, so `publish` and other connections still interleave.
   private func handle(line: [UInt8], id: Int) async -> Bool {
     let data = Data(line)
-    if isSubscribe(data) {
+    if ControlCommandPeek.isSubscribe(data, using: decoder) {
       if let subscription = try? decoder.decode(SubscribeRequest.self, from: data) {
-        connections[id]?.subscription = subscription
+        table.setSubscription(subscription, for: id)
         return true
       }
-      enqueue(.failure("malformed subscribe request"), to: id)
+      table.enqueue(.failure("malformed subscribe request"), to: id, using: encoder)
       return false
     }
     if let request = try? decoder.decode(ControlRequest.self, from: data) {
-      enqueue(await handler(request), to: id)
+      let reply = await handler(request)
+      table.enqueue(reply, to: id, using: encoder)
       return false
     }
-    enqueue(.failure("unrecognised request"), to: id)
+    table.enqueue(.failure("unrecognised request"), to: id, using: encoder)
     return false
   }
 
-  private func isSubscribe(_ data: Data) -> Bool {
-    (try? decoder.decode(CommandPeek.self, from: data))?.cmd == "subscribe"
-  }
-
-  private func enqueue(_ reply: ControlReply, to id: Int) {
-    guard let connection = connections[id],
-      let data = try? reply.encoded(using: encoder)
-    else { return }
-    var line = data
-    line.append(0x0A)
-    deliver(Array(line), to: id, connection: connection, what: "reply")
-  }
-
-  private func deliver(
-    _ line: [UInt8], to id: Int, connection: Connection, what: String
-  ) {
-    if case .dropped = connection.outbound.yield(line) {
-      dropped += 1
-      log("control socket: dropped \(what) on connection \(id) (outbound queue full)")
-    }
-  }
-
   private func teardown(id: Int) async {
-    guard let connection = connections.removeValue(forKey: id) else { return }
-    connection.writer.cancel()
-    connection.outbound.finish()
-    await connection.socket.close()
-  }
-
-  /// Minimal decode to read only the `cmd` discriminator, distinguishing a
-  /// `subscribe` (which becomes a ``SubscribeRequest``) from the
-  /// ``ControlRequest`` commands without committing to either decode first.
-  private struct CommandPeek: Decodable {
-    let cmd: String
+    guard table.remove(id) else { return }
+    if let socket = sockets.removeValue(forKey: id) {
+      await socket.close()
+    }
   }
 }
