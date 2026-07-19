@@ -20,7 +20,7 @@ import Foundation
 /// single handler can't name every command's concrete `ControlResponse<Payload>`
 /// (see `EarsIPC.ControlReply`).
 ///
-/// ## Command routing (the sixteen `ControlRequest` cases)
+/// ## Command routing (the eighteen `ControlRequest` cases)
 ///
 /// | command | routed to | reply payload |
 /// |---|---|---|
@@ -35,6 +35,8 @@ import Foundation
 /// | `session.open` | ``SessionRegistry/open(sources:slug:start:vocab:trigger:)`` | `SessionOpenData` |
 /// | `session.close` | ``SessionRegistry/close(id:)`` | `EmptyData` |
 /// | `session.list` | ``SessionRegistry/list()`` | `SessionListData` |
+/// | `session.add_source` | ``SessionRegistry/addSource(id:source:)`` | `EmptyData` |
+/// | `meeting.resolve` | ``MeetingRegistry/resolve(platform:externalID:)`` | `MeetingResolveData` |
 /// | `mark` | ``SessionRegistry/mark(sources:slug:range:trigger:)`` | `SessionOpenData` |
 /// | `ingest.open` | — (WebSocket-only, see below) | failure: "use the WebSocket ingest endpoint" |
 /// | `ingest.close` | — (WebSocket-only, see below) | failure: "use the WebSocket ingest endpoint" |
@@ -69,6 +71,13 @@ import Foundation
 public actor ControlServer {
   private var captureActors: [SourceID: CaptureActor]
   private let sessions: SessionRegistry
+  /// Meeting-identity owner for `meeting.resolve`; `nil` (the default, for
+  /// callers that don't wire meetings) makes the command fail clearly.
+  private let meetings: MeetingRegistry?
+  /// Called after every successful `session.close`, with the closed
+  /// descriptor — the seam ``EarsDaemon`` hangs the browser-triggered
+  /// on-close transcribe pipeline off. `nil` does nothing.
+  private let onSessionClosed: (@Sendable (SessionDescriptor) async -> Void)?
   private let dataRoot: URL
   private let clock: any NowProviding
   /// The daemon's start instant, for the `status` reply's `uptime_s`.
@@ -89,16 +98,24 @@ public actor ControlServer {
   ///   - clock: Wall-clock seam; injected so tests never touch real time.
   ///   - eventSink: Live-feed publish seam for `segment.publish` (see the
   ///     property doc); `nil` (the default) drops published segments.
+  ///   - meetings: Meeting-identity owner for `meeting.resolve`; `nil` (the
+  ///     default) makes that command fail clearly.
+  ///   - onSessionClosed: Called after every successful `session.close` with
+  ///     the closed descriptor (see the property doc); `nil` does nothing.
   public init(
     captureActors: [SourceID: CaptureActor],
     sessions: SessionRegistry,
     dataRoot: URL,
     startInstant: Instant,
     clock: any NowProviding = SystemClock(),
-    eventSink: EventSink? = nil
+    eventSink: EventSink? = nil,
+    meetings: MeetingRegistry? = nil,
+    onSessionClosed: (@Sendable (SessionDescriptor) async -> Void)? = nil
   ) {
     self.captureActors = captureActors
     self.sessions = sessions
+    self.meetings = meetings
+    self.onSessionClosed = onSessionClosed
     self.dataRoot = dataRoot
     self.startInstant = startInstant
     self.clock = clock
@@ -155,12 +172,17 @@ public actor ControlServer {
       return await handleCapturePause(source)
     case .captureResume(let source):
       return await handleCaptureResume(source)
-    case .sessionOpen(let sources, let slug, let start, let vocab):
-      return await handleSessionOpen(sources: sources, slug: slug, start: start, vocab: vocab)
+    case .sessionOpen(let sources, let slug, let start, let vocab, let trigger):
+      return await handleSessionOpen(
+        sources: sources, slug: slug, start: start, vocab: vocab, trigger: trigger)
     case .sessionClose(let id):
       return await handleSessionClose(id: id)
     case .sessionList:
       return await handleSessionList()
+    case .sessionAddSource(let id, let source):
+      return await handleSessionAddSource(id: id, source: source)
+    case .meetingResolve(let platform, let externalID):
+      return await handleMeetingResolve(platform: platform, externalID: externalID)
     case .mark(let sources, let slug, let range):
       return await handleMark(sources: sources, slug: slug, range: range)
     case .ingestOpen:
@@ -312,11 +334,11 @@ public actor ControlServer {
   // MARK: - session.open / session.close / session.list / mark
 
   private func handleSessionOpen(
-    sources: [SourceID], slug: String, start: Instant?, vocab: String?
+    sources: [SourceID], slug: String, start: Instant?, vocab: String?, trigger: TriggerKind?
   ) async -> ControlReply {
     do {
       let descriptor = try await sessions.open(
-        sources: sources, slug: slug, start: start, vocab: vocab)
+        sources: sources, slug: slug, start: start, vocab: vocab, trigger: trigger ?? .manual)
       return ControlReply(
         ControlResponse<SessionOpenData>.success(SessionOpenData(id: descriptor.id)))
     } catch {
@@ -326,10 +348,35 @@ public actor ControlServer {
 
   private func handleSessionClose(id: String) async -> ControlReply {
     do {
-      _ = try await sessions.close(id: id)
+      let descriptor = try await sessions.close(id: id)
+      await onSessionClosed?(descriptor)
       return ControlReply(ControlResponse<EmptyData>.success(EmptyData()))
     } catch {
       return ControlReply(ControlResponse<EmptyData>.failure(controlError(for: error)))
+    }
+  }
+
+  private func handleSessionAddSource(id: String, source: SourceID) async -> ControlReply {
+    do {
+      _ = try await sessions.addSource(id: id, source: source)
+      return ControlReply(ControlResponse<EmptyData>.success(EmptyData()))
+    } catch {
+      return ControlReply(ControlResponse<EmptyData>.failure(controlError(for: error)))
+    }
+  }
+
+  private func handleMeetingResolve(platform: String, externalID: String) async -> ControlReply {
+    guard let meetings else {
+      return ControlReply(
+        ControlResponse<MeetingResolveData>.failure(
+          "meeting.resolve is not supported: this daemon has no meeting registry"))
+    }
+    do {
+      let descriptor = try await meetings.resolve(platform: platform, externalID: externalID)
+      return ControlReply(
+        ControlResponse<MeetingResolveData>.success(MeetingResolveData(meetingID: descriptor.id)))
+    } catch {
+      return ControlReply(ControlResponse<MeetingResolveData>.failure(controlError(for: error)))
     }
   }
 
@@ -379,6 +426,14 @@ public actor ControlServer {
         return ControlError("no such session '\(id)'")
       case .sessionAlreadyClosed(let id):
         return ControlError("session '\(id)' is already closed")
+      }
+    }
+    if let error = error as? MeetingRegistryError {
+      switch error {
+      case .emptyPlatform:
+        return "meeting.resolve requires a non-empty platform"
+      case .emptyExternalID:
+        return "meeting.resolve requires a non-empty external_id"
       }
     }
     return ControlError("\(error)")

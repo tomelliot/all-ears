@@ -26,14 +26,14 @@ public actor AppSignalTriggerObserver {
   /// `"summarize"`) with the given arguments and returns its exit code. The
   /// production runner spawns the real binary via `Foundation.Process`
   /// (resolved through `PATH`, matching `EarsLLMKit.CommandLLMBackend`'s own
-  /// `/usr/bin/env` resolution); tests inject a scripted fake.
-  public typealias ProcessRunner = @Sendable (String, [String]) async -> Int32
+  /// `/usr/bin/env` resolution); tests inject a scripted fake. Now shared
+  /// with browser-triggered closes as ``OnClosePipelineRunner/ProcessRunner``.
+  public typealias ProcessRunner = OnClosePipelineRunner.ProcessRunner
 
   private let rules: [TriggerRuleConfiguration]
   private let sessions: SessionRegistry
   private let tracker: any RunningApplicationTracking
-  private let runProcess: ProcessRunner
-  private let outputRoot: URL
+  private let pipeline: OnClosePipelineRunner
   private let log: @Sendable (String) -> Void
 
   private var states: [String: TriggerRuleRuntimeState] = [:]
@@ -49,9 +49,8 @@ public actor AppSignalTriggerObserver {
   ) {
     self.rules = rules
     self.sessions = sessions
-    self.outputRoot = outputRoot
     self.tracker = tracker
-    self.runProcess = runProcess
+    self.pipeline = OnClosePipelineRunner(outputRoot: outputRoot, runProcess: runProcess, log: log)
     self.log = log
     for rule in rules {
       states[rule.name] = TriggerRuleRuntimeState(
@@ -148,93 +147,19 @@ public actor AppSignalTriggerObserver {
 
   // MARK: - on_close pipeline
 
-  /// Runs `rule.onClose`'s stages in order against the closed session,
-  /// stopping the chain — loudly — on the first non-zero exit. Never
-  /// silently continues past a failed stage as if the run succeeded.
+  /// Runs `rule.onClose`'s stages in order against the closed session, via
+  /// the shared ``OnClosePipelineRunner`` (which owns the stop-loudly-on-
+  /// failure contract and the per-stage argv construction).
   private func runOnClosePipeline(rule: TriggerRuleConfiguration, descriptor: SessionDescriptor)
     async
   {
-    for stage in rule.onClose {
-      guard ["transcribe", "cleanup", "summarize"].contains(stage) else {
-        log("trigger '\(rule.name)' on_close: unrecognised stage '\(stage)'; stopping the chain")
-        return
-      }
-      let arguments = pipelineArguments(stage: stage, descriptor: descriptor)
-      let exitCode = await runProcess(stage, arguments)
-      guard exitCode == 0 else {
-        log(
-          "trigger '\(rule.name)' on_close: stage '\(stage)' failed (exit \(exitCode)) for "
-            + "session '\(descriptor.id)'; stopping the chain"
-        )
-        return
-      }
-      log(
-        "trigger '\(rule.name)' on_close: stage '\(stage)' succeeded for session '\(descriptor.id)'"
-      )
-    }
+    await pipeline.run(
+      stages: rule.onClose, for: descriptor, context: "trigger '\(rule.name)'")
   }
 
-  /// Builds each stage's argv. `transcribe` resolves the session directly;
-  /// `cleanup`/`summarize` are handed the file path the *previous* stage is
-  /// expected to have written, per `docs/product/specs/llm-stages.md`'s
-  /// composition example (`transcribe --session "$SID" && cleanup
-  /// "$OUT/....transcript.md" && summarize "$OUT/....clean.md"`).
-  ///
-  /// **Known duplication:** the `<date>/<time>_<slug>.transcript.md` path
-  /// shape mirrors `transcribe`'s own `OutputPathResolution` convention,
-  /// restated here rather than shared, since that type lives in the
-  /// `transcribe` executable target, not a library `EarsDaemonKit` can
-  /// depend on. If that convention ever changes, this must change with it.
-  private func pipelineArguments(stage: String, descriptor: SessionDescriptor) -> [String] {
-    switch stage {
-    case "transcribe":
-      return ["--session", descriptor.id]
-    case "cleanup":
-      return [transcriptPath(for: descriptor).path]
-    case "summarize":
-      return [cleanedPath(for: descriptor).path, "--all-presets"]
-    default:
-      return []
-    }
-  }
-
-  private func transcriptPath(for descriptor: SessionDescriptor) -> URL {
-    let timestamp = FilenameTimestampCodec.string(for: descriptor.start)
-    let components = timestamp.split(separator: "T", maxSplits: 1)
-    let date = String(components[0])
-    let time = String(components[1].dropLast())  // drop trailing "Z"
-    return
-      outputRoot
-      .appendingPathComponent(date)
-      .appendingPathComponent("\(time)_\(descriptor.slug).transcript.md")
-  }
-
-  private func cleanedPath(for descriptor: SessionDescriptor) -> URL {
-    let transcript = transcriptPath(for: descriptor)
-    let name = transcript.lastPathComponent
-    guard name.hasSuffix(".transcript.md") else { return transcript }
-    let stem = String(name.dropLast(".transcript.md".count))
-    return transcript.deletingLastPathComponent().appendingPathComponent("\(stem).clean.md")
-  }
-
-  /// The production ``ProcessRunner``: spawns `name` (PATH-resolved via
-  /// `/usr/bin/env`, matching `EarsLLMKit.CommandLLMBackend`'s own
-  /// resolution) with `arguments`, waits for exit, and returns its status.
-  public static let realProcessRunner: ProcessRunner = { name, arguments in
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    process.arguments = [name] + arguments
-    do {
-      try process.run()
-    } catch {
-      return -1
-    }
-    return await withCheckedContinuation { continuation in
-      process.terminationHandler = { finished in
-        continuation.resume(returning: finished.terminationStatus)
-      }
-    }
-  }
+  /// The production ``ProcessRunner`` — kept as an alias so existing callers
+  /// (and tests) don't need to know the pipeline moved.
+  public static let realProcessRunner: ProcessRunner = OnClosePipelineRunner.realProcessRunner
 
   // MARK: - Testing hooks
 

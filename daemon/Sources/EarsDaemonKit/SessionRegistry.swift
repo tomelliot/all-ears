@@ -147,6 +147,37 @@ public actor SessionRegistry {
     return descriptor
   }
 
+  /// Append `source` to an open session's source list and persist — the
+  /// `session.add_source` command. For sources that didn't exist yet at
+  /// `session.open` time (a meeting participant's dynamic `browser:*` source
+  /// opening mid-call) and would otherwise be silently excluded from the
+  /// session's transcription (`TranscribeRangeResolution` reads
+  /// `descriptor.sources` as written).
+  ///
+  /// Idempotent for an already-listed source (returns the unchanged
+  /// descriptor without rewriting `session.toml`).
+  ///
+  /// - Throws: ``SessionRegistryError/sessionNotFound(_:)`` /
+  ///   ``SessionRegistryError/sessionAlreadyClosed(_:)`` /
+  ///   ``SessionRegistryError/unknownSource(_:)``.
+  public func addSource(id: String, source: SourceID) async throws -> SessionDescriptor {
+    guard var descriptor = sessions[id] else {
+      throw SessionRegistryError.sessionNotFound(id)
+    }
+    guard descriptor.state == .open else {
+      throw SessionRegistryError.sessionAlreadyClosed(id)
+    }
+    guard !descriptor.sources.contains(source) else { return descriptor }
+    let known = await knownSourceIDs()
+    guard known.contains(source) else {
+      throw SessionRegistryError.unknownSource(source)
+    }
+    descriptor.sources.append(source)
+    try SessionStore.write(descriptor, dataRoot: dataRoot)
+    sessions[id] = descriptor
+    return descriptor
+  }
+
   /// Open and recently-closed sessions, for the `session.list` reply.
   /// `ControlServer` maps each to a `SessionSummary`. Sorted by `start` so
   /// the reply order is deterministic rather than dictionary-iteration order.

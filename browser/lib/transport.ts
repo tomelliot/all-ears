@@ -35,6 +35,11 @@ interface ParticipantState {
 }
 
 export class EarsSocket {
+  /** Invoked when an ingest.open succeeds — the moment a participant's source
+   * actually exists on earsd and can be named on a session
+   * (meeting-tracker.ts listens to open sessions / add sources). */
+  onStreamOpened?: (participantId: ParticipantId, platform: Platform) => void;
+
   private ws?: WebSocket;
   private status: TransportStatus = "disconnected";
   private closedByUs = false;
@@ -205,6 +210,7 @@ export class EarsSocket {
       const frames = st.queue;
       st.queue = [];
       for (const f of frames) this.sendFrame(st, st.streamId, f);
+      this.onStreamOpened?.(req.participantId, st.platform);
     } else {
       // No per-frame retry: mark failed and drop this participant's audio.
       st.failed = true;

@@ -25,6 +25,11 @@ struct EarsdConfigSchemaTests {
       "port": .int(47811),
       "allowed_origins": .array([]),
     ])
+    let controlWS: ConfigValue = .table([
+      "enabled": .bool(false),
+      "port": .int(47812),
+      "allowed_origins": .array([]),
+    ])
     let micSource: ConfigValue = .table([
       "id": .string("mic"),
       "class": .string("mic"),
@@ -42,10 +47,12 @@ struct EarsdConfigSchemaTests {
       "channels": .int(1),
       "vad": vad,
       "ingest_ws": ingestWS,
+      "control_ws": controlWS,
       "source": .array([micSource]),
     ])
     let triggersTable: ConfigValue = .table([
       "enabled": .bool(false),
+      "transcribe_on_browser_session_close": .bool(false),
       "rule": .array([]),
     ])
     let expected: ConfigValue = .table(["earsd": earsdTable, "triggers": triggersTable])

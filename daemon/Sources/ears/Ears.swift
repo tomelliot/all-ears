@@ -386,7 +386,7 @@ struct SessionOpenCommand: AsyncParsableCommand {
       throw ExitCode(1)
     }
     let request = ControlRequest.sessionOpen(
-      sources: sources.map { SourceID($0) }, slug: slug, start: nil, vocab: vocab)
+      sources: sources.map { SourceID($0) }, slug: slug, start: nil, vocab: vocab, trigger: nil)
     let response = try await ControlClientRuntime.send(
       request, expecting: SessionOpenData.self, via: client, debug: debug)
     await client.close()

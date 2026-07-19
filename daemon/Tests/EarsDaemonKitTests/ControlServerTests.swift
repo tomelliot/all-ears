@@ -312,4 +312,71 @@ struct ControlServerTests {
     let json = try envelope(reply)
     #expect(json["ok"] as? Bool == true)
   }
+
+  // MARK: - meeting.resolve / session.add_source / trigger provenance
+
+  @Test("meeting.resolve fails clearly when no meeting registry is wired")
+  func meetingResolveWithoutRegistryFails() async throws {
+    let server = makeServer(dataRoot: try makeDataRoot(), clock: ManualClock())
+
+    let reply = await server.handle(.meetingResolve(platform: "meet", externalID: "abc"))
+    let json = try envelope(reply)
+    #expect(json["ok"] as? Bool == false)
+  }
+
+  @Test("meeting.resolve returns a stable meeting_id via the registry")
+  func meetingResolveReturnsStableID() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock()
+    let server = ControlServer(
+      captureActors: [:],
+      sessions: makeSessions(dataRoot: dataRoot, clock: clock),
+      dataRoot: dataRoot,
+      startInstant: Instant(secondsSinceEpoch: 0),
+      clock: clock,
+      meetings: MeetingRegistry(dataRoot: dataRoot, clock: clock))
+
+    let first = try envelope(
+      await server.handle(.meetingResolve(platform: "meet", externalID: "AbC")))
+    #expect(first["ok"] as? Bool == true)
+    let firstID = try requireString(try requireDict(first, key: "data"), key: "meeting_id")
+    #expect(!firstID.isEmpty)
+
+    let again = try envelope(
+      await server.handle(.meetingResolve(platform: "meet", externalID: "AbC")))
+    let againID = try requireString(try requireDict(again, key: "data"), key: "meeting_id")
+    #expect(againID == firstID)
+  }
+
+  @Test("session.open records the wire trigger, and close fires onSessionClosed with it")
+  func sessionOpenTriggerAndOnClosed() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_784_284_200))
+    let closed = Mutex<[SessionDescriptor]>([])
+    let server = ControlServer(
+      captureActors: [:],
+      sessions: SessionRegistry(dataRoot: dataRoot, knownSourceIDs: { ["mic"] }, clock: clock),
+      dataRoot: dataRoot,
+      startInstant: Instant(secondsSinceEpoch: 0),
+      clock: clock,
+      onSessionClosed: { descriptor in
+        closed.withLock { $0.append(descriptor) }
+      })
+
+    let openReply = try envelope(
+      await server.handle(
+        .sessionOpen(
+          sources: ["mic"], slug: "call", start: nil, vocab: nil, trigger: .browserExtension)))
+    #expect(openReply["ok"] as? Bool == true)
+    let id = try requireString(try requireDict(openReply, key: "data"), key: "id")
+
+    let addReply = try envelope(await server.handle(.sessionAddSource(id: id, source: "mic")))
+    #expect(addReply["ok"] as? Bool == true)
+
+    let closeReply = try envelope(await server.handle(.sessionClose(id: id)))
+    #expect(closeReply["ok"] as? Bool == true)
+    let descriptors = closed.withLock { $0 }
+    #expect(descriptors.count == 1)
+    #expect(descriptors.first?.trigger == .browserExtension)
+  }
 }

@@ -134,6 +134,29 @@
       .badge[data-status="disconnected"] .badge-dot {
         background: var(--bad);
       }
+      /* Meeting states: recording pulses red (classic record light), paused
+         holds steady amber, transcribing pulses green before settling back
+         to the steady connected green. */
+      .badge[data-status="recording"] .badge-dot {
+        background: var(--bad);
+        animation: dot-pulse 1.6s ease-in-out infinite;
+      }
+      .badge[data-status="paused"] .badge-dot {
+        background: var(--accent);
+      }
+      .badge[data-status="transcribing"] .badge-dot {
+        background: var(--ok);
+        animation: dot-pulse 1.6s ease-in-out infinite;
+      }
+      @keyframes dot-pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.35;
+        }
+      }
 
       /* ── Capture row with switch (shadcn switch, brand-tuned) ──────────── */
       .row {
@@ -219,6 +242,15 @@
           <span class="switch-track"><span class="switch-thumb"></span></span>
         </span>
         <span id="toggle-label">Capture</span>
+      </label>
+      <!-- Shown only while a meeting is live. Pausing closes the daemon
+           session around the paused span; audio capture keeps running. -->
+      <label class="row" id="transcription-row" hidden>
+        <span class="switch">
+          <input type="checkbox" role="switch" id="transcription-toggle" disabled />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </span>
+        <span id="transcription-label">Transcription</span>
       </label>
     </main>
     <script type="module" src="./main.ts"></script>

@@ -1,5 +1,8 @@
 /// One control-socket request: the sixteen `cmd`s in
-/// `docs/specs/capture-daemon.md`'s control-socket command table.
+/// `docs/specs/capture-daemon.md`'s control-socket command table, plus the
+/// meeting-aware additions (`meeting.resolve`, `session.add_source`, and
+/// `session.open`'s optional `trigger`) the browser extension's control-plane
+/// WebSocket uses.
 ///
 /// Each case mirrors one command of the spec's table, discriminated on disk
 /// by the `"cmd"` field — the same flat-tagged-union shape ``IndexEvent``
@@ -14,9 +17,11 @@
 /// {"cmd":"sources.disable","source":"app:us.zoom.xos"}
 /// {"cmd":"capture.pause","source":"mic"}       // source omitted => all sources
 /// {"cmd":"capture.resume","source":"mic"}      // source omitted => all sources
-/// {"cmd":"session.open","sources":["mic"],"slug":"standup","start":"...","vocab":"..."}
+/// {"cmd":"session.open","sources":["mic"],"slug":"standup","start":"...","vocab":"...","trigger":"browser-extension"}
 /// {"cmd":"session.close","id":"2026-07-17T10-30-00Z_standup"}
 /// {"cmd":"session.list"}
+/// {"cmd":"session.add_source","id":"2026-07-17T10-30-00Z_standup","source":"browser:meet:jane"}
+/// {"cmd":"meeting.resolve","platform":"meet","external_id":"AbCdEfGhIjKl"}
 /// {"cmd":"mark","sources":["mic"],"slug":"hallway-chat","last_seconds":1800}
 /// {"cmd":"ingest.open","source":"browser:meet","format":{"sample_rate":48000,"channels":1,"encoding":"pcm_s16le"}}
 /// {"cmd":"ingest.close","stream_id":"s7"}
@@ -47,12 +52,23 @@ public enum ControlRequest: Sendable, Hashable {
   /// Resume a source, or all sources when `source` is `nil`.
   case captureResume(source: SourceID?)
   /// Open a session across `sources`, named `slug`; `start` defaults to now
-  /// when `nil`, `vocab` names an optional per-session vocabulary file.
-  case sessionOpen(sources: [SourceID], slug: String, start: Instant?, vocab: String?)
+  /// when `nil`, `vocab` names an optional per-session vocabulary file, and
+  /// `trigger` records provenance (defaults to `.manual` when omitted).
+  case sessionOpen(
+    sources: [SourceID], slug: String, start: Instant?, vocab: String?, trigger: TriggerKind?)
   /// Close a session by id (sets `end`, `state = closed`).
   case sessionClose(id: String)
   /// Open/recent sessions.
   case sessionList
+  /// Append `source` to an open session's source list — for sources (e.g. a
+  /// meeting participant's dynamic `browser:*` source) that didn't exist yet
+  /// at `session.open` time and would otherwise be excluded from the
+  /// session's transcription.
+  case sessionAddSource(id: String, source: SourceID)
+  /// Look up (or mint) the daemon-owned meeting UUID for a platform-specific
+  /// external meeting id. Idempotent: the same `(platform, external_id)` pair
+  /// always resolves to the same meeting id, across daemon restarts.
+  case meetingResolve(platform: String, externalID: String)
   /// Retroactively define a range as a session — see ``MarkRange``.
   case mark(sources: [SourceID], slug: String, range: MarkRange)
   /// Begin pushing audio for a `browser:<label>` source; declares its format.
@@ -72,9 +88,10 @@ public enum ControlRequest: Sendable, Hashable {
 extension ControlRequest: Codable {
   fileprivate enum CodingKeys: String, CodingKey {
     case cmd, spec, source, sources, slug, start, end, vocab, id, format
-    case session, speaker, text
+    case session, speaker, text, trigger, platform
     case lastSeconds = "last_seconds"
     case streamID = "stream_id"
+    case externalID = "external_id"
   }
 
   private enum Tag: String, Codable {
@@ -89,6 +106,8 @@ extension ControlRequest: Codable {
     case sessionOpen = "session.open"
     case sessionClose = "session.close"
     case sessionList = "session.list"
+    case sessionAddSource = "session.add_source"
+    case meetingResolve = "meeting.resolve"
     case mark
     case ingestOpen = "ingest.open"
     case ingestClose = "ingest.close"
@@ -121,12 +140,23 @@ extension ControlRequest: Codable {
         sources: try container.decode([SourceID].self, forKey: .sources),
         slug: try container.decode(String.self, forKey: .slug),
         start: try container.decodeISO8601InstantIfPresent(forKey: .start),
-        vocab: try container.decodeIfPresent(String.self, forKey: .vocab)
+        vocab: try container.decodeIfPresent(String.self, forKey: .vocab),
+        trigger: try container.decodeIfPresent(TriggerKind.self, forKey: .trigger)
       )
     case .sessionClose:
       self = .sessionClose(id: try container.decode(String.self, forKey: .id))
     case .sessionList:
       self = .sessionList
+    case .sessionAddSource:
+      self = .sessionAddSource(
+        id: try container.decode(String.self, forKey: .id),
+        source: try container.decode(SourceID.self, forKey: .source)
+      )
+    case .meetingResolve:
+      self = .meetingResolve(
+        platform: try container.decode(String.self, forKey: .platform),
+        externalID: try container.decode(String.self, forKey: .externalID)
+      )
     case .mark:
       self = .mark(
         sources: try container.decode([SourceID].self, forKey: .sources),
@@ -204,17 +234,26 @@ extension ControlRequest: Codable {
     case .captureResume(let source):
       try container.encode(Tag.captureResume, forKey: .cmd)
       try container.encodeIfPresent(source, forKey: .source)
-    case .sessionOpen(let sources, let slug, let start, let vocab):
+    case .sessionOpen(let sources, let slug, let start, let vocab, let trigger):
       try container.encode(Tag.sessionOpen, forKey: .cmd)
       try container.encode(sources, forKey: .sources)
       try container.encode(slug, forKey: .slug)
       try container.encodeISO8601InstantIfPresent(start, forKey: .start)
       try container.encodeIfPresent(vocab, forKey: .vocab)
+      try container.encodeIfPresent(trigger, forKey: .trigger)
     case .sessionClose(let id):
       try container.encode(Tag.sessionClose, forKey: .cmd)
       try container.encode(id, forKey: .id)
     case .sessionList:
       try container.encode(Tag.sessionList, forKey: .cmd)
+    case .sessionAddSource(let id, let source):
+      try container.encode(Tag.sessionAddSource, forKey: .cmd)
+      try container.encode(id, forKey: .id)
+      try container.encode(source, forKey: .source)
+    case .meetingResolve(let platform, let externalID):
+      try container.encode(Tag.meetingResolve, forKey: .cmd)
+      try container.encode(platform, forKey: .platform)
+      try container.encode(externalID, forKey: .externalID)
     case .mark(let sources, let slug, let range):
       try container.encode(Tag.mark, forKey: .cmd)
       try container.encode(sources, forKey: .sources)

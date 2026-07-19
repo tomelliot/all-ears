@@ -157,6 +157,54 @@ struct SessionRegistryTests {
     }
   }
 
+  // MARK: - addSource
+
+  @Test("addSource appends a known source to an open session and persists it")
+  func addsSourceAndPersists() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_784_284_200))
+    let registry = makeRegistry(dataRoot: dataRoot, clock: clock)
+    let opened = try await registry.open(
+      sources: [Self.mic], slug: "call", start: nil, vocab: nil)
+
+    let updated = try await registry.addSource(id: opened.id, source: Self.system)
+
+    #expect(updated.sources == [Self.mic, Self.system])
+    let onDisk = try SessionStore.read(sessionID: opened.id, dataRoot: dataRoot)
+    #expect(onDisk.sources == [Self.mic, Self.system])
+  }
+
+  @Test("addSource is idempotent for an already-listed source")
+  func addSourceIdempotent() async throws {
+    let dataRoot = try makeDataRoot()
+    let registry = makeRegistry(dataRoot: dataRoot, clock: ManualClock())
+    let opened = try await registry.open(
+      sources: [Self.mic], slug: "call", start: nil, vocab: nil)
+
+    let updated = try await registry.addSource(id: opened.id, source: Self.mic)
+
+    #expect(updated.sources == [Self.mic])
+  }
+
+  @Test("addSource throws for an unknown source, a closed session, and a missing session")
+  func addSourceValidates() async throws {
+    let dataRoot = try makeDataRoot()
+    let registry = makeRegistry(dataRoot: dataRoot, clock: ManualClock())
+    let opened = try await registry.open(
+      sources: [Self.mic], slug: "call", start: nil, vocab: nil)
+
+    await #expect(throws: SessionRegistryError.unknownSource("browser:meet:ghost")) {
+      try await registry.addSource(id: opened.id, source: "browser:meet:ghost")
+    }
+    await #expect(throws: SessionRegistryError.sessionNotFound("nope")) {
+      try await registry.addSource(id: "nope", source: Self.system)
+    }
+    _ = try await registry.close(id: opened.id)
+    await #expect(throws: SessionRegistryError.sessionAlreadyClosed(opened.id)) {
+      try await registry.addSource(id: opened.id, source: Self.system)
+    }
+  }
+
   // MARK: - list
 
   @Test("list returns open and closed sessions sorted by start")
