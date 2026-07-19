@@ -60,15 +60,16 @@
         gap: 8px;
       }
       .brand svg {
-        width: 20px;
-        height: 20px;
+        /* The viewBox is cropped to the mark's ink bounds so the box is the
+           drawing — flex centring then aligns it honestly and the 8px gap is
+           the real visual gap. At 17px tall the arc matches the wordmark's
+           cap height and the lobe dot hangs just below the baseline, like a
+           descender. */
+        width: 10.34px;
+        height: 17px;
         display: block;
         color: var(--fg);
         flex: none;
-        /* Optical alignment: the mark's ink (arc + lobe dot) spans 13–87 of
-           the viewBox, so its centre sits ~2px below the wordmark's glyph
-           centre when the boxes are flex-centred. Lift it to match. */
-        transform: translateY(-1.5px);
       }
       .brand b {
         font-size: 15px;
@@ -93,7 +94,7 @@
         padding: 0 5px;
         border: 1px solid var(--line);
         border-radius: 999px;
-        background: var(--card);
+        background: transparent;
         overflow: hidden;
         cursor: default;
       }
@@ -139,10 +140,7 @@
         display: flex;
         align-items: center;
         gap: 10px;
-        padding: 9px 12px;
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        background: var(--paper-2);
+        padding: 2px 0;
         font-size: 13px;
         cursor: pointer;
         user-select: none;
@@ -201,7 +199,7 @@
     <main>
       <header>
         <div class="brand">
-          <svg viewBox="0 0 100 100" aria-hidden="true">
+          <svg viewBox="23 13 45 74" aria-hidden="true">
             <g transform="matrix(1 0 0 -1 0 100)">
               <path fill="none" stroke="currentColor" stroke-width="12" stroke-linecap="round"
                 stroke-linejoin="round" d="M62,33 C43,31 29,43 29,54 C29,68 43,79 62,81"/>
@@ -220,7 +218,7 @@
           <input type="checkbox" role="switch" id="toggle" disabled />
           <span class="switch-track"><span class="switch-thumb"></span></span>
         </span>
-        <span id="toggle-label">capture</span>
+        <span id="toggle-label">Capture</span>
       </label>
     </main>
     <script type="module" src="./main.ts"></script>

@@ -38,7 +38,7 @@ function renderToggle(enabled: boolean): void {
     toggleEl.checked = enabled;
     toggleEl.disabled = false;
   }
-  if (toggleLabelEl) toggleLabelEl.textContent = enabled ? "capture on" : "capture off";
+  if (toggleLabelEl) toggleLabelEl.textContent = enabled ? "Capture on" : "Capture off";
 }
 
 // ── Toggle ⇄ storage.local ──────────────────────────────────────────────────
