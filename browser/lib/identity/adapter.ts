@@ -13,6 +13,22 @@ export interface PlatformAdapter {
   ): ParticipantId | null;
   /** Optional: human label for a participant id, for logs/UI. */
   displayName?(id: ParticipantId): string | undefined;
+  /**
+   * Optional: called by audio-tap.ts whenever a track's decoded audio crosses
+   * into or out of "speaking" (peak over threshold). Adapters that don't use
+   * this signal simply omit it — audio-tap.ts calls it unconditionally, best-
+   * effort, and never lets an adapter throw back into the capture path.
+   */
+  onTrackSpeaking?(track: MediaStreamTrack, speaking: boolean): void;
+  /**
+   * Optional: register a callback for a later, asynchronous identity upgrade
+   * — an id resolved after identify() already returned null (or a fallback)
+   * for that track at +track time. At most one upgrade per track is expected;
+   * audio-tap.ts restarts that track's pipeline as a new segment under the
+   * upgraded id (see audio-tap.ts's handleIdentityUpgrade for why a rename-
+   * in-place wasn't used).
+   */
+  onIdentify?(cb: (track: MediaStreamTrack, id: ParticipantId) => void): void;
   /** Optional teardown of observers. */
   dispose?(): void;
 }

@@ -1,16 +1,80 @@
 import { registerAdapter, type PlatformAdapter } from "./adapter";
 import type { ParticipantId } from "../protocol";
+import { setCollectionsListener } from "../rtc-hook";
+import type { CollectionsSpeakingEvent } from "./meet-collections";
+import { SpeakingCorrelator, type CorrelatorMatch } from "./meet-correlator";
 
-// Meet identity — Phase 4: tile-DOM correlation.
+// Meet identity — Phase 4: tile-DOM correlation (identify(), synchronous),
+// plus Phase 4 collections-datachannel upgrade (onIdentify(), asynchronous).
 //
-// Approach (specs/extension.md §Platform adapter): Meet renders a per-
-// participant tile; identify() correlates the captured remote track to the
-// tile's media element (srcObject match) and reads the participant id + display
-// name off the tile's DOM. Everything is synchronous and best-effort by
-// contract: any miss — tile not mounted yet, DOM shape changed, track not
+// identify() approach (specs/extension.md §Platform adapter): Meet renders a
+// per-participant tile; identify() correlates the captured remote track to
+// the tile's media element (srcObject match) and reads the participant id +
+// display name off the tile's DOM. Everything is synchronous and best-effort
+// by contract: any miss — tile not mounted yet, DOM shape changed, track not
 // attached to any media element — returns null and audio-tap.ts's speaker-<n>
 // fallback carries the audio. Identity never blocks, throws into, or delays
-// capture.
+// capture. Per the VERIFICATION STATUS section below, this path is confirmed
+// dead on the current build and identify() is expected to keep returning null.
+//
+// ── COLLECTIONS-DATACHANNEL UPGRADE (journal #49-#58) ───────────────────────
+//
+// identify()'s one-shot, synchronous contract can't express a correlation
+// that only becomes confident after observing speaking activity (the
+// collections datachannel gives a device id tied to "someone is speaking now",
+// not to a specific MediaStreamTrack — see
+// docs/product/browser/prompts/meet-identify-via-collections.md's Task 2/3).
+// So this doesn't change identify()'s behavior at all. Instead:
+//
+//   1. rtc-hook.ts's installMeetCollectionsTracer parses the "collections"
+//      RTCDataChannel (meet-collections.ts) and forwards events here via
+//      setCollectionsListener.
+//   2. audio-tap.ts calls onTrackSpeaking(track, speaking) on every track's
+//      audio-domain speaking edge (unconditionally, not debug-gated).
+//   3. Both onset streams feed a SpeakingCorrelator (meet-correlator.ts, pure
+//      logic, independently unit-tested): a device onset and exactly one
+//      live track's audio onset within ~200ms of each other is a candidate
+//      pairing. Requires CONFIRM_THRESHOLD (1, see its own comment below)
+//      consecutive confirming turns before it's trusted.
+//   4. Once confirmed, the upgraded id is pushed via the onIdentify(cb)
+//      callback registered by audio-tap.ts, which restarts that track's
+//      pipeline as a new segment under the real id (see audio-tap.ts's
+//      handleIdentityUpgrade for why "new segment" was chosen over
+//      renaming a running segment in place).
+//
+// Degrades silently if the channel never appears or stops parsing (Meet
+// changed the format) — the correlator just never confirms a match, and
+// identify()/onIdentify fall back to speaker-<n> exactly as they already do.
+// rtc-hook.ts warns once (not per-message) if messages arrive but stop
+// parsing; see maybeWarnCollectionsSchema there.
+//
+// Investigated and rejected: bootstrapping identity at call start from the
+// larger multi-device "roster" message collections also sends (containing
+// each device id plus SSRC-shaped numbers, e.g. one entry per device with a
+// paired-SSRC "FID" group) by matching those numbers against our own
+// RTCPeerConnection's getStats() SSRCs, to skip waiting for anyone to speak.
+// Live-tested (2026-07-19): none of the roster message's numeric fields
+// appear anywhere in our own receivers' stats, across every report type
+// (inbound-rtp, remote-outbound-rtp, transport, candidate-pair, etc) — Meet's
+// SFU remaps SSRCs to small local sequential values (6666, 6667, ...) with no
+// numeric relationship to whatever it reports internally, matching journal
+// #43's original SSRC-correlation finding. There is no bootstrap shortcut;
+// speaking-onset correlation is the only signal available.
+//
+// ── LIVE VERIFICATION STATUS (collections upgrade) ──────────────────────────
+// Live-verified end to end (2026-07-19, journal #55-#58, real 3-participant
+// Meet call): the production tracer parsed real traffic, the correlator
+// accumulated and reported a correct match, and MeetAdapter pushed an
+// onIdentify upgrade that audio-tap.ts's handleIdentityUpgrade restarted
+// cleanly as a new segment — confirmed correct for one participant
+// end-to-end. That same session caught and fixed a real schema bug (the
+// speaking-flag path was missing a nesting level; see meet-collections.ts's
+// header comment). The second non-self participant's track died mid-test to
+// the pre-existing, unrelated AudioDecoder bug (journal #45) before its
+// upgrade could be observed — likely fine (its wire data looked identical in
+// shape) but not itself confirmed. CONFIRM_THRESHOLD was 3 for this run and
+// is now 1 (see that constant's comment) based on zero ambiguous matches
+// observed across every turn in this session.
 //
 // ── VERIFICATION STATUS ──────────────────────────────────────────────────
 // Live-verified 2026-07-18 (Chrome, meet.google.com, 3-account real call —
@@ -178,6 +242,19 @@ function mediaStreamOf(el: MediaElementLike): StreamRef | null {
   return so;
 }
 
+// Consecutive confirming turns (SpeakingCorrelator) required before an
+// onIdentify upgrade fires. Shipped at 3 (conservative per Task 4), then
+// loosened to 1 after live verification (2026-07-19, journal): a live
+// 3-participant call produced zero ambiguous matches across every turn
+// observed — the correlator's own "exactly one live track's audio onset
+// within the window" requirement (meet-correlator.ts) is already the primary
+// false-positive guard per event; requiring the *same* pairing to repeat 3
+// times on top of that mostly just adds latency (each unmute/first-turn wait)
+// without having caught a real false positive in testing. Revisit if live
+// use ever shows a single-turn upgrade landing on the wrong participant.
+const CONFIRM_THRESHOLD = 1;
+const CORRELATION_WINDOW_MS = 200; // journal #50: onset pairs landed within tens of ms
+
 class MeetAdapter implements PlatformAdapter {
   readonly platform = "meet" as const;
 
@@ -189,9 +266,31 @@ class MeetAdapter implements PlatformAdapter {
   private warnedMissingIds = false;
   private disposed = false;
 
+  // ── Collections-datachannel upgrade state (see file-header doc comment) ──
+  private readonly correlator = new SpeakingCorrelator(CORRELATION_WINDOW_MS);
+  /** deviceId → last-known speaking state, for future use (e.g. debugging);
+   * not read for the correlation decision itself, which lives in correlator. */
+  private readonly deviceState = new Map<string, { speaking: boolean; lastSeen: number }>();
+  /** track.id → live track, so a later match can hand the real track object
+   * back to onIdentify. Populated from both identify() and onTrackSpeaking(),
+   * whichever sees a track first; never explicitly pruned (bounded by the
+   * small number of tracks live in a call, and dispose() clears it). */
+  private readonly liveTracksById = new Map<string, MediaStreamTrack>();
+  /** track.id → deviceId already pushed via onIdentify, so a repeat match
+   * doesn't re-fire the callback. */
+  private readonly upgradedTracks = new Map<string, ParticipantId>();
+  private identifyCb: ((track: MediaStreamTrack, id: ParticipantId) => void) | null = null;
+
+  constructor() {
+    // Latest-registration-wins, same handoff pattern as rtc-hook.ts's own
+    // setTrackSink — each epoch's fresh MeetAdapter re-registers itself.
+    setCollectionsListener((event) => this.onCollectionsEvent(event));
+  }
+
   identify(track: MediaStreamTrack, stream: MediaStream): ParticipantId | null {
     // Best-effort by contract: a broken or changed Meet DOM must degrade to
     // speaker-<n>, never throw into the capture path.
+    this.liveTracksById.set(track.id, track);
     try {
       return this.correlate(track, stream);
     } catch {
@@ -208,11 +307,56 @@ class MeetAdapter implements PlatformAdapter {
     return this.names.get(id);
   }
 
+  onIdentify(cb: (track: MediaStreamTrack, id: ParticipantId) => void): void {
+    this.identifyCb = cb;
+  }
+
+  /** audio-tap.ts calls this unconditionally on every track's audio-domain
+   * speaking edge. Best-effort: never throws into the capture path. */
+  onTrackSpeaking(track: MediaStreamTrack, speaking: boolean): void {
+    if (this.disposed) return;
+    try {
+      this.liveTracksById.set(track.id, track);
+      if (!speaking) return; // only onsets feed the correlator (see meet-correlator.ts)
+      this.applyMatch(this.correlator.recordAudioOnset(track.id, Date.now()));
+    } catch {
+      // best-effort — a broken correlation must never affect capture
+    }
+  }
+
+  private onCollectionsEvent(event: CollectionsSpeakingEvent): void {
+    if (this.disposed) return;
+    try {
+      this.deviceState.set(event.deviceId, { speaking: event.speaking, lastSeen: Date.now() });
+      if (!event.speaking) return; // only turn-start (flag 0) feeds the correlator
+      this.applyMatch(this.correlator.recordDeviceOnset(event.deviceId, Date.now()));
+    } catch {
+      // best-effort — same contract as onTrackSpeaking
+    }
+  }
+
+  private applyMatch(match: CorrelatorMatch | null): void {
+    if (!match || match.confirmations < CONFIRM_THRESHOLD) return;
+    if (this.upgradedTracks.get(match.trackKey) === match.deviceId) return; // already pushed
+    const track = this.liveTracksById.get(match.trackKey);
+    if (!track) return; // track ended before confirmation landed
+    this.upgradedTracks.set(match.trackKey, match.deviceId);
+    console.log(
+      `[ears] Meet identity upgraded via collections datachannel: track ${match.trackKey} → ${match.deviceId} ` +
+        `(${match.confirmations} confirming turns)`,
+    );
+    this.identifyCb?.(track, match.deviceId);
+  }
+
   /**
    * Disconnect the observer and drop caches. Idempotent. Nothing calls
    * adapter.dispose() yet — epoch teardown in audio-tap.ts only stops
    * pipelines (pre-existing gap, outside Phase 4's scope) — but this is ready
-   * for when it does.
+   * for when it does. Deliberately does NOT call setCollectionsListener(null):
+   * a newer epoch's MeetAdapter may already have re-registered itself by the
+   * time an older one disposes, and clearing unconditionally would clobber
+   * that registration — the disposed-guard in onCollectionsEvent/
+   * onTrackSpeaking is what actually stops a disposed adapter from acting.
    */
   dispose(): void {
     this.disposed = true;

@@ -1,5 +1,7 @@
+import { gzipSync } from "node:zlib";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { installHook, setEncodedAudioListener, type EncodedAudioFrameLike } from "./rtc-hook";
+import { installHook, setCollectionsListener, setEncodedAudioListener, type EncodedAudioFrameLike } from "./rtc-hook";
+import type { CollectionsSpeakingEvent } from "./identity/meet-collections";
 
 // Node has global ReadableStream/WritableStream (18+); no DOM needed. We fake
 // just enough of the browser surface (window === globalThis, location,
@@ -60,7 +62,14 @@ function setUpGlobals(host: string, nativeCreateEncodedStreams?: (...a: unknown[
   g.location = { host };
 
   class FakeRTCPeerConnection {
-    addEventListener(): void {}
+    private listeners = new Map<string, Set<(ev: unknown) => void>>();
+    addEventListener(type: string, fn: (ev: unknown) => void): void {
+      if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+      this.listeners.get(type)!.add(fn);
+    }
+    dispatch(type: string, ev: unknown): void {
+      for (const fn of [...(this.listeners.get(type) ?? [])]) fn(ev);
+    }
   }
   g.RTCPeerConnection = FakeRTCPeerConnection;
 
@@ -215,5 +224,124 @@ describe("Meet encoded-audio tee (rtc-hook.ts)", () => {
     expect(epoch2).toHaveLength(1);
     expect(epoch1).toHaveLength(1); // epoch1 never received epoch2's frame
     expect(native).toHaveBeenCalledTimes(1); // createEncodedStreams() called exactly once, ever
+  });
+});
+
+// ── Meet collections datachannel (production tracer, not the debug one) ────
+
+interface FakeDataChannel {
+  label: string;
+  addEventListener(type: string, fn: (ev: unknown) => void): void;
+  dispatch(type: string, ev: unknown): void;
+}
+
+function fakeDataChannel(label: string): FakeDataChannel {
+  const listeners = new Map<string, Set<(ev: unknown) => void>>();
+  return {
+    label,
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type)!.add(fn);
+    },
+    dispatch(type, ev) {
+      for (const fn of [...(listeners.get(type) ?? [])]) fn(ev);
+    },
+  };
+}
+
+// Minimal synthetic protobuf encoder matching the documented 1.2.3.{2,10}
+// schema (journal #49) — same approach as identity/meet-collections.test.ts;
+// see that file's header comment for why real captured fixtures aren't used.
+function encodeVarint(n: bigint): number[] {
+  const out: number[] = [];
+  let v = n;
+  do {
+    let byte = Number(v & 0x7fn);
+    v >>= 7n;
+    if (v > 0n) byte |= 0x80;
+    out.push(byte);
+  } while (v > 0n);
+  return out;
+}
+function tag(fieldNumber: number, wireType: number): number[] {
+  return encodeVarint(BigInt((fieldNumber << 3) | wireType));
+}
+function lenDelim(fieldNumber: number, payload: number[]): number[] {
+  return [...tag(fieldNumber, 2), ...encodeVarint(BigInt(payload.length)), ...payload];
+}
+function varintField(fieldNumber: number, value: number): number[] {
+  return [...tag(fieldNumber, 0), ...encodeVarint(BigInt(value))];
+}
+function stringField(fieldNumber: number, value: string): number[] {
+  return lenDelim(fieldNumber, Array.from(new TextEncoder().encode(value)));
+}
+function collectionsMessageBytes(deviceId: string, flag: number): ArrayBuffer {
+  // Path 1.2.3.2.6 (device id) and 1.2.3.2.10.1 (flag) — live-verified
+  // 2026-07-19 (see identity/meet-collections.ts's header comment): the flag
+  // lives inside the same per-device record (field 2, nested under field 3)
+  // as the device id, not as a sibling of that record under field 3.
+  const perDeviceRecord = [...stringField(6, deviceId), ...lenDelim(10, varintField(1, flag))];
+  const field3 = lenDelim(3, lenDelim(2, perDeviceRecord));
+  const field2 = lenDelim(2, field3);
+  const root = Uint8Array.from(lenDelim(1, field2));
+  const gz = gzipSync(Buffer.from(root));
+  return gz.buffer.slice(gz.byteOffset, gz.byteOffset + gz.byteLength);
+}
+
+describe("Meet collections datachannel (rtc-hook.ts)", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function installAndConnect(): { pc: { dispatch(type: string, ev: unknown): void } } {
+    setUpGlobals("meet.google.com");
+    installHook();
+    const Ctor = (globalThis as unknown as { RTCPeerConnection: new () => { dispatch(type: string, ev: unknown): void } })
+      .RTCPeerConnection;
+    return { pc: new Ctor() };
+  }
+
+  it("parses a collections-labeled channel's message and forwards it to the registered listener", async () => {
+    const { pc } = installAndConnect();
+    const events: CollectionsSpeakingEvent[] = [];
+    setCollectionsListener((e) => events.push(e));
+
+    const channel = fakeDataChannel("collections");
+    pc.dispatch("datachannel", { channel });
+    channel.dispatch("message", { data: collectionsMessageBytes("spaces/abc/devices/377", 0) });
+
+    // Real gzip decompression via DecompressionStream schedules across several
+    // real event-loop turns (~10ms observed), not just a microtask — a bare
+    // setTimeout(0) isn't reliably enough.
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(events).toEqual([{ deviceId: "spaces/abc/devices/377", speaking: true }]);
+  });
+
+  it("ignores datachannels not labeled 'collections'", async () => {
+    const { pc } = installAndConnect();
+    const events: CollectionsSpeakingEvent[] = [];
+    setCollectionsListener((e) => events.push(e));
+
+    const channel = fakeDataChannel("some-other-channel");
+    pc.dispatch("datachannel", { channel });
+    channel.dispatch("message", { data: collectionsMessageBytes("spaces/abc/devices/377", 0) });
+
+    await new Promise((r) => setTimeout(r, 0));
+    expect(events).toEqual([]);
+  });
+
+  it("drops unparseable messages silently — no listener call, no throw", async () => {
+    const { pc } = installAndConnect();
+    const events: CollectionsSpeakingEvent[] = [];
+    setCollectionsListener((e) => events.push(e));
+
+    const channel = fakeDataChannel("collections");
+    pc.dispatch("datachannel", { channel });
+    expect(() => channel.dispatch("message", { data: new Uint8Array([1, 2, 3]).buffer })).not.toThrow();
+
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(events).toEqual([]);
   });
 });

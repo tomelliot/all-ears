@@ -63,6 +63,7 @@ export function initCapture(config: CaptureConfig): void {
   prevTeardown?.(); // stop the superseded epoch before we start emitting
 
   setTrackSink(sink);
+  cfg.adapter?.onIdentify?.(handleIdentityUpgrade);
 
   // Catch-up: adopt tracks that were already live when this epoch loaded.
   for (const [track, rec] of liveTracks()) {
@@ -71,6 +72,40 @@ export function initCapture(config: CaptureConfig): void {
 
   postToIsolated({ kind: "status", text: `capture epoch ${config.epoch} active (${config.platform})` });
   console.log(`[ears] capture active — epoch ${config.epoch}, platform ${config.platform}`);
+}
+
+/**
+ * Consume a late identity upgrade pushed by an adapter (Meet's collections-
+ * datachannel correlation — see lib/identity/meet.ts) for a track that
+ * already started capturing under a different id (typically speaker-<n>).
+ *
+ * Chosen approach: stop the running pipeline and start a new one under the
+ * upgraded id, rather than renaming the id on the live segment in place.
+ * Reasons: (1) protocol.ts has no "rename" message — participantId is
+ * embedded in every already-sent "pcm"/"participant-joined" message and in
+ * the earsd source label (sourceLabel()), so relabeling an in-progress
+ * recording would need a new wire message type and daemon-side handling,
+ * out of scope here; (2) restart reuses the exact lifecycle audio-tap.ts
+ * already has — stopPipeline's participant-left / startPipeline's
+ * participant-joined, each with its own fresh `generations` counter — so
+ * earsd sees the same "old segment ended, new one began" shape it already
+ * handles for every reconnect; (3) it's exactly analogous to how a re-
+ * adopted track across an epoch handoff already keeps continuity via
+ * `fallbackIds`, just triggered by an identity event instead of an epoch.
+ * Trade-off: a few frames of audio are lost across the restart (fresh
+ * AudioDecoder/processor) — acceptable given upgrades are rare (≤ once per
+ * track, after CONFIRM_THRESHOLD confirming turns) and the alternative is a
+ * cross-process protocol change.
+ */
+function handleIdentityUpgrade(track: MediaStreamTrack, id: ParticipantId): void {
+  if (!isCurrentEpoch(cfg.epoch)) return;
+  const pipeline = pipelines.get(track);
+  if (!pipeline || pipeline.participantId === id) return;
+  const rec = liveTracks().get(track);
+  if (!rec) return; // track already ended; nothing to restart
+  console.log(`[ears] identity upgrade: track ${track.id} ${pipeline.participantId} → ${id} — restarting as a new segment`);
+  stopPipeline(track);
+  startPipeline(track, rec.stream, rec.transceiver, id);
 }
 
 const sink: TrackSink = (track, stream, transceiver) => {
@@ -83,8 +118,9 @@ function startPipeline(
   track: MediaStreamTrack,
   stream: MediaStream,
   transceiver: RTCRtpTransceiver,
+  forcedId?: ParticipantId,
 ): void {
-  const participantId = resolveIdentity(track, stream, transceiver);
+  const participantId = forcedId ?? resolveIdentity(track, stream, transceiver);
   const generation = (generations.get(participantId) ?? 0) + 1;
   generations.set(participantId, generation);
 
@@ -95,7 +131,7 @@ function startPipeline(
   // tee must never run elsewhere (it would double-capture where the standard
   // path already works).
   const makeSource = cfg.platform === "meet" ? meetDecodeSource(track) : trackProcessorSource(track);
-  const capture = new TrackCapture(participantId, () => pipeline.generation, makeSource, () => stopPipeline(track));
+  const capture = new TrackCapture(participantId, () => pipeline.generation, makeSource, () => stopPipeline(track), track);
   const pipeline: Pipeline = {
     participantId,
     generation,
@@ -168,7 +204,36 @@ function debugAudioEnabled(): boolean {
     return false;
   }
 }
-const DEBUG_AUDIO = debugAudioEnabled();
+// Read fresh each call (not cached at module load) — a stale cached value was
+// a plausible reason debug logging silently stayed off across an epoch handoff
+// or re-injection even with the localStorage flag set to "1".
+function DEBUG_AUDIO_NOW(): boolean {
+  return debugAudioEnabled();
+}
+
+// Phase 4 investigation instrumentation (meet-speaking-indicator-correlation
+// prompt): edge-triggered speaking-start/stop events per track, in the same
+// shape/timestamp-precision as the DOM MutationObserver log used to watch
+// Meet's tile speaking indicator, so the two can be diffed directly. Gated by
+// the same __earsDebugAudio flag — no behavior change when off.
+const SPEAK_THRESHOLD = 0.005; // matches the existing periodic AUDIO/silent cutoff below
+
+interface AudioLogEntry {
+  t: number;
+  iso: string;
+  participantId: ParticipantId;
+  trackId: string;
+  state: "start" | "stop";
+  framePeak: number;
+}
+interface AudioLogWindow extends Window {
+  __earsAudioLog?: AudioLogEntry[];
+}
+function audioLog(): AudioLogEntry[] {
+  const g = window as unknown as AudioLogWindow;
+  if (!g.__earsAudioLog) g.__earsAudioLog = [];
+  return g.__earsAudioLog;
+}
 
 // WebCodecs AudioData surface we use (avoids ambient-declaration conflicts).
 interface AudioDataLike {
@@ -203,14 +268,18 @@ class TrackCapture {
   private vSum = 0;
   private vPeak = 0;
   private vCount = 0;
+  private speaking = false; // edge-detection state, see SPEAK_THRESHOLD above — always tracked, not debug-only
+  private readonly trackId: string;
 
   constructor(
     private readonly participantId: ParticipantId,
     private readonly currentGeneration: () => number,
     private readonly makeSource: FrameSourceFactory,
     private readonly onFatal: () => void,
+    private readonly track: MediaStreamTrack,
   ) {
     this.ring = new RingBuffer(RING_CAPACITY, participantId);
+    this.trackId = track.id;
   }
 
   start(): void {
@@ -257,7 +326,11 @@ class TrackCapture {
       }
     }
 
-    if (DEBUG_AUDIO) this.debugLog(mono, inRate);
+    // Always tracked (not debug-gated): MeetAdapter's collections-datachannel
+    // correlation needs a real speaking-edge signal, not just a debug log —
+    // see lib/identity/meet.ts and PlatformAdapter.onTrackSpeaking.
+    this.updateSpeaking(mono);
+    if (DEBUG_AUDIO_NOW()) this.debugLog(mono, inRate);
 
     // Resample native → 16 kHz and slice into fixed frames.
     if (!this.resampler) this.resampler = new LinearResampler(inRate, TARGET_SAMPLE_RATE);
@@ -280,6 +353,41 @@ class TrackCapture {
     }
   }
 
+  // Edge-triggered start/stop, ~frame-resolution (10-100ms depending on
+  // source) — comparable granularity to the DOM speaking-indicator's
+  // mutation-observer log (journal #47/#48), so the two can be correlated by
+  // timestamp. Always runs (see the call site in consume()): the collections-
+  // datachannel correlation (lib/identity/meet-correlator.ts) needs this
+  // signal live, not just when __earsDebugAudio is set. Debug logging below
+  // stays gated; only the edge detection and the adapter callback are unconditional.
+  private updateSpeaking(mono: Float32Array): void {
+    let framePeak = 0;
+    for (let i = 0; i < mono.length; i++) {
+      const a = Math.abs(mono[i]!);
+      if (a > framePeak) framePeak = a;
+    }
+    const isSpeaking = framePeak > SPEAK_THRESHOLD;
+    if (isSpeaking === this.speaking) return;
+    this.speaking = isSpeaking;
+    cfg.adapter?.onTrackSpeaking?.(this.track, isSpeaking);
+
+    if (DEBUG_AUDIO_NOW()) {
+      const t = Date.now();
+      const entry: AudioLogEntry = {
+        t,
+        iso: new Date(t).toISOString(),
+        participantId: this.participantId,
+        trackId: this.trackId,
+        state: isSpeaking ? "start" : "stop",
+        framePeak: Number(framePeak.toFixed(4)),
+      };
+      audioLog().push(entry);
+      console.log(
+        `[ears/audio] ${entry.iso} ${this.participantId} (track ${this.trackId}) speaking-${entry.state} peak=${entry.framePeak}`,
+      );
+    }
+  }
+
   // Throttled to ~1 log/s/participant — frame counts alone don't prove the
   // samples aren't all-zero, so this checks actual amplitude. DEBUG_AUDIO-gated.
   private debugLog(mono: Float32Array, inRate: number): void {
@@ -289,6 +397,7 @@ class TrackCapture {
       this.vSum += mono[i]! * mono[i]!;
     }
     this.vCount += mono.length;
+
     if (this.vCount >= inRate) {
       const rms = Math.sqrt(this.vSum / this.vCount);
       console.log(
@@ -453,7 +562,7 @@ class MeetDecodeSource implements FrameSource {
       this.decoder = new DecoderCtor({
         output: (frame) => this.onFrame(frame),
         error: (err) => {
-          if (DEBUG_AUDIO) {
+          if (DEBUG_AUDIO_NOW()) {
             console.error(
               `[ears/debug] ${this.track.id} decoder error — last ${this.recentFrames.length} frames fed:`,
               this.recentFrames,
@@ -483,7 +592,7 @@ class MeetDecodeSource implements FrameSource {
 
   private onEncodedFrame(frame: EncodedAudioFrameLike): void {
     if (this.stopped || !this.decoder || !this.chunkCtor) return;
-    if (DEBUG_AUDIO) {
+    if (DEBUG_AUDIO_NOW()) {
       this.recentFrames.push({ byteLength: frame.data.byteLength, timestamp: frame.timestamp });
       if (this.recentFrames.length > 8) this.recentFrames.shift();
     }
@@ -491,7 +600,7 @@ class MeetDecodeSource implements FrameSource {
       // Opus has no inter-frame prediction — every chunk is a keyframe.
       this.decoder.decode(new this.chunkCtor({ type: "key", timestamp: frame.timestamp, data: frame.data }));
     } catch (err) {
-      if (DEBUG_AUDIO) {
+      if (DEBUG_AUDIO_NOW()) {
         console.error(
           `[ears/debug] ${this.track.id} decode() threw on frame byteLength=${frame.data.byteLength} timestamp=${frame.timestamp} — last ${this.recentFrames.length} frames:`,
           this.recentFrames,
@@ -548,7 +657,7 @@ export function __devCaptureStream(stream: MediaStream, participantId: Participa
   const track = stream.getAudioTracks()[0];
   if (!track) return;
   postToIsolated({ kind: "participant-joined", platform: cfg?.platform ?? "meet", participantId, generation: 1 });
-  new TrackCapture(participantId, () => 1, trackProcessorSource(track), () => {}).start();
+  new TrackCapture(participantId, () => 1, trackProcessorSource(track), () => {}, track).start();
 }
 
 // Bounded ring buffer, drop-oldest, with a logged dropped counter — never grows
