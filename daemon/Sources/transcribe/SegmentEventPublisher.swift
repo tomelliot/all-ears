@@ -44,14 +44,13 @@ actor SegmentEventPublisher {
 
     if client == nil {
       client = try? await ControlSocketClient.connect(toPath: socketPath)
-      guard client != nil else {
-        warnOnce(
-          "daemon unreachable at \(socketPath); live-feed segment events are not being "
-            + "published (the on-disk transcript is unaffected)")
-        return
-      }
     }
-    guard let client else { return }
+    guard let client else {
+      warnOnce(
+        "daemon unreachable at \(socketPath); live-feed segment events are not being "
+          + "published (the on-disk transcript is unaffected)")
+      return
+    }
 
     do {
       let response = try await client.send(

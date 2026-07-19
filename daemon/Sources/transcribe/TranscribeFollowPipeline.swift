@@ -212,7 +212,6 @@ private final class FollowRun {
   private let sessionID: String
   private let paths: OutputPathResolution.Paths
   private let modelInfo: TranscriptModelInfo
-  private let stepFrameCount: Int
 
   private var tail: IndexTailReader
   private var batcher: StepBatcher
@@ -220,13 +219,15 @@ private final class FollowRun {
   private var partialState = DecoderState()
   private var finalState = DecoderState()
 
-  /// The current finalization window: decoded samples not yet committed,
-  /// starting at `windowStart`. `windowEnd` tracks the instant covered by
-  /// the samples actually decoded off disk (decoded-frame math, not nominal
-  /// chunk duration, so slicing stays consistent with the buffer).
+  /// The current finalization window: samples not yet committed, starting
+  /// at `windowStart`. Chunk audio is length-normalized to its indexed span
+  /// on append (see `appendChunkAudio`), so the sample count and the event
+  /// timeline agree exactly and `windowEnd` is pure derived state.
   private var windowSamples: [Float] = []
   private var windowStart: Instant?
-  private var windowEnd: Instant?
+  private var windowEnd: Instant? {
+    windowStart.map { $0.advanced(by: Double(windowSamples.count) / Double(asrSampleRate)) }
+  }
 
   /// The cheap-pass text accumulated for the current window — the committed
   /// -text fallback if the finalization decode fails (see the type doc).
@@ -276,8 +277,8 @@ private final class FollowRun {
       explicitOut: inputs.out)
     self.modelInfo = TranscriptModelInfo(
       name: streaming.info.name, backend: backendName, version: streaming.info.version)
-    self.stepFrameCount = max(1, Int(dependencies.stepSeconds * Double(asrSampleRate)))
-    self.batcher = StepBatcher(stepFrameCount: stepFrameCount)
+    self.batcher = StepBatcher(
+      stepFrameCount: max(1, Int(dependencies.stepSeconds * Double(asrSampleRate))))
     // Attach semantics: only index lines appended after this instant are
     // processed — a follower that attaches late gets no replay, matching
     // the live feed's own contract; the batch tool covers the past.
@@ -359,8 +360,11 @@ private final class FollowRun {
     let fileURL = DataStoreLayout.asrDirectory(dataRoot: dataRoot, sourceID: sourceID)
       .appendingPathComponent(filename)
 
-    let samples: [Float]
+    var samples: [Float]
     let clippedStart = max(start, followStart)
+    let nominalFrames = max(
+      0, Int((end.interval(since: clippedStart) * Double(asrSampleRate)).rounded()))
+    guard nominalFrames > 0 else { return }
     do {
       let reader = try dependencies.readerFactory(fileURL)
       let skipFrames = min(
@@ -372,34 +376,46 @@ private final class FollowRun {
       dependencies.log("failed to read chunk \(filename): \(error); treating as a gap")
       if let windowEnd { await finalizeWindow(at: windowEnd, confirmed: true) }
       windowStart = nil
-      windowEnd = nil
       return
     }
     guard !samples.isEmpty else { return }
+
+    // Normalize the decoded length to the chunk's indexed span: a real
+    // AAC/Opus decode can come back a few hundred ms short or long of the
+    // nominal duration (priming/padding), and the window's instant↔sample
+    // mapping must stay exact against the *event timeline* every boundary
+    // instant lives on. A short decode is padded with silence, a long one
+    // trimmed — per-chunk, so the discrepancy never accumulates.
+    if samples.count > nominalFrames {
+      samples.removeLast(samples.count - nominalFrames)
+    } else if samples.count < nominalFrames {
+      samples.append(contentsOf: [Float](repeating: 0, count: nominalFrames - samples.count))
+    }
 
     // A discontinuity between the last landed audio and this chunk is an
     // implicit gap: close the window at the old edge *now*, then restart
     // the window at this chunk's start — the window's sample-to-instant
     // mapping assumes contiguous audio, so the hole must not be spanned.
-    if let end = windowEnd, clippedStart.interval(since: end) > 0.25 {
-      await finalizeWindow(at: end, confirmed: true)
+    if let windowEnd, clippedStart.interval(since: windowEnd) > 0.25 {
+      await finalizeWindow(at: windowEnd, confirmed: true)
       windowStart = nil
-      windowEnd = nil
     }
     if windowStart == nil {
       windowStart = clippedStart
-      windowEnd = clippedStart
     }
     windowSamples.append(contentsOf: samples)
-    windowEnd = (windowEnd ?? clippedStart).advanced(
-      by: Double(samples.count) / Double(asrSampleRate))
 
     runPartialPass(AudioBuffer(samples: samples, sampleRate: asrSampleRate))
   }
 
   /// The cheap low-latency pass: fixed-cadence steps through the streaming
   /// decoder, threading `partialState`. Failures here never fail the run —
-  /// the finalization pass re-decodes everything that matters.
+  /// the finalization pass re-decodes everything that matters. The
+  /// accumulated hypothesis is a best-effort, window-granular fallback: the
+  /// batcher's cadence is not boundary-aligned, so when one window
+  /// finalizes in several slices, the whole window's partial text backs the
+  /// *first* slice's decode failure and later slices fall back to nothing —
+  /// an accepted approximation for what is already a degraded error path.
   private func runPartialPass(_ buffer: AudioBuffer) {
     for step in batcher.append(buffer) {
       do {
@@ -424,6 +440,18 @@ private final class FollowRun {
       guard let start = windowStart, let end = windowEnd else { break }
       if boundary <= start {
         pendingBoundaries.removeFirst()
+        continue
+      }
+      // A pause-free run longer than the cap (a 30 s chunk can land far
+      // more than `maxWindowSeconds` of audio at once) is cut at the cap
+      // *before* the natural boundary is honoured — a finalization decode
+      // must never exceed the model's stateful window, or the streaming
+      // backend refuses it (`stepTooLong`) and the window degrades to its
+      // fallback text.
+      if boundary.interval(since: start) > dependencies.maxWindowSeconds {
+        guard end.interval(since: start) >= dependencies.maxWindowSeconds else { break }
+        await finalizeWindow(
+          at: start.advanced(by: dependencies.maxWindowSeconds), confirmed: false)
         continue
       }
       guard boundary <= end else { break }
@@ -454,7 +482,6 @@ private final class FollowRun {
     let slice = Array(windowSamples.prefix(sliceFrames))
     windowSamples.removeFirst(sliceFrames)
     windowStart = boundary
-    if let end = windowEnd, end < boundary { windowEnd = boundary }
     latestBoundary = max(latestBoundary, boundary)
 
     let sliceRange = TimeRange(start: start, end: boundary)
@@ -470,8 +497,17 @@ private final class FollowRun {
     speechSeconds += Double(slice.count) / Double(asrSampleRate)
 
     var decodeSamples = slice
-    let padFrames = Int(dependencies.finalizePadSeconds * Double(asrSampleRate))
-    decodeSamples.append(contentsOf: [Float](repeating: 0, count: padFrames))
+    // Trailing-silence pad (FluidAudio issue #562: the TDT decoder drops
+    // the final word without it) — but only at a *confirmed* boundary,
+    // where silence genuinely follows (a VAD pause, a gap, end of stream).
+    // A cap-forced cut lands mid-speech: injecting fake silence there would
+    // thread a phantom pause into `finalState`'s continuity right where the
+    // next window resumes mid-utterance, and the held-back-token mechanism
+    // already covers the truncated tail.
+    if confirmed {
+      let padFrames = Int(dependencies.finalizePadSeconds * Double(asrSampleRate))
+      decodeSamples.append(contentsOf: [Float](repeating: 0, count: padFrames))
+    }
 
     var text: String
     do {
@@ -561,7 +597,7 @@ private final class FollowRun {
   /// format and always well-formed ("appends" at the content level; atomic
   /// replace at the file level, per the never-half-written rule).
   private func writeTranscript() {
-    let requested = TimeRange(start: followStart, end: max(latestBoundary, followStart))
+    let requested = TimeRange(start: followStart, end: latestBoundary)
     let document = TranscriptAssembly.assemble(
       sourceIDs: [sourceID],
       transcriptions: [SourceTranscription(sourceID: sourceID, segments: committedSegments)],

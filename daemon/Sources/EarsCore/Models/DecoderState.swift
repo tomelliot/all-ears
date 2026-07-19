@@ -24,6 +24,13 @@ public protocol BackendDecoderState: AnyObject, Sendable {}
 /// ``BackendDecoderState``). Start a fresh stream with `DecoderState()`; a
 /// state populated by one backend must not be handed to a different backend
 /// (a shim finding a foreign box starts fresh rather than misreading it).
+///
+/// - Important: Copying a `DecoderState` does **not** snapshot the decode:
+///   the copies *share* the backend box (a reference the shim mutates in
+///   place on each step), so stepping one copy advances the other's
+///   continuity too. One stream = one `DecoderState` threaded through
+///   sequential steps; forking a stream needs a backend-provided clone, not
+///   a value copy.
 public struct DecoderState: Sendable, Hashable {
   /// Text decoded so far in this stream, for continuity across `step` calls.
   public var priorText: String

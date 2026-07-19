@@ -270,6 +270,81 @@ struct TranscribeFollowPipelineTests {
     #expect(lines[2].hasSuffix("You: again done"))
   }
 
+  @Test(
+    "a pause-free run longer than the window cap is cut at the cap before its VAD boundary, so no finalization decode exceeds the model window"
+  )
+  func longRunToVadBoundaryIsCutAtCap() async throws {
+    let fixture = try Fixture(label: "long-run", sourceID: sourceID, asrRate: asrRate, created: now)
+    let harness = Harness()
+    let scripted = ScriptedStreamingTranscriber(stepTexts: ["one two", "three four", "five"])
+    let dependencies = harness.dependencies(
+      clock: ManualClock(now), transcriber: scripted, readerFactory: fixture.readerFactory,
+      maxWindowSeconds: 2)
+    let run = launch(fixture: fixture, dependencies: dependencies)
+
+    await harness.waitForStart()
+    // One 5 s chunk lands at once (a ring-buffer chunk is far longer than
+    // the cap), all speech, with the first natural pause only at 4.5 s.
+    try await fixture.appendChunk(start: now, duration: 5, asrRate: asrRate)
+    try await fixture.appender.append(
+      .vad(state: .speech, start: now, end: now.advanced(by: 4.5)))
+    try await fixture.appender.append(
+      .vad(state: .silence, start: now.advanced(by: 4.5), end: now.advanced(by: 5.2)))
+    await harness.waitForStdout(count: 3)
+    harness.stop()
+    #expect(await run.value == 0)
+
+    // Decoded as [0,2) + [2,4) cap cuts, then [4,4.5) at the confirmed
+    // pause — never one giant slice up to the 4.5 s boundary.
+    let steps = scripted.recordedSteps
+    #expect(steps.count == 3)
+    let capFrames = Int(2.0 * Double(asrRate))
+    #expect(steps.allSatisfy { $0.frameCount <= capFrames + Int(0.25 * Double(asrRate)) })
+    #expect(steps[0].frameCount == capFrames)
+    #expect(steps[1].frameCount == capFrames)
+    // The confirmed-boundary slice carries the trailing-silence pad; the
+    // cap cuts (mid-speech) deliberately do not.
+    #expect(steps[2].frameCount == Int(0.5 * Double(asrRate)) + Int(0.25 * Double(asrRate)))
+
+    let lines = harness.stdoutLines.withLock { $0 }
+    #expect(lines.count == 3)
+    #expect(lines[0].hasSuffix("You: one"))
+    #expect(lines[1].hasSuffix("You: two three"))
+    #expect(lines[2].hasSuffix("You: four five"))
+  }
+
+  @Test("a failed finalization decode falls back to the window's partial-pass text")
+  func finalizationFailureFallsBackToPartialText() async throws {
+    let fixture = try Fixture(label: "fallback", sourceID: sourceID, asrRate: asrRate, created: now)
+    let harness = Harness()
+    // Partial steps (0.5 s = 8000 frames) decode scripted texts; the larger
+    // finalization decode throws, forcing the fallback commit path.
+    let flaky = FlakyStreamingTranscriber(
+      stepTexts: ["p1", "p2", "p3", "p4"], failsAboveFrameCount: 8000)
+    var dependencies = harness.dependencies(
+      clock: ManualClock(now), transcriber: flaky, readerFactory: fixture.readerFactory)
+    dependencies.stepSeconds = 0.5
+    let run = launch(fixture: fixture, dependencies: dependencies)
+
+    await harness.waitForStart()
+    try await fixture.appendChunk(start: now, duration: 2, asrRate: asrRate)
+    try await fixture.appender.append(
+      .vad(state: .speech, start: now, end: now.advanced(by: 1.5)))
+    try await fixture.appender.append(
+      .vad(state: .silence, start: now.advanced(by: 1.5), end: now.advanced(by: 2.2)))
+    await harness.waitForStdout(count: 1)
+    harness.stop()
+    #expect(await run.value == 0)
+
+    // The committed segment is the partial pass's accumulated text, and the
+    // degradation was logged rather than silently swallowed or fatal.
+    let lines = harness.stdoutLines.withLock { $0 }
+    #expect(lines.count == 1)
+    #expect(lines[0].hasSuffix("You: p1 p2 p3 p4"))
+    #expect(
+      harness.logs.withLock { $0 }.contains { $0.contains("finalization decode failed") })
+  }
+
   @Test("a window fully covered by VAD silence is dropped without a decode")
   func silenceOnlyWindowSkipsDecode() async throws {
     let fixture = try Fixture(label: "silence", sourceID: sourceID, asrRate: asrRate, created: now)
@@ -364,5 +439,38 @@ struct TranscribeFollowPipelineTests {
     #expect(exitCode == 1)
     #expect(
       harness.stderrLines.withLock { $0 }.contains { $0.contains("StreamingTranscriber") })
+  }
+}
+
+/// A ``StreamingTranscriber`` whose small (partial-cadence) steps succeed
+/// with scripted texts while any larger (finalization) decode throws —
+/// drives ``TranscribeFollowPipeline``'s fallback-to-partial-text path.
+private final class FlakyStreamingTranscriber: StreamingTranscriber {
+  struct DecodeFailure: Error {}
+
+  let info = ModelInfo(
+    name: "flaky-streaming", version: "0", languages: ["en"], supportsStreaming: true)
+
+  private let failsAboveFrameCount: Int
+  private let stepTexts: Mutex<[String]>
+
+  init(stepTexts: [String], failsAboveFrameCount: Int) {
+    self.stepTexts = Mutex(stepTexts)
+    self.failsAboveFrameCount = failsAboveFrameCount
+  }
+
+  func load(_ options: LoadOptions) throws {}
+
+  func transcribe(_ audio: AudioBuffer, context: TranscribeContext) throws -> [Segment] { [] }
+
+  func step(_ frames: AudioBuffer, state: inout DecoderState) throws -> [Segment] {
+    guard frames.frameCount <= failsAboveFrameCount else { throw DecodeFailure() }
+    state.framesConsumed += frames.frameCount
+    let text = stepTexts.withLock { texts -> String in
+      guard !texts.isEmpty else { return "" }
+      return texts.removeFirst()
+    }
+    guard !text.isEmpty else { return [] }
+    return [Segment(start: 0, end: frames.duration, text: text)]
   }
 }

@@ -30,6 +30,14 @@
 /// partials, then one max-look-ahead decode of the committed text) is the
 /// caller's pipeline; this type guarantees whatever stream of hypotheses that
 /// pipeline produces reaches sinks append-only.
+///
+/// The unit of confirmation is deliberately *textual*: whitespace after a
+/// token is what marks it complete. A caller that knows out-of-band that the
+/// current tail is complete — e.g. `transcribe --follow` committing a window
+/// that ended at a genuine VAD pause — expresses that by appending the
+/// boundary whitespace to its hypothesis (`advance(hypothesis + " ")`): the
+/// pause *is* a word boundary, rendered in the contract's own vocabulary
+/// rather than through a side-channel flag this type would have to mirror.
 public struct StreamingDelta: Sendable, Hashable {
   /// Everything emitted so far — the append-only cursor. Never shrinks.
   public private(set) var emitted: String = ""
