@@ -3,7 +3,8 @@ import { claimEpoch } from "../lib/epoch";
 import { installHook } from "../lib/rtc-hook";
 import { initCapture, __devCaptureStream } from "../lib/audio-tap";
 import { selectAdapter, type PlatformAdapter } from "../lib/identity/adapter";
-import { isControlEnvelope, type Platform } from "../lib/protocol";
+import { MeetMeetingIdWatcher } from "../lib/identity/meet-meeting-id";
+import { isControlEnvelope, isMainEnvelope, postToIsolated, type Platform } from "../lib/protocol";
 // Side-effect imports: each adapter registers itself with selectAdapter.
 import "../lib/identity/meet";
 import "../lib/identity/zoom";
@@ -52,6 +53,7 @@ export default defineContentScript({
     if (!adapter) console.warn(`[ears] no identity adapter for ${host} — using speaker-<n>`);
 
     let captureOn = false;
+    let stopMeetingWatch: (() => void) | null = null;
     window.addEventListener("message", (event: MessageEvent) => {
       if (event.source !== window) return; // only same-window
       if (!isControlEnvelope(event.data)) return;
@@ -60,8 +62,12 @@ export default defineContentScript({
       captureOn = msg.enabled;
       if (captureOn) {
         startEpoch(platform, adapter);
+        stopMeetingWatch?.();
+        stopMeetingWatch = startMeetingWatch(platform);
       } else {
         stopCapture();
+        stopMeetingWatch?.();
+        stopMeetingWatch = null;
       }
     });
 
@@ -90,6 +96,63 @@ function stopCapture(): void {
   claimEpoch();
   (window as unknown as { __earsTeardown?: () => void }).__earsTeardown?.();
   console.log("[ears] capture disabled — epoch released, pipelines torn down");
+}
+
+// How long the meeting-id watcher stays quiet before logging its one
+// soft-fail warning. It keeps watching afterwards — the id can still resolve
+// late (e.g. tiles mounting slowly) and capture is never gated on it.
+const MEETING_ID_POLL_MS = 1000;
+const MEETING_ID_SOFT_FAIL_MS = 15_000;
+
+/**
+ * Meeting start/end marking (Meet only today). Watches both external-id
+ * surfaces — tile DOM polling, plus the participant-joined traffic audio-tap
+ * already posts (which carries collections-upgraded device ids) — and fires
+ * `meeting-started` once the spaces/<space> id resolves; the returned stop
+ * function fires `meeting-ended` (capture toggled off, teardown). Soft-fails
+ * by design: an unresolved id logs once and skips marking; capture is never
+ * blocked or delayed (identity's standing contract, see meet.ts).
+ */
+function startMeetingWatch(platform: Platform): () => void {
+  if (platform !== "meet") return () => {};
+
+  const watcher = new MeetMeetingIdWatcher((spaceId) => {
+    console.log(`[ears] Meet meeting id resolved: ${spaceId}`);
+    postToIsolated({ kind: "meeting-started", platform, externalMeetingId: spaceId });
+  });
+
+  const onMessage = (event: MessageEvent): void => {
+    if (event.source !== window || !isMainEnvelope(event.data)) return;
+    const msg = event.data.msg;
+    if (msg.kind === "participant-joined") watcher.observeCandidate(msg.participantId);
+  };
+  window.addEventListener("message", onMessage);
+
+  const startedAt = Date.now();
+  let warned = false;
+  watcher.poll(document);
+  const interval = setInterval(() => {
+    watcher.poll(document);
+    if (watcher.spaceId) {
+      clearInterval(interval);
+      return;
+    }
+    if (!warned && Date.now() - startedAt > MEETING_ID_SOFT_FAIL_MS) {
+      warned = true;
+      console.warn(
+        "[ears] Meet meeting id has not resolved yet — the meeting can't be marked until it does; capture is unaffected",
+      );
+    }
+  }, MEETING_ID_POLL_MS);
+
+  return () => {
+    clearInterval(interval);
+    window.removeEventListener("message", onMessage);
+    const spaceId = watcher.spaceId;
+    if (spaceId) {
+      postToIsolated({ kind: "meeting-ended", platform, externalMeetingId: spaceId });
+    }
+  };
 }
 
 function platformForHost(host: string, adapter: PlatformAdapter | null): Platform {

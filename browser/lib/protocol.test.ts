@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  BROWSER_TRIGGER,
+  controlRequest,
   encodeBinaryFrame,
   INGEST_FORMAT,
   sanitizeLabel,
@@ -57,5 +59,33 @@ describe("encodeBinaryFrame", () => {
 describe("INGEST_FORMAT", () => {
   it("matches earsd AudioFormatSpec keys and v1 values", () => {
     expect(INGEST_FORMAT).toEqual({ sample_rate: 16000, channels: 1, encoding: "pcm_s16le" });
+  });
+});
+
+describe("controlRequest", () => {
+  it("builds meeting.resolve with the snake_case external_id key", () => {
+    expect(controlRequest.meetingResolve("meet", "AbCdEf")).toEqual({
+      cmd: "meeting.resolve",
+      platform: "meet",
+      external_id: "AbCdEf",
+    });
+  });
+
+  it("builds session.open with the browser-extension trigger baked in", () => {
+    expect(controlRequest.sessionOpen(["browser:meet:jane"], "meeting-uuid")).toEqual({
+      cmd: "session.open",
+      sources: ["browser:meet:jane"],
+      slug: "meeting-uuid",
+      trigger: BROWSER_TRIGGER,
+    });
+  });
+
+  it("builds session.close and session.add_source", () => {
+    expect(controlRequest.sessionClose("sid")).toEqual({ cmd: "session.close", id: "sid" });
+    expect(controlRequest.sessionAddSource("sid", "browser:meet:jo")).toEqual({
+      cmd: "session.add_source",
+      id: "sid",
+      source: "browser:meet:jo",
+    });
   });
 });
