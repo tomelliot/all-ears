@@ -10,6 +10,9 @@ enum FrontmatterRenderer {
 
     lines.append(YAML.line("schema", .plain(String(frontmatter.schema))))
     lines.append(YAML.line("kind", .plain(frontmatter.kind.rawValue)))
+    if let preset = frontmatter.preset {
+      lines.append(YAML.line("preset", scalar(preset)))
+    }
     if let derivedFrom = frontmatter.derivedFrom {
       lines.append(YAML.line("derived_from", scalar(derivedFrom)))
     }

@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import Testing
 
 @testable import EarsCaptureKit
@@ -86,5 +87,103 @@ struct AudioSampleRingTests {
     #expect(ring.write(from: buffer))
     #expect(ring.availableCount == 3)  // 3 frames, not 4 (capacity) and not a byte count
     #expect(ring.read(maxCount: 10) == [2, 3, 4])
+  }
+
+  // MARK: - write(from: AudioBufferList, ...) — the process-tap IO path
+
+  private static func nonInterleavedASBD(channels: UInt32) -> AudioStreamBasicDescription {
+    AudioStreamBasicDescription(
+      mSampleRate: 48000,
+      mFormatID: kAudioFormatLinearPCM,
+      mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsNonInterleaved,
+      mBytesPerPacket: 4,
+      mFramesPerPacket: 1,
+      mBytesPerFrame: 4,
+      mChannelsPerFrame: channels,
+      mBitsPerChannel: 32,
+      mReserved: 0)
+  }
+
+  private static func interleavedASBD(channels: UInt32) -> AudioStreamBasicDescription {
+    AudioStreamBasicDescription(
+      mSampleRate: 48000,
+      mFormatID: kAudioFormatLinearPCM,
+      mFormatFlags: kAudioFormatFlagIsFloat,
+      mBytesPerPacket: 4 * channels,
+      mFramesPerPacket: 1,
+      mBytesPerFrame: 4 * channels,
+      mChannelsPerFrame: channels,
+      mBitsPerChannel: 32,
+      mReserved: 0)
+  }
+
+  @Test("write(from: AudioBufferList) downmixes non-interleaved stereo to mono")
+  func downmixNonInterleavedBufferList() {
+    let frameCount = 3
+    let left: [Float] = [1, 2, 3]
+    let right: [Float] = [3, 4, 5]
+    let abl = AudioBufferList.allocate(maximumBuffers: 2)
+    defer { abl.unsafeMutablePointer.deallocate() }
+
+    left.withUnsafeBufferPointer { leftPointer in
+      right.withUnsafeBufferPointer { rightPointer in
+        abl[0] = AudioBuffer(
+          mNumberChannels: 1, mDataByteSize: UInt32(frameCount * 4),
+          mData: UnsafeMutableRawPointer(mutating: leftPointer.baseAddress))
+        abl[1] = AudioBuffer(
+          mNumberChannels: 1, mDataByteSize: UInt32(frameCount * 4),
+          mData: UnsafeMutableRawPointer(mutating: rightPointer.baseAddress))
+
+        let ring = AudioSampleRing(capacity: 16)
+        #expect(
+          ring.write(
+            from: abl.unsafePointer, frameCount: frameCount,
+            asbd: Self.nonInterleavedASBD(channels: 2)))
+        #expect(ring.read(maxCount: 10) == [2, 3, 4])
+      }
+    }
+  }
+
+  @Test("write(from: AudioBufferList) reads a single-channel non-interleaved buffer directly")
+  func monoNonInterleavedBufferList() {
+    let frameCount = 3
+    let samples: [Float] = [10, 20, 30]
+    let abl = AudioBufferList.allocate(maximumBuffers: 1)
+    defer { abl.unsafeMutablePointer.deallocate() }
+
+    samples.withUnsafeBufferPointer { pointer in
+      abl[0] = AudioBuffer(
+        mNumberChannels: 1, mDataByteSize: UInt32(frameCount * 4),
+        mData: UnsafeMutableRawPointer(mutating: pointer.baseAddress))
+
+      let ring = AudioSampleRing(capacity: 16)
+      #expect(
+        ring.write(
+          from: abl.unsafePointer, frameCount: frameCount,
+          asbd: Self.nonInterleavedASBD(channels: 1)))
+      #expect(ring.read(maxCount: 10) == samples)
+    }
+  }
+
+  @Test("write(from: AudioBufferList) downmixes a single interleaved stereo buffer")
+  func downmixInterleavedBufferList() {
+    let frameCount = 3
+    // Interleaved L/R: (1,3), (2,4), (3,5) -> mono average [2, 3, 4]
+    let interleaved: [Float] = [1, 3, 2, 4, 3, 5]
+    let abl = AudioBufferList.allocate(maximumBuffers: 1)
+    defer { abl.unsafeMutablePointer.deallocate() }
+
+    interleaved.withUnsafeBufferPointer { pointer in
+      abl[0] = AudioBuffer(
+        mNumberChannels: 2, mDataByteSize: UInt32(frameCount * 2 * 4),
+        mData: UnsafeMutableRawPointer(mutating: pointer.baseAddress))
+
+      let ring = AudioSampleRing(capacity: 16)
+      #expect(
+        ring.write(
+          from: abl.unsafePointer, frameCount: frameCount,
+          asbd: Self.interleavedASBD(channels: 2)))
+      #expect(ring.read(maxCount: 10) == [2, 3, 4])
+    }
   }
 }

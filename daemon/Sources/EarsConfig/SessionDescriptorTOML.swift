@@ -32,6 +32,7 @@ public enum SessionDescriptorTOML {
       "trigger": .string(descriptor.trigger.rawValue),
       "trigger_detail": .string(descriptor.triggerDetail ?? ""),
       "vocab": .string(descriptor.vocab ?? ""),
+      "pre_roll_seconds": .int(descriptor.preRollSeconds),
     ])
   }
 
@@ -87,7 +88,8 @@ public enum SessionDescriptorTOML {
       state: state,
       trigger: trigger,
       triggerDetail: fields.optionalString("trigger_detail"),
-      vocab: fields.optionalString("vocab")
+      vocab: fields.optionalString("vocab"),
+      preRollSeconds: fields.optionalInt("pre_roll_seconds", default: 0)
     )
   }
 

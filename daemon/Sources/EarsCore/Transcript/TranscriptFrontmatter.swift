@@ -39,6 +39,12 @@ public struct TranscriptFrontmatter: Sendable, Hashable {
   /// Names the source transcript this document was derived from
   /// (`cleanup`/`summarize` only); `nil` for `kind: transcript`.
   public var derivedFrom: String?
+  /// The `[[summarize.preset]]` name this summary was generated from (e.g.
+  /// `brief`); `nil` for `kind: transcript`/`kind: clean`, which have no
+  /// preset. Rendered between `kind` and `derived_from` when present, per
+  /// `docs/product/specs/llm-stages.md`'s "frontmatter kind: summary,
+  /// preset, and derived_from".
+  public var preset: String?
 
   public init(
     schema: Int,
@@ -53,7 +59,8 @@ public struct TranscriptFrontmatter: Sendable, Hashable {
     speechSeconds: Double,
     wordCount: Int,
     vocab: [String],
-    derivedFrom: String? = nil
+    derivedFrom: String? = nil,
+    preset: String? = nil
   ) {
     self.schema = schema
     self.kind = kind
@@ -68,5 +75,6 @@ public struct TranscriptFrontmatter: Sendable, Hashable {
     self.wordCount = wordCount
     self.vocab = vocab
     self.derivedFrom = derivedFrom
+    self.preset = preset
   }
 }

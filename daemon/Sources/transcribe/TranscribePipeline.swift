@@ -59,6 +59,9 @@ enum TranscribePipeline {
 
   struct Inputs: Sendable {
     var last: String?
+    var from: String?
+    var to: String?
+    var session: String?
     var sourceIDs: [String]
     var out: String?
   }
@@ -70,18 +73,30 @@ enum TranscribePipeline {
     backendName: String,
     dependencies: Dependencies
   ) async -> Int32 {
-    guard !inputs.sourceIDs.isEmpty else {
-      dependencies.writeStderr("error: at least one --source is required")
-      return 1
-    }
-    let sourceIDs = inputs.sourceIDs.map { SourceID($0) }
-
     let now = dependencies.clock.now()
-    let requestedRange: TimeRange
-    switch TranscribeRangeResolution.resolve(last: inputs.last, now: now) {
-    case .success(let range): requestedRange = range
+    let resolved: TranscribeRangeResolution.Resolved
+    switch TranscribeRangeResolution.resolve(
+      last: inputs.last, from: inputs.from, to: inputs.to, session: inputs.session, now: now,
+      sessionReader: { id in
+        do {
+          return .success(try SessionStore.read(sessionID: id, dataRoot: dataRoot))
+        } catch {
+          return .failure(.unknownSession(id))
+        }
+      }
+    ) {
+    case .success(let value): resolved = value
     case .failure(let error):
       dependencies.writeStderr("error: \(error.description)")
+      return 1
+    }
+    let requestedRange = resolved.range
+
+    // --session's sources override any --source flags; otherwise --source
+    // is required, exactly as before.
+    let sourceIDs = resolved.sourceIDs ?? inputs.sourceIDs.map { SourceID($0) }
+    guard !sourceIDs.isEmpty else {
+      dependencies.writeStderr("error: at least one --source is required (or --session naming one)")
       return 1
     }
 
@@ -174,8 +189,10 @@ enum TranscribePipeline {
     let generated = dependencies.clock.now()
     let modelInfo = TranscriptModelInfo(
       name: transcriber.info.name, backend: backendName, version: transcriber.info.version)
-    let sessionIdentifier = OutputPathResolution.sessionIdentifier(
-      requestedStart: requestedRange.start, sourceIDs: sourceIDs)
+    let sessionIdentifier =
+      resolved.sessionIdentifier
+      ?? OutputPathResolution.sessionIdentifier(
+        requestedStart: requestedRange.start, sourceIDs: sourceIDs)
 
     let document = TranscriptAssembly.assemble(
       sourceIDs: sourceIDs,
@@ -189,7 +206,7 @@ enum TranscribePipeline {
 
     let paths = OutputPathResolution.resolve(
       outputRoot: outputRoot, requestedStart: requestedRange.start, sourceIDs: sourceIDs,
-      explicitOut: inputs.out)
+      explicitOut: inputs.out, sessionSlug: resolved.sessionSlug)
 
     do {
       let markdown = TranscriptRenderer.renderMarkdown(document)

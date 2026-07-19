@@ -110,6 +110,10 @@ state = "closed"                  # open | closed
 trigger = "app-signal"            # app-signal | manual
 trigger_detail = "us.zoom.xos"
 vocab = "vocab/2026-07-17T10-30-00Z_standup.txt"  # optional
+pre_roll_seconds = 0              # seconds of already-buffered ring audio a
+                                   # `transcribe --session` read widens this
+                                   # session's range backward by; never
+                                   # shifts `start` itself. 0 = no widening.
 ```
 
 ## Transcript format
@@ -146,7 +150,7 @@ Rules:
 
 - Segments are grouped by speaker turn, each headed by a timestamp and a speaker label.
 - **Speaker labels** derive first from the source (`mic` → `You`); within a multi-speaker source, diarization assigns stable `Speaker N` labels, and a source comment records provenance. Labels can be remapped to real names later without changing timestamps (see [speaker attribution](#speaker-attribution)).
-- `cleanup` and `summarize` outputs use the same frontmatter convention with `kind: clean` / `kind: summary` and a `derived_from` field naming the source transcript.
+- `cleanup` and `summarize` outputs use the same frontmatter convention with `kind: clean` / `kind: summary` and a `derived_from` field naming the source transcript. A `kind: summary` document also carries a `preset` field (the `[[summarize.preset]].name` it was generated from), rendered between `kind` and `derived_from`.
 
 ### Canonical JSON sidecar (optional)
 

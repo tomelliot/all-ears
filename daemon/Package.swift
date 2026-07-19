@@ -93,6 +93,18 @@ let package = Package(
       ]
     ),
 
+    // The concrete LLM backend shim (`docs/product/specs/llm-stages.md`'s
+    // `command` backend): spawns a configured subprocess (e.g. `llm -m
+    // <model>`), per-call, behind the `EarsCore.LLMBackend` protocol. Kept
+    // out of `EarsCore` since it does real process I/O; `cleanup`/
+    // `summarize` are its only consumers.
+    .target(
+      name: "EarsLLMKit",
+      dependencies: [
+        "EarsCore"
+      ]
+    ),
+
     // `earsd`'s real orchestration (`CaptureActor`, `ControlServer`,
     // `SessionStore`, per `docs/architecture.md`), kept as a library --
     // not inside the `earsd` executable target -- specifically so it is
@@ -201,6 +213,13 @@ let package = Package(
         "EarsConfig",
         "EarsLogging",
         "EarsCLISupport",
+        // For AtomicFileIO/DataStoreLayout (writing `.clean.md` the same
+        // atomic way `transcribe` writes its output) and for reading a
+        // source's/session's on-disk paths.
+        "EarsDataStore",
+        // For CommandLLMBackend, the real LLMBackend `CleanupPipeline`
+        // wires in.
+        "EarsLLMKit",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
     ),
@@ -211,6 +230,8 @@ let package = Package(
         "EarsConfig",
         "EarsLogging",
         "EarsCLISupport",
+        "EarsDataStore",
+        "EarsLLMKit",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
     ),
@@ -259,7 +280,7 @@ let package = Package(
     ),
     .testTarget(
       name: "EarsDaemonKitTests",
-      dependencies: ["EarsDaemonKit", "EarsCoreTestSupport"]
+      dependencies: ["EarsDaemonKit", "EarsCoreTestSupport", "EarsCaptureKit"]
     ),
     .testTarget(
       name: "EarsTranscribeKitTests",
@@ -275,6 +296,18 @@ let package = Package(
     .testTarget(
       name: "TranscribeTests",
       dependencies: ["EarsCore", "EarsCoreTestSupport", "EarsDataStore", "transcribe"]
+    ),
+    .testTarget(
+      name: "EarsLLMKitTests",
+      dependencies: ["EarsLLMKit", "EarsCoreTestSupport"]
+    ),
+    .testTarget(
+      name: "CleanupTests",
+      dependencies: ["EarsCore", "EarsCoreTestSupport", "EarsLLMKit", "cleanup"]
+    ),
+    .testTarget(
+      name: "SummarizeTests",
+      dependencies: ["EarsCore", "EarsCoreTestSupport", "EarsLLMKit", "summarize"]
     ),
   ]
 )

@@ -44,7 +44,11 @@ struct EarsdConfigSchemaTests {
       "ingest_ws": ingestWS,
       "source": .array([micSource]),
     ])
-    let expected: ConfigValue = .table(["earsd": earsdTable])
+    let triggersTable: ConfigValue = .table([
+      "enabled": .bool(false),
+      "rule": .array([]),
+    ])
+    let expected: ConfigValue = .table(["earsd": earsdTable, "triggers": triggersTable])
 
     #expect(EarsdConfigSchema.defaults == expected)
   }
@@ -178,6 +182,82 @@ struct EarsdConfigSchemaTests {
     let errors = validateConfig(value, against: EarsdConfigSchema.effectiveSchema)
     #expect(errors.count == 1)
     #expect(errors.first?.keyPathString == "bogus_top_level")
+  }
+
+  @Test("the doc's [[triggers.rule]] example round-trips through validation")
+  func triggersRuleExampleValidates() {
+    let value = mergeConfigLayers([
+      EarsdConfigSchema.defaults,
+      .table([
+        "triggers": .table([
+          "enabled": .bool(true),
+          "rule": .array([
+            .table([
+              "name": .string("meetings"),
+              "on": .string("app-audio-active"),
+              "apps": .array([
+                .string("us.zoom.xos"), .string("com.microsoft.teams2"), .string("Google Chrome"),
+              ]),
+              "open_session": .bool(true),
+              "sources": .array([.string("mic"), .string("app:us.zoom.xos")]),
+              "on_close": .array([.string("transcribe"), .string("cleanup"), .string("summarize")]),
+            ])
+          ]),
+        ])
+      ]),
+    ])
+
+    let errors = validateConfig(value, against: EarsdConfigSchema.schema)
+    #expect(errors.isEmpty)
+  }
+
+  @Test("an unknown key inside a [[triggers.rule]] element is reported with a precise indexed path")
+  func unknownTriggerRuleElementKey() {
+    let value = mergeConfigLayers([
+      EarsdConfigSchema.defaults,
+      .table([
+        "triggers": .table([
+          "rule": .array([
+            .table(["name": .string("meetings"), "bogus": .bool(true)])
+          ])
+        ])
+      ]),
+    ])
+
+    let errors = validateConfig(value, against: EarsdConfigSchema.schema)
+    #expect(errors.count == 1)
+    #expect(errors.first?.keyPathString == "triggers.rule[0].bogus")
+    #expect(errors.first?.reason == .unknownKey)
+  }
+
+  @Test("an unknown key under [triggers] itself is reported")
+  func unknownTriggersKey() {
+    let value = mergeConfigLayers([
+      EarsdConfigSchema.defaults,
+      .table(["triggers": .table(["bogus": .int(1)])]),
+    ])
+
+    let errors = validateConfig(value, against: EarsdConfigSchema.schema)
+    #expect(errors.count == 1)
+    #expect(errors.first?.keyPathString == "triggers.bogus")
+    #expect(errors.first?.reason == .unknownKey)
+  }
+
+  @Test("pre_roll_seconds is a valid int field on a trigger rule")
+  func preRollSecondsValidates() {
+    let value = mergeConfigLayers([
+      EarsdConfigSchema.defaults,
+      .table([
+        "triggers": .table([
+          "rule": .array([
+            .table(["name": .string("meetings"), "pre_roll_seconds": .int(15)])
+          ])
+        ])
+      ]),
+    ])
+
+    let errors = validateConfig(value, against: EarsdConfigSchema.schema)
+    #expect(errors.isEmpty)
   }
 
   @Test("effectiveSchema still passes through not-yet-implemented sibling sections")

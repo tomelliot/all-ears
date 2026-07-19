@@ -1,17 +1,26 @@
 import ArgumentParser
 import EarsCLISupport
+import Foundation
 
 /// Reads a transcript, applies the LLM with the known-word list and context, and
-/// writes a cleaned transcript. See `docs/architecture.md`.
+/// writes a cleaned transcript. See `docs/product/specs/llm-stages.md`.
 ///
-/// Phase 0 has no LLM backend yet: this stub's entire behavior is the
-/// day-one config/logging contract every tool must satisfy — see
-/// `EarsCLI.run(tool:version:arguments:)`.
+/// Every invocation still runs `EarsCLI.run(tool:version:arguments:)` first,
+/// unchanged -- the day-one config/logging contract every tool satisfies.
+/// A normal invocation (neither `--print-config` nor `--config-path`) then
+/// runs ``CleanupRuntime``: it resolves the LLM backend, prompt, and
+/// vocabulary from config and the CLI flags below, and cleans `transcript`.
 @main
 struct Cleanup: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "cleanup"
   )
+
+  // Optional, not required: `--print-config`/`--config-path` must work with
+  // no positional argument at all (the day-one contract every tool shares) --
+  // its absence is only an error on a normal cleaning run, checked below.
+  @Argument(help: "Path to the transcript to clean (a .transcript.md or .clean.md file).")
+  var transcript: String?
 
   @Option(name: .customLong("config"), help: "Path to a TOML config file.")
   var config: String?
@@ -34,18 +43,50 @@ struct Cleanup: AsyncParsableCommand {
   @Option(name: .customLong("log-file"), help: "Override the JSON Lines log file path.")
   var logFile: String?
 
+  @Option(name: .customLong("out"), help: "Override the output path for the cleaned transcript.")
+  var out: String?
+
+  @Option(name: .customLong("prompt"), help: "Path to a custom cleanup system prompt.")
+  var prompt: String?
+
+  @Option(name: .customLong("vocab"), help: "Path to an additional vocabulary list.")
+  var vocab: String?
+
+  @Option(name: .customLong("model"), help: "Override the LLM model for this run.")
+  var model: String?
+
+  @Flag(name: .customLong("no-vocab"), help: "Disable vocabulary-based correction for this run.")
+  var noVocab = false
+
   func run() async throws {
-    let exitCode = await EarsCLI.run(
-      tool: "cleanup",
-      version: "0.1.0",
-      arguments: EarsCLI.Arguments(
-        config: config,
-        printConfig: printConfig,
-        configPath: configPath,
-        logLevel: logLevel,
-        logFile: logFile
+    let arguments = EarsCLI.Arguments(
+      config: config,
+      printConfig: printConfig,
+      configPath: configPath,
+      logLevel: logLevel,
+      logFile: logFile
+    )
+
+    let exitCode = await EarsCLI.run(tool: "cleanup", version: "0.1.0", arguments: arguments)
+    guard exitCode == 0 else { throw ExitCode(exitCode) }
+    guard !printConfig, !configPath else { return }
+
+    guard let transcript else {
+      FileHandle.standardError.write(Data("error: a transcript path is required\n".utf8))
+      throw ExitCode(1)
+    }
+
+    let cleanupExitCode = await CleanupRuntime.run(
+      arguments: arguments,
+      inputs: CleanupCLIInputs(
+        transcriptPath: transcript,
+        out: out,
+        promptFile: prompt,
+        vocabPath: vocab,
+        model: model,
+        useVocab: !noVocab
       )
     )
-    guard exitCode == 0 else { throw ExitCode(exitCode) }
+    guard cleanupExitCode == 0 else { throw ExitCode(cleanupExitCode) }
   }
 }

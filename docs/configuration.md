@@ -91,11 +91,15 @@ enabled = true
 
 [[triggers.rule]]
 name = "meetings"
-on   = "app-audio-active"           # fires while an app is producing/consuming audio
-apps = ["us.zoom.xos", "com.microsoft.teams2", "Google Chrome"]
+on   = "app-audio-active"           # fires on genuine audio activity (the matched
+                                     # app's own app:<bundle-id> source VAD going
+                                     # speech), not merely the app launching
+apps = ["us.zoom.xos", "com.microsoft.teams2", "com.google.Chrome"]  # exact bundle ids only
 open_session = true
 sources = ["mic", "app:us.zoom.xos"]
 on_close = ["transcribe", "cleanup", "summarize"]   # pipeline to run when the session closes
+pre_roll_seconds = 15               # widen transcribe's read range backward by
+                                     # this many seconds of already-buffered audio
 
 # --- Transcription ---
 [transcribe]

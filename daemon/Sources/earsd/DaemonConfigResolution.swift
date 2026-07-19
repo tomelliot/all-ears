@@ -5,9 +5,10 @@ import Foundation
 
 /// Resolves a validated, expanded `earsd` config tree (validated against
 /// `EarsdConfigSchema.effectiveSchema`, per `ConfigLoader`'s contract) into
-/// the ready-to-run ``EarsDaemonConfiguration`` ``EarsDaemon`` composes from,
-/// plus every `[[earsd.source]]` entry this Phase 1 (mic-only) build can't
-/// yet capture and therefore leaves out.
+/// the ready-to-run ``EarsDaemonConfiguration`` ``EarsDaemon`` composes from.
+/// `mic`/`system`/`app:<bundle-id>` sources are all captured (Phase 4); a
+/// `browser:*`/`device:*` entry, or a malformed `system`/`app` id, is
+/// skipped and reported via ``Result/skipped`` instead.
 ///
 /// Pure and clock-injected (`now`), so this is fully unit-testable without
 /// the filesystem, the real clock, or Core Audio -- the "wiring logic" this
@@ -33,9 +34,19 @@ enum DaemonConfigResolution {
     var reason: String
   }
 
+  /// One `[[triggers.rule]]` entry that was not turned into a
+  /// ``TriggerRuleConfiguration``, and why -- reported the same way a
+  /// malformed `[[earsd.source]]` entry is, at config-resolution time rather
+  /// than deep inside the trigger observer.
+  struct SkippedTriggerRule: Equatable, Sendable {
+    var name: String
+    var reason: String
+  }
+
   struct Result {
     var configuration: EarsDaemonConfiguration
     var skipped: [SkippedSource]
+    var skippedTriggerRules: [SkippedTriggerRule] = []
   }
 
   static func resolve(config: ConfigValue, now: Instant) -> Result {
@@ -73,6 +84,9 @@ enum DaemonConfigResolution {
       }
     }
 
+    let (triggers, skippedTriggerRules) = resolveTriggers(root)
+    let outputRootPath = string(root, "output_root", default: "")
+
     let configuration = EarsDaemonConfiguration(
       sources: descriptors,
       dataRoot: URL(fileURLWithPath: dataRoot.isEmpty ? "." : dataRoot),
@@ -82,9 +96,70 @@ enum DaemonConfigResolution {
       codec: defaults.codec,
       bitrate: defaults.bitrate,
       defaultTimeCapSeconds: defaults.defaultTimeCapSeconds,
-      ingestWebSocket: resolveIngestWebSocket(earsd)
+      ingestWebSocket: resolveIngestWebSocket(earsd),
+      triggers: triggers,
+      outputRoot: URL(fileURLWithPath: outputRootPath.isEmpty ? "." : outputRootPath)
     )
-    return Result(configuration: configuration, skipped: skipped)
+    return Result(
+      configuration: configuration, skipped: skipped, skippedTriggerRules: skippedTriggerRules)
+  }
+
+  // MARK: - [triggers] / [[triggers.rule]] resolution
+
+  private static func resolveTriggers(_ root: [String: ConfigValue])
+    -> (TriggersConfiguration, [SkippedTriggerRule])
+  {
+    let triggersTable = nestedTable(root, "triggers")
+    let enabled = bool(triggersTable, "enabled", default: false)
+
+    var rules: [TriggerRuleConfiguration] = []
+    var skipped: [SkippedTriggerRule] = []
+    for entry in array(triggersTable, "rule") {
+      switch resolveTriggerRule(entry) {
+      case .included(let rule): rules.append(rule)
+      case .skipped(let skip): skipped.append(skip)
+      }
+    }
+    return (TriggersConfiguration(enabled: enabled, rules: rules), skipped)
+  }
+
+  private enum TriggerRuleResolution {
+    case included(TriggerRuleConfiguration)
+    case skipped(SkippedTriggerRule)
+  }
+
+  /// Never-throwing, matching ``resolveSource(_:defaults:now:)``'s own
+  /// contract: a malformed `[[triggers.rule]]` entry is skipped and
+  /// reported, not a fatal config error.
+  private static func resolveTriggerRule(_ entry: ConfigValue) -> TriggerRuleResolution {
+    guard case .table(let fields) = entry else {
+      return .skipped(
+        SkippedTriggerRule(name: "?", reason: "[[triggers.rule]] entry is not a table"))
+    }
+    guard case .string(let name)? = fields["name"], !name.isEmpty else {
+      return .skipped(
+        SkippedTriggerRule(name: "?", reason: "[[triggers.rule]] entry has no 'name'"))
+    }
+    let on = string(fields, "on", default: "")
+    guard !on.isEmpty else {
+      return .skipped(SkippedTriggerRule(name: name, reason: "trigger rule '\(name)' has no 'on'"))
+    }
+    let sources = stringArray(fields, "sources").map { SourceID($0) }
+    guard !sources.isEmpty else {
+      return .skipped(
+        SkippedTriggerRule(name: name, reason: "trigger rule '\(name)' has no 'sources'"))
+    }
+
+    return .included(
+      TriggerRuleConfiguration(
+        name: name,
+        on: on,
+        apps: stringArray(fields, "apps"),
+        openSession: bool(fields, "open_session", default: true),
+        sources: sources,
+        onClose: stringArray(fields, "on_close"),
+        preRollSeconds: int(fields, "pre_roll_seconds", default: 0)
+      ))
   }
 
   /// `[earsd.ingest_ws]` → ``IngestWebSocketConfiguration``, or `nil` when
@@ -139,12 +214,30 @@ enum DaemonConfigResolution {
     if case .bool(false)? = fields["enabled"] {
       return .skipped(SkippedSource(id: rawID, reason: "source '\(rawID)' is disabled in config"))
     }
-    guard sourceClass == .mic else {
+    switch sourceClass {
+    case .mic:
+      break
+    case .system:
+      guard rawID == "system" else {
+        return .skipped(
+          SkippedSource(
+            id: rawID,
+            reason: "source '\(rawID)' has class 'system' but id must be exactly 'system'")
+        )
+      }
+    case .app:
+      guard let detail = SourceID(rawID).detail, !detail.isEmpty else {
+        return .skipped(
+          SkippedSource(
+            id: rawID,
+            reason: "source '\(rawID)' has class 'app' but id must be 'app:<bundle-id>'")
+        )
+      }
+    case .browser, .device:
       return .skipped(
         SkippedSource(
           id: rawID,
-          reason:
-            "source '\(rawID)' has class '\(rawClass)', which Phase 1 (mic-only capture) doesn't support yet"
+          reason: "source '\(rawID)' has class '\(rawClass)', which is not yet supported"
         ))
     }
 

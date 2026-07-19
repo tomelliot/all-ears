@@ -345,8 +345,8 @@ struct CLISmokeTests {
       enabled = false
 
       [[earsd.source]]
-      id = "system"
-      class = "system"
+      id = "browser:meet"
+      class = "browser"
       """,
       named: "config.toml"
     )
@@ -356,8 +356,8 @@ struct CLISmokeTests {
     #expect(run.exitCode == 0)
     #expect(run.stderr.contains("skipping source 'mic'"))
     #expect(run.stderr.contains("disabled in config"))
-    #expect(run.stderr.contains("skipping source 'system'"))
-    #expect(run.stderr.contains("Phase 1"))
+    #expect(run.stderr.contains("skipping source 'browser:meet'"))
+    #expect(run.stderr.contains("not yet supported"))
     #expect(run.stderr.contains("resolved sources: (none)"))
     #expect(run.stderr.contains("SIGTERM received"))
     #expect(run.stderr.contains("stopped"))

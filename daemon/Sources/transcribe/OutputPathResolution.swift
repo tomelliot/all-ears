@@ -20,14 +20,19 @@ enum OutputPathResolution {
   ///   - requestedStart: The transcribed range's start, used for the
   ///     `<date>/<time>_` prefix when `explicitOut` isn't given.
   ///   - sourceIDs: Sources included in the run, joined into the filename's
-  ///     `<slug>` (`docs/data-formats.md` doesn't define a slug for a plain
-  ///     `--last`/`--source` run with no `--session`/`--slug`, so the
-  ///     path-safe source ids stand in for it).
+  ///     `<slug>` when `sessionSlug` is `nil` (a plain `--last`/`--source`
+  ///     run with no `--session`, where the path-safe source ids stand in
+  ///     for a slug).
   ///   - explicitOut: `--out`, if given -- used verbatim as the Markdown
   ///     path; the JSON sidecar is derived by swapping its extension to
   ///     `.json`.
+  ///   - sessionSlug: `--session`'s resolved `SessionDescriptor.slug`, when
+  ///     given -- used as the filename's `<slug>` in place of the joined
+  ///     source ids, so a session-based run's output name reflects the
+  ///     session (e.g. `standup`) rather than its source list.
   static func resolve(
-    outputRoot: URL, requestedStart: Instant, sourceIDs: [SourceID], explicitOut: String?
+    outputRoot: URL, requestedStart: Instant, sourceIDs: [SourceID], explicitOut: String?,
+    sessionSlug: String? = nil
   ) -> Paths {
     if let explicitOut, !explicitOut.isEmpty {
       let markdown = URL(fileURLWithPath: explicitOut)
@@ -44,7 +49,7 @@ enum OutputPathResolution {
     let date = String(components[0])
     let time = String(components[1].dropLast())  // drop trailing "Z"
 
-    let slug = sourceIDs.map(\.pathSafe).joined(separator: "_")
+    let slug = sessionSlug ?? sourceIDs.map(\.pathSafe).joined(separator: "_")
     let baseName = "\(time)_\(slug).transcript"
     let dayDirectory = outputRoot.appendingPathComponent(date)
 
@@ -55,12 +60,13 @@ enum OutputPathResolution {
   }
 
   /// Synthesises a session identifier for a plain `--last`/`--source` run
-  /// with no `--session` (not implemented yet -- see
-  /// `TranscribeRangeResolution`'s doc comment), in the same
-  /// `<start-timestamp>_<slug>` shape `docs/data-formats.md` uses for a real
-  /// session id (e.g. `2026-07-17T10-30-00Z_standup`), so
-  /// ``TranscriptFrontmatter/session`` -- not optional in that type -- still
-  /// gets a meaningful, reproducible value instead of a placeholder string.
+  /// with no `--session`, in the same `<start-timestamp>_<slug>` shape
+  /// `docs/data-formats.md` uses for a real session id (e.g.
+  /// `2026-07-17T10-30-00Z_standup`), so ``TranscriptFrontmatter/session``
+  /// -- not optional in that type -- still gets a meaningful, reproducible
+  /// value instead of a placeholder string. A `--session` run instead passes
+  /// its real, resolved id straight through -- this function is never
+  /// called for that case (see ``TranscribePipeline``).
   static func sessionIdentifier(requestedStart: Instant, sourceIDs: [SourceID]) -> String {
     let timestamp = FilenameTimestampCodec.string(for: requestedStart)
     let slug = sourceIDs.map(\.pathSafe).joined(separator: "_")

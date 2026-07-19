@@ -221,6 +221,104 @@ struct TranscribePipelineTests {
     #expect(abs(segmentEnd - 6.7) < 0.001)
   }
 
+  @Test(
+    "--session resolves range/sources from a real session.toml fixture, with no --source needed")
+  func sessionEndToEnd() async throws {
+    let dataRoot = makeTempDirectory("session")
+    let outputRoot = makeTempDirectory("session-output")
+    try await writeFixtureSource(
+      sourceID: "mic", dataRoot: dataRoot,
+      chunkStart: now.advanced(by: -20), chunkDuration: 20,
+      vadSpeechStart: now.advanced(by: -15), vadSpeechEnd: now.advanced(by: -5))
+
+    let descriptor = SessionDescriptor(
+      schema: 1, id: "session-fixture_standup", slug: "standup", sources: ["mic"],
+      start: now.advanced(by: -20), end: now, state: .closed, trigger: .manual)
+    try SessionStore.write(descriptor, dataRoot: dataRoot)
+
+    let scripted = ScriptedTranscriber(results: [
+      [Segment(start: 0, end: 2, text: "session hello")]
+    ])
+
+    let exitCode = await TranscribePipeline.run(
+      inputs: .init(session: "session-fixture_standup", sourceIDs: [], out: nil),
+      dataRoot: dataRoot,
+      outputRoot: outputRoot,
+      backendName: "fluidaudio",
+      dependencies: .init(
+        clock: ManualClock(now),
+        transcriberFactory: { scripted },
+        loadOptions: LoadOptions(),
+        log: { _ in },
+        writeStderr: { line in Issue.record("unexpected stderr: \(line)") }
+      )
+    )
+
+    #expect(exitCode == 0)
+    #expect(scripted.recordedCalls.count == 1)
+
+    // The session's real id/slug drive the output filename, not a
+    // synthesized <timestamp>_<sources> stand-in.
+    let expectedPaths = OutputPathResolution.resolve(
+      outputRoot: outputRoot, requestedStart: now.advanced(by: -20), sourceIDs: ["mic"],
+      explicitOut: nil, sessionSlug: "standup")
+    let markdown = try outputText(at: expectedPaths.markdown)
+    #expect(markdown.contains("session hello"))
+    #expect(markdown.contains("session: session-fixture_standup"))
+  }
+
+  @Test(
+    "--session with pre_roll_seconds widens the read range to include speech before the session's nominal start"
+  )
+  func sessionPreRollWidensRange() async throws {
+    let dataRoot = makeTempDirectory("pre-roll")
+    let outputRoot = makeTempDirectory("pre-roll-output")
+    // A speech span well before the session's nominal start (-10), but
+    // within a 16s pre-roll window (nominal start - 16 = -26).
+    try await writeFixtureSource(
+      sourceID: "mic", dataRoot: dataRoot,
+      chunkStart: now.advanced(by: -30), chunkDuration: 30,
+      vadSpeechStart: now.advanced(by: -24), vadSpeechEnd: now.advanced(by: -20))
+
+    let descriptor = SessionDescriptor(
+      schema: 1, id: "session-preroll_standup", slug: "standup", sources: ["mic"],
+      start: now.advanced(by: -10), end: now, state: .closed, trigger: .manual,
+      preRollSeconds: 16)
+    try SessionStore.write(descriptor, dataRoot: dataRoot)
+
+    let scripted = ScriptedTranscriber(results: [
+      [Segment(start: 0, end: 2, text: "pre-roll speech")]
+    ])
+
+    let exitCode = await TranscribePipeline.run(
+      inputs: .init(session: "session-preroll_standup", sourceIDs: [], out: nil),
+      dataRoot: dataRoot,
+      outputRoot: outputRoot,
+      backendName: "fluidaudio",
+      dependencies: .init(
+        clock: ManualClock(now),
+        transcriberFactory: { scripted },
+        loadOptions: LoadOptions(),
+        log: { _ in },
+        writeStderr: { line in Issue.record("unexpected stderr: \(line)") }
+      )
+    )
+
+    #expect(exitCode == 0)
+    // Without the pre-roll widening, this speech span (entirely before the
+    // session's nominal start) would never be read at all -- proving the
+    // widened range is what made this call happen.
+    #expect(scripted.recordedCalls.count == 1)
+    #expect(scripted.recordedCalls[0].audio.duration > 0)
+
+    let markdown = try outputText(
+      at: OutputPathResolution.resolve(
+        outputRoot: outputRoot, requestedStart: now.advanced(by: -26), sourceIDs: ["mic"],
+        explicitOut: nil, sessionSlug: "standup"
+      ).markdown)
+    #expect(markdown.contains("pre-roll speech"))
+  }
+
   @Test("segments from two sources are merged onto one shared timeline, ordered by time")
   func twoSourcesMergeByTime() async throws {
     let dataRoot = makeTempDirectory("two-sources")

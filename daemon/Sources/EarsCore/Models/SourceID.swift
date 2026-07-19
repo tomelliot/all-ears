@@ -44,6 +44,16 @@ public struct SourceID: RawRepresentable, Sendable, Hashable, Comparable {
     return SourceClass(rawValue: String(prefix))
   }
 
+  /// The part after the first `:`, e.g. `"app:us.zoom.xos".detail ==
+  /// "us.zoom.xos"` — the bundle id for an `.app` source, the label for a
+  /// `.browser` source, the UID for a `.device` source. `nil` for an id with
+  /// no `:` (`mic`, `system`) or an empty detail (`"app:"`).
+  public var detail: String? {
+    guard let colonIndex = rawValue.firstIndex(of: ":") else { return nil }
+    let value = rawValue[rawValue.index(after: colonIndex)...]
+    return value.isEmpty ? nil : String(value)
+  }
+
   public static func < (lhs: SourceID, rhs: SourceID) -> Bool {
     lhs.rawValue < rhs.rawValue
   }

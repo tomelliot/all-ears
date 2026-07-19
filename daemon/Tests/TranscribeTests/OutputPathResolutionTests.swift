@@ -45,4 +45,13 @@ struct OutputPathResolutionTests {
       requestedStart: start, sourceIDs: [SourceID("mic")])
     #expect(identifier == "2026-07-17T10-30-00Z_mic")
   }
+
+  @Test("a sessionSlug overrides the joined source ids in the filename")
+  func sessionSlugOverridesSourceSlug() {
+    let paths = OutputPathResolution.resolve(
+      outputRoot: outputRoot, requestedStart: start,
+      sourceIDs: [SourceID("mic"), SourceID("app:us.zoom.xos")], explicitOut: nil,
+      sessionSlug: "standup")
+    #expect(paths.markdown.path == "/output-root/2026-07-17/10-30-00_standup.transcript.md")
+  }
 }

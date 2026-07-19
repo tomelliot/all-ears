@@ -41,7 +41,11 @@ public enum EarsdConfigSchema {
           "device_uid": .string(""),
         ])
       ]),
-    ])
+    ]),
+    "triggers": .table([
+      "enabled": .bool(false),
+      "rule": .array([]),
+    ]),
   ])
 
   /// Schema for a single `[[earsd.source]]` element. Every field is optional
@@ -58,6 +62,30 @@ public enum EarsdConfigSchema {
       "label": ConfigSchema.Field(type: .string),
       "time_cap_seconds": ConfigSchema.Field(type: .int),
       "enabled": ConfigSchema.Field(type: .bool),
+    ]
+  )
+
+  /// Schema for a single `[[triggers.rule]]` element, per
+  /// `docs/configuration.md`'s "Auto-triggers" example. `on`'s only
+  /// documented value today is `"app-audio-active"`; left as a plain string
+  /// (not an enum) since this schema engine has no closed-set-of-strings
+  /// concept and a stricter check belongs at resolution time, matching how
+  /// `class` is validated for `[[earsd.source]]`.
+  private static let triggerRuleElementSchema = ConfigSchema(
+    fields: [
+      "name": ConfigSchema.Field(type: .string),
+      "on": ConfigSchema.Field(type: .string),
+      // Array of scalars (bundle ids/app names) — left unvalidated
+      // element-wise, matching `ingest_ws.allowed_origins`'s convention.
+      "apps": ConfigSchema.Field(type: .array),
+      "open_session": ConfigSchema.Field(type: .bool),
+      "sources": ConfigSchema.Field(type: .array),
+      "on_close": ConfigSchema.Field(type: .array),
+      // Session pre-roll: widen the transcribed range backward by this many
+      // seconds of already-buffered ring audio when transcribing this
+      // rule's sessions (see `TranscribeRangeResolution`'s pre-roll
+      // widening). 0 (the default) means no widening.
+      "pre_roll_seconds": ConfigSchema.Field(type: .int),
     ]
   )
 
@@ -102,7 +130,16 @@ public enum EarsdConfigSchema {
             "source": ConfigSchema.Field(type: .array, elementSchema: sourceElementSchema),
           ]
         )
-      )
+      ),
+      "triggers": ConfigSchema.Field(
+        type: .table,
+        children: ConfigSchema(
+          fields: [
+            "enabled": ConfigSchema.Field(type: .bool),
+            "rule": ConfigSchema.Field(type: .array, elementSchema: triggerRuleElementSchema),
+          ]
+        )
+      ),
     ],
     passthroughKeys: [
       "schema",
@@ -110,7 +147,6 @@ public enum EarsdConfigSchema {
       "llm",
       "cleanup",
       "summarize",
-      "triggers",
       "vocab",
     ]
   )

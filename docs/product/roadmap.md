@@ -35,17 +35,19 @@ Phased so each stage ships a usable, independently-valuable tool. Every phase ca
 - `cleanup` and `summarize` on the `llm`-CLI backend behind the LLM interface; vocabulary as a cleanup backstop; summary presets.
 - **Cleanup guardrails:** accept/fallback validator, skip-high-confidence-utterances, minimal-change prompt, stable-prefix/dynamic split for cache reuse.
 - **Exit:** `transcribe → cleanup → summarize` runs end to end from the command line and produces clean notes + a summary; the validator demonstrably rejects a hallucinated cleanup on a fixture.
+- The guardrail/validator pieces landed here first; the actual `cleanup`/`summarize` executables' CLI wiring (a real `command`-backend `LLMBackend`, a transcript reader, config schemas) landed alongside Phase 4, once that phase's auto-trigger pipeline needed them to be real.
 
 ## Phase 4 — Multi-source + sessions (meeting notes)
 
-Executable prompt: [`prompts/phase-4-multi-source-sessions.md`](prompts/phase-4-multi-source-sessions.md).
+Executable prompt: [`prompts/phase-4-multi-source-sessions.md`](prompts/phase-4-multi-source-sessions.md) — landed, plus the Phase 3 CLI wiring gap it uncovered (see below).
 
-- Core Audio process tap (`CATap` + private aggregate device) for **system audio**, then **per-app scoping** via the process-inclusion list — the least-proven path, so gated behind integration tests that verify inclusion/exclusion semantics.
+- Core Audio process tap (`CATap` + private aggregate device) for **system audio**, then **per-app scoping** via the process-inclusion list — the least-proven path, so gated behind integration tests that verify inclusion/exclusion semantics. The recipe is verified against this machine's real Core Audio HAL (tap creation, format read, TCC-denial detection all confirmed live); per-app inclusion/exclusion isolation itself still needs its opt-in, manually-run integration test exercised on real hardware with a granted permission.
 - **TCC probing** for the tap grant (create-and-destroy probe, all-zero-PCM detection, actionable "System Audio Recording Only" messaging); each source degrades independently on denial.
-- Session lifecycle over the socket; app-signal auto-triggers running the pipeline on close; prepend-on-open pre-roll from the ring.
-- Source-level speaker attribution (you-vs-them) in transcripts.
+- Session lifecycle over the socket; app-signal auto-triggers running the pipeline on close (genuine audio-active correlation, not mere launch); prepend-on-open pre-roll from the ring (a `transcribe`-time-only widening — `session.toml`'s `start` is never rewritten).
+- Source-level speaker attribution (you-vs-them) in transcripts (landed in Phase 3).
+- **Also landed as part of this phase:** `cleanup`/`summarize` were still Phase-0 stubs and `transcribe` had no `--session`/`--from`/`--to` — all now real (a concrete `command`-backend `LLMBackend`, a transcript reader, validated `[llm]`/`[cleanup]`/`[[summarize.preset]]` config), since the auto-trigger's `on_close` pipeline needed them to produce an actual note.
 - **Delivers UC-2:** a meeting produces an auto-generated cleaned, summarised note.
-- **Exit:** starting a configured meeting app yields a filed note with no manual step; per-app capture isolates the meeting app from other system audio (integration-tested).
+- **Exit:** starting a configured meeting app yields a filed note with no manual step; per-app capture isolates the meeting app from other system audio (integration-tested, opt-in on real hardware).
 
 ## Phase 5 — Diarization
 

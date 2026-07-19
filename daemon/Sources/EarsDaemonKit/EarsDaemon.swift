@@ -40,6 +40,15 @@ public struct EarsDaemonConfiguration: Sendable {
   /// whether ``EarsDaemon/start()`` also binds the loopback ingest
   /// WebSocket.
   public var ingestWebSocket: IngestWebSocketConfiguration?
+  /// `[triggers]`/`[[triggers.rule]]`, resolved. Disabled (no rules) by
+  /// default — gates whether ``EarsDaemon/start()`` also starts an
+  /// ``AppSignalTriggerObserver``.
+  public var triggers: TriggersConfiguration
+  /// `docs/configuration.md`'s `output_root` — where `transcribe`/`cleanup`/
+  /// `summarize` write. `earsd` itself never writes here; it's only needed
+  /// to construct an `on_close` pipeline stage's file-path arguments (see
+  /// ``AppSignalTriggerObserver``).
+  public var outputRoot: URL
 
   public init(
     sources: [SourceDescriptor],
@@ -50,7 +59,9 @@ public struct EarsDaemonConfiguration: Sendable {
     codec: String = "aac",
     bitrate: Int = 64_000,
     defaultTimeCapSeconds: Int = 7_200,
-    ingestWebSocket: IngestWebSocketConfiguration? = nil
+    ingestWebSocket: IngestWebSocketConfiguration? = nil,
+    triggers: TriggersConfiguration = TriggersConfiguration(),
+    outputRoot: URL = URL(fileURLWithPath: ".")
   ) {
     self.sources = sources
     self.dataRoot = dataRoot
@@ -59,8 +70,10 @@ public struct EarsDaemonConfiguration: Sendable {
     self.vad = vad
     self.codec = codec
     self.bitrate = bitrate
+    self.outputRoot = outputRoot
     self.defaultTimeCapSeconds = defaultTimeCapSeconds
     self.ingestWebSocket = ingestWebSocket
+    self.triggers = triggers
   }
 }
 
@@ -103,6 +116,7 @@ public actor EarsDaemon {
   private var controlServerRunTask: Task<Void, Never>?
   private var controlServer: ControlServer?
   private var powerObserver: PowerObserver?
+  private var appSignalTriggerObserver: AppSignalTriggerObserver?
 
   // MARK: - Dynamic browser (ingest) sources
   //
@@ -303,11 +317,33 @@ public actor EarsDaemon {
     // a value-type copy neither sees the other's later changes to.
     self.controlServer = controlServer
 
+    // Only started when configured with at least one rule -- disabled (the
+    // default) means no observer, no subscription, no behavior change from
+    // before this existed.
+    let triggerObserver: AppSignalTriggerObserver?
+    if configuration.triggers.enabled, !configuration.triggers.rules.isEmpty {
+      let observer = AppSignalTriggerObserver(
+        rules: configuration.triggers.rules,
+        sessions: sessions,
+        outputRoot: configuration.outputRoot,
+        log: log)
+      await observer.start()
+      appSignalTriggerObserver = observer
+      triggerObserver = observer
+    } else {
+      triggerObserver = nil
+    }
+
     // Only now does a pub/sub consumer exist: route every event published by
-    // the capture actors / session registry into the socket's fan-out. Events
-    // published before this line (during source startup) were dropped by
-    // design — no subscriber could have been connected yet anyway.
-    await eventBus.attach { event in await socketServer.publish(event) }
+    // the capture actors / session registry into the socket's fan-out (and,
+    // when configured, the app-signal trigger observer's own vad-event
+    // correlation). Events published before this line (during source
+    // startup) were dropped by design — no subscriber could have been
+    // connected yet anyway.
+    await eventBus.attach { event in
+      await socketServer.publish(event)
+      await triggerObserver?.handle(event)
+    }
 
     let observer = PowerObserver(captureActors: captureActors)
     await observer.startObserving()
@@ -377,6 +413,11 @@ public actor EarsDaemon {
       await powerObserver.stopObserving()
     }
     powerObserver = nil
+
+    if let appSignalTriggerObserver {
+      await appSignalTriggerObserver.stop()
+    }
+    appSignalTriggerObserver = nil
 
     for actor in captureActors.values {
       await actor.stop()

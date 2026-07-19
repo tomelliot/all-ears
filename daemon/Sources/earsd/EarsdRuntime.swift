@@ -82,6 +82,9 @@ enum EarsdRuntime {
     for skip in resolution.skipped {
       log("skipping source '\(skip.id)': \(skip.reason)")
     }
+    for skip in resolution.skippedTriggerRules {
+      log("skipping trigger rule '\(skip.name)': \(skip.reason)")
+    }
     let sourceList =
       resolution.configuration.sources.isEmpty
       ? "(none)"

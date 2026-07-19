@@ -21,7 +21,8 @@ struct DaemonConfigResolutionTests {
     sources: [ConfigValue] = [
       .table(["id": .string("mic"), "class": .string("mic"), "device_uid": .string("")])
     ],
-    earsdOverrides: [String: ConfigValue] = [:]
+    earsdOverrides: [String: ConfigValue] = [:],
+    triggers: ConfigValue? = nil
   ) -> ConfigValue {
     var earsd: [String: ConfigValue] = [
       "chunk_seconds": .int(30),
@@ -36,11 +37,13 @@ struct DaemonConfigResolutionTests {
       "source": .array(sources),
     ]
     for (key, value) in earsdOverrides { earsd[key] = value }
-    return .table([
+    var root: [String: ConfigValue] = [
       "data_root": .string(dataRoot),
       "socket_path": .string(socketPath),
       "earsd": .table(earsd),
-    ])
+    ]
+    if let triggers { root["triggers"] = triggers }
+    return .table(root)
   }
 
   @Test("resolves the default single mic source into a SourceDescriptor")
@@ -91,20 +94,51 @@ struct DaemonConfigResolutionTests {
     #expect(result.configuration.socketPath == "/tmp/custom.sock")
   }
 
-  @Test("a non-mic source class is skipped, logged, and excluded from the daemon configuration")
-  func nonMicClassIsSkipped() {
+  @Test("mic/system/app sources are all included; browser/device stay unsupported")
+  func systemAndAppSourcesAreIncluded() {
     let result = DaemonConfigResolution.resolve(
       config: config(sources: [
         .table(["id": .string("mic"), "class": .string("mic")]),
         .table(["id": .string("system"), "class": .string("system")]),
         .table(["id": .string("app:us.zoom.xos"), "class": .string("app")]),
+        .table(["id": .string("browser:meet"), "class": .string("browser")]),
+        .table(["id": .string("device:abc"), "class": .string("device")]),
       ]),
       now: now
     )
-    #expect(result.configuration.sources.map(\.id) == ["mic"])
-    #expect(result.skipped.map(\.id) == ["system", "app:us.zoom.xos"])
+    #expect(result.configuration.sources.map(\.id) == ["mic", "system", "app:us.zoom.xos"])
+    #expect(result.skipped.map(\.id) == ["browser:meet", "device:abc"])
     for skip in result.skipped {
-      #expect(skip.reason.contains("Phase 1"))
+      #expect(skip.reason.contains("not yet supported"))
+    }
+  }
+
+  @Test("a 'system' source with a non-'system' id is skipped with a precise reason")
+  func systemClassWrongIDIsSkipped() {
+    let result = DaemonConfigResolution.resolve(
+      config: config(sources: [
+        .table(["id": .string("system2"), "class": .string("system")])
+      ]),
+      now: now
+    )
+    #expect(result.configuration.sources.isEmpty)
+    #expect(result.skipped.map(\.id) == ["system2"])
+    #expect(result.skipped[0].reason.contains("must be exactly 'system'"))
+  }
+
+  @Test("an 'app' source with no bundle-id detail is skipped with a precise reason")
+  func appClassMissingDetailIsSkipped() {
+    let result = DaemonConfigResolution.resolve(
+      config: config(sources: [
+        .table(["id": .string("app"), "class": .string("app")]),
+        .table(["id": .string("app:"), "class": .string("app")]),
+      ]),
+      now: now
+    )
+    #expect(result.configuration.sources.isEmpty)
+    #expect(result.skipped.map(\.id) == ["app", "app:"])
+    for skip in result.skipped {
+      #expect(skip.reason.contains("app:<bundle-id>"))
     }
   }
 
@@ -175,5 +209,93 @@ struct DaemonConfigResolutionTests {
     let result = DaemonConfigResolution.resolve(config: config(sources: []), now: now)
     #expect(result.configuration.sources.isEmpty)
     #expect(result.skipped.isEmpty)
+  }
+
+  // MARK: - [triggers] / [[triggers.rule]]
+
+  @Test("no [triggers] table resolves to disabled, no rules")
+  func triggersDefaultToDisabled() {
+    let result = DaemonConfigResolution.resolve(config: config(), now: now)
+    #expect(result.configuration.triggers.enabled == false)
+    #expect(result.configuration.triggers.rules.isEmpty)
+  }
+
+  @Test("the doc's [[triggers.rule]] example resolves into a TriggerRuleConfiguration")
+  func triggerRuleExampleResolves() {
+    let result = DaemonConfigResolution.resolve(
+      config: config(
+        triggers: .table([
+          "enabled": .bool(true),
+          "rule": .array([
+            .table([
+              "name": .string("meetings"),
+              "on": .string("app-audio-active"),
+              "apps": .array([.string("us.zoom.xos"), .string("com.microsoft.teams2")]),
+              "open_session": .bool(true),
+              "sources": .array([.string("mic"), .string("app:us.zoom.xos")]),
+              "on_close": .array([.string("transcribe"), .string("cleanup"), .string("summarize")]),
+              "pre_roll_seconds": .int(15),
+            ])
+          ]),
+        ])),
+      now: now
+    )
+
+    #expect(result.configuration.triggers.enabled == true)
+    #expect(result.configuration.triggers.rules.count == 1)
+    let rule = result.configuration.triggers.rules[0]
+    #expect(rule.name == "meetings")
+    #expect(rule.on == "app-audio-active")
+    #expect(rule.apps == ["us.zoom.xos", "com.microsoft.teams2"])
+    #expect(rule.openSession == true)
+    #expect(rule.sources == ["mic", "app:us.zoom.xos"])
+    #expect(rule.onClose == ["transcribe", "cleanup", "summarize"])
+    #expect(rule.preRollSeconds == 15)
+  }
+
+  @Test("a trigger rule with no 'sources' is skipped with a precise reason")
+  func triggerRuleMissingSourcesIsSkipped() {
+    let result = DaemonConfigResolution.resolve(
+      config: config(
+        triggers: .table([
+          "rule": .array([
+            .table(["name": .string("meetings"), "on": .string("app-audio-active")])
+          ])
+        ])),
+      now: now
+    )
+    #expect(result.configuration.triggers.rules.isEmpty)
+    #expect(result.skippedTriggerRules.map(\.name) == ["meetings"])
+    #expect(result.skippedTriggerRules[0].reason.contains("sources"))
+  }
+
+  @Test("a trigger rule with no 'name' is skipped rather than crashing")
+  func triggerRuleMissingNameIsSkipped() {
+    let result = DaemonConfigResolution.resolve(
+      config: config(
+        triggers: .table([
+          "rule": .array([.table(["on": .string("app-audio-active")])])
+        ])),
+      now: now
+    )
+    #expect(result.configuration.triggers.rules.isEmpty)
+    #expect(result.skippedTriggerRules.count == 1)
+  }
+
+  @Test("a trigger rule's pre_roll_seconds defaults to 0")
+  func triggerRulePreRollDefaultsToZero() {
+    let result = DaemonConfigResolution.resolve(
+      config: config(
+        triggers: .table([
+          "rule": .array([
+            .table([
+              "name": .string("meetings"), "on": .string("app-audio-active"),
+              "sources": .array([.string("mic")]),
+            ])
+          ])
+        ])),
+      now: now
+    )
+    #expect(result.configuration.triggers.rules.first?.preRollSeconds == 0)
   }
 }

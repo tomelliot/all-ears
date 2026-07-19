@@ -44,4 +44,15 @@ struct TOMLFieldReader {
     }
     return value
   }
+
+  /// An int field that defaults rather than throws when absent -- for a
+  /// field added after some on-disk files already existed without it (e.g.
+  /// `session.toml`'s `pre_roll_seconds`), so an older file still decodes
+  /// cleanly instead of failing on a "missing field" error.
+  func optionalInt(_ key: String, default defaultValue: Int) -> Int {
+    guard case .int(let value)? = table[key] else {
+      return defaultValue
+    }
+    return value
+  }
 }

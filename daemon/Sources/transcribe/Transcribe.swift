@@ -46,6 +46,16 @@ struct Transcribe: AsyncParsableCommand {
   @Option(name: .customLong("last"), help: "Range ending now (e.g. 30m, 2h).")
   var last: String?
 
+  @Option(name: .customLong("from"), help: "Explicit range start (ISO-8601 UTC).")
+  var from: String?
+
+  @Option(name: .customLong("to"), help: "Explicit range end (ISO-8601 UTC).")
+  var to: String?
+
+  @Option(
+    name: .customLong("session"), help: "Resolve range, sources, and vocab from a session id.")
+  var session: String?
+
   @Option(name: .customLong("source"), help: "Source(s) to transcribe; repeatable.")
   var sources: [String] = []
 
@@ -79,8 +89,9 @@ struct Transcribe: AsyncParsableCommand {
       // Follow is attach-and-tail; batch is resolve-a-range-and-exit. The
       // flags that shape a batch range make no sense here, so mixing them
       // is a precise error rather than a silent ignore.
-      guard last == nil, sources.isEmpty else {
-        throw ValidationError("--follow cannot be combined with --last/--source")
+      guard last == nil, from == nil, to == nil, session == nil, sources.isEmpty else {
+        throw ValidationError(
+          "--follow cannot be combined with --last/--from/--to/--session/--source")
       }
       let followExitCode = await FollowRuntime.run(
         arguments: arguments,
@@ -95,7 +106,8 @@ struct Transcribe: AsyncParsableCommand {
 
     let transcribeExitCode = await TranscribeRuntime.run(
       arguments: arguments,
-      inputs: TranscribePipeline.Inputs(last: last, sourceIDs: sources, out: out)
+      inputs: TranscribePipeline.Inputs(
+        last: last, from: from, to: to, session: session, sourceIDs: sources, out: out)
     )
     guard transcribeExitCode == 0 else { throw ExitCode(transcribeExitCode) }
   }

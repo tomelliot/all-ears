@@ -19,6 +19,17 @@ public struct SessionDescriptor: Sendable, Hashable, Codable {
   public var triggerDetail: String?
   /// Path to the optional per-session vocabulary file, relative to the data root.
   public var vocab: String?
+  /// Seconds of already-buffered ring audio a reader (`transcribe --session`)
+  /// should widen this session's effective range backward by, when reading
+  /// it -- **not** a shift of ``start`` itself. `start` stays the accurate
+  /// historical record of when the session actually opened; pre-roll is a
+  /// read-time widening layered on top, since a session is "metadata over
+  /// the ring buffer, not a separate recording" (see
+  /// `docs/product/prompts/phase-4-multi-source-sessions.md`'s pre-roll
+  /// decision, and `TranscribeRangeResolution`, which applies it). `0` (the
+  /// default) means no widening -- every session opened before this field
+  /// existed decodes to `0`, matching prior behavior exactly.
+  public var preRollSeconds: Int
 
   public init(
     schema: Int,
@@ -30,7 +41,8 @@ public struct SessionDescriptor: Sendable, Hashable, Codable {
     state: SessionState,
     trigger: TriggerKind,
     triggerDetail: String? = nil,
-    vocab: String? = nil
+    vocab: String? = nil,
+    preRollSeconds: Int = 0
   ) {
     self.schema = schema
     self.id = id
@@ -42,6 +54,7 @@ public struct SessionDescriptor: Sendable, Hashable, Codable {
     self.trigger = trigger
     self.triggerDetail = triggerDetail
     self.vocab = vocab
+    self.preRollSeconds = preRollSeconds
   }
 
   /// The session's time range once closed, or `nil` while still open.

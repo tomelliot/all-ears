@@ -28,6 +28,16 @@ struct SourceIDTests {
     #expect(SourceID("weird:thing").sourceClass == nil)
   }
 
+  @Test("derives the detail after the first colon")
+  func detail() {
+    #expect(SourceID("app:us.zoom.xos").detail == "us.zoom.xos")
+    #expect(SourceID("browser:meet").detail == "meet")
+    #expect(SourceID("device:AB/CD").detail == "AB/CD")
+    #expect(SourceID("mic").detail == nil)
+    #expect(SourceID("system").detail == nil)
+    #expect(SourceID("app:").detail == nil)
+  }
+
   @Test("is expressible as a string literal and Hashable")
   func literalAndHashable() {
     let id: SourceID = "mic"

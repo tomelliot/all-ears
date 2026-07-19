@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import Synchronization
 
 /// A fixed-capacity single-producer/single-consumer (SPSC) RAM ring buffer that
@@ -123,6 +124,63 @@ public final class AudioSampleRing: @unchecked Sendable {
             sum += channels[channel][frame * stride]
           }
           destination.pointee = sum / Float(channelCount)
+        }
+      }
+    }
+  }
+
+  /// Producer path for a raw Core Audio HAL `AudioBufferList` — the shape a
+  /// process-tap aggregate device's `AudioDeviceIOBlock` receives, unlike
+  /// `AVAudioEngine`'s `AVAudioPCMBuffer`. Downmixes to mono in place,
+  /// allocation-free, straight into ring storage, honouring
+  /// `asbd.mFormatFlags`' interleaved-vs-non-interleaved layout (a tap's
+  /// buffers are typically non-interleaved Float32, one buffer per channel,
+  /// but this handles a single interleaved buffer too). Returns `false` once
+  /// the ring has latched failure.
+  ///
+  /// Assumes Float32 samples throughout (`asbd`'s `mBitsPerChannel`/
+  /// `mFormatID`), matching what a Core Audio process tap's
+  /// `kAudioTapPropertyFormat` always reports — this is not a general PCM
+  /// format converter.
+  @discardableResult
+  public func write(
+    from bufferList: UnsafePointer<AudioBufferList>, frameCount: Int,
+    asbd: AudioStreamBasicDescription
+  ) -> Bool {
+    guard frameCount > 0 else { return !hasFailed }
+    let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: bufferList))
+    let channelCount = Int(asbd.mChannelsPerFrame)
+    guard channelCount > 0, abl.count > 0, let firstData = abl[0].mData else {
+      return !hasFailed
+    }
+    let nonInterleaved = asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
+
+    return state.withLock { s in
+      if nonInterleaved {
+        return writeLocked(&s, count: frameCount) { destination, frame in
+          if channelCount == 1 || abl.count == 1 {
+            destination.pointee = firstData.assumingMemoryBound(to: Float.self)[frame]
+          } else {
+            var sum: Float = 0
+            for channel in 0..<min(channelCount, abl.count) {
+              guard let data = abl[channel].mData else { continue }
+              sum += data.assumingMemoryBound(to: Float.self)[frame]
+            }
+            destination.pointee = sum / Float(channelCount)
+          }
+        }
+      } else {
+        let samples = firstData.assumingMemoryBound(to: Float.self)
+        return writeLocked(&s, count: frameCount) { destination, frame in
+          if channelCount == 1 {
+            destination.pointee = samples[frame]
+          } else {
+            var sum: Float = 0
+            for channel in 0..<channelCount {
+              sum += samples[frame * channelCount + channel]
+            }
+            destination.pointee = sum / Float(channelCount)
+          }
         }
       }
     }

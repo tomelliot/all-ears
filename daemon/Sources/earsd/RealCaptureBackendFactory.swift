@@ -27,21 +27,22 @@ import Foundation
 /// a real user.
 let syntheticCaptureBackendEnvironmentKey = "ALLEARS_CAPTURE_BACKEND"
 
-/// The real, mic-only ``CaptureBackendFactory`` `earsd`'s normal-run path
-/// wires into ``EarsDaemon``.
+/// The real ``CaptureBackendFactory`` `earsd`'s normal-run path wires into
+/// ``EarsDaemon``: dispatches on `descriptor.sourceClass` to a real
+/// `EarsCaptureKit.MicCaptureBackend` (`.mic`) or
+/// `EarsCaptureKit.SystemAudioCaptureBackend` (`.system`/`.app`, the Core
+/// Audio process-tap backend, per `docs/product/specs/capture-daemon.md`).
+/// `DaemonConfigResolution` never resolves any other class into a
+/// config-declared `SourceDescriptor` (a `browser:*` source is instead built
+/// dynamically by `EarsDaemon.openIngestSource(label:format:)`, and
+/// `device:*` stays unsupported and is filtered out at config-resolution
+/// time), so those two cases are this factory's whole real surface.
 ///
-/// Every descriptor ``DaemonConfigResolution`` hands ``EarsDaemon`` is
-/// already filtered to `.mic`-class sources (see that type's non-mic
-/// skipping), so this normally always builds a real
-/// `EarsCaptureKit.MicCaptureBackend` tapping the live input device --
-/// Phase 1's only supported capture class; per-app/system taps are out of
-/// scope until a later phase.
-///
-/// Building the backend itself touches no TCC or live audio (see
-/// `RealMicSourceProvider`'s doc comment: constructing it and even calling
-/// `makeCaptureEngine()` prompts nothing) -- only `CaptureActor.start()`
-/// later calling into it does, and only when `earsd` actually runs, never in
-/// this task's own tests.
+/// Building any backend here touches no TCC or live audio yet (see
+/// `RealMicSourceProvider`'s and `RealProcessTapProvider`'s own doc
+/// comments: constructing a backend prompts nothing) -- only
+/// `CaptureActor.start()` later calling into it does, and only when `earsd`
+/// actually runs, never in this task's own tests.
 ///
 /// **Test-only escape hatch:** if the process environment sets
 /// `\(syntheticCaptureBackendEnvironmentKey)=synthetic`, this instead returns
@@ -57,7 +58,28 @@ func realCaptureBackendFactory() -> CaptureBackendFactory {
   guard ProcessInfo.processInfo.environment[syntheticCaptureBackendEnvironmentKey] == "synthetic"
   else {
     return { descriptor in
-      MicCaptureBackend(source: descriptor.id, provider: RealMicSourceProvider())
+      switch descriptor.sourceClass {
+      case .mic:
+        return MicCaptureBackend(source: descriptor.id, provider: RealMicSourceProvider())
+      case .system:
+        return SystemAudioCaptureBackend(source: descriptor.id, mode: .system)
+      case .app:
+        // Resolved fresh at build time, not cached: the target app may not
+        // even be running yet when earsd starts (its source still captures
+        // -- just silence -- until the app launches), and
+        // SystemAudioCaptureBackend itself keeps this current afterward via
+        // its own launch/terminate tracking.
+        let bundleID = descriptor.id.detail ?? ""
+        let pids = RealRunningApplicationTracker().livePIDs(forBundleID: bundleID)
+        return SystemAudioCaptureBackend(
+          source: descriptor.id, mode: .app(pids: pids), bundleID: bundleID)
+      case .browser, .device:
+        preconditionFailure(
+          "unreachable: DaemonConfigResolution never resolves a '\(descriptor.sourceClass)' "
+            + "config-declared source; browser:* sources are built dynamically via "
+            + "openIngestSource, and device:* is filtered out at config-resolution time"
+        )
+      }
     }
   }
   return { descriptor in
