@@ -8,6 +8,8 @@ public enum DataStoreError: Error, Sendable, Hashable {
   case sourceMetaNotFound(SourceID)
   /// `session.toml` doesn't exist for the given session id.
   case sessionNotFound(String)
+  /// `meeting.toml` doesn't exist for the given meeting id.
+  case meetingNotFound(String)
   /// An ``AudioBuffer`` was appended to a ``ChunkEncoder`` at a sample rate
   /// other than the encoder's configured native rate.
   case sampleRateMismatch(expected: Int, got: Int)

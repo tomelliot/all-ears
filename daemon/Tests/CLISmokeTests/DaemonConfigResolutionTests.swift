@@ -298,4 +298,46 @@ struct DaemonConfigResolutionTests {
     )
     #expect(result.configuration.triggers.rules.first?.preRollSeconds == 0)
   }
+
+  @Test("control_ws resolves only when enabled, mirroring ingest_ws (opt-in, fail-closed)")
+  func controlWebSocketResolution() throws {
+    let disabled = DaemonConfigResolution.resolve(config: config(), now: now)
+    #expect(disabled.configuration.controlWebSocket == nil)
+
+    let enabled = DaemonConfigResolution.resolve(
+      config: config(
+        earsdOverrides: [
+          "control_ws": .table([
+            "enabled": .bool(true),
+            "port": .int(50_000),
+            "allowed_origins": .array([.string("chrome-extension://abc")]),
+          ])
+        ]),
+      now: now
+    )
+    let resolved = try #require(enabled.configuration.controlWebSocket)
+    #expect(resolved.port == 50_000)
+    #expect(resolved.allowedOrigins == ["chrome-extension://abc"])
+
+    let enabledWithDefaults = DaemonConfigResolution.resolve(
+      config: config(earsdOverrides: ["control_ws": .table(["enabled": .bool(true)])]),
+      now: now
+    )
+    let defaulted = try #require(enabledWithDefaults.configuration.controlWebSocket)
+    #expect(defaulted.port == 47_812)
+    #expect(defaulted.allowedOrigins.isEmpty)
+  }
+
+  @Test("transcribe_on_browser_session_close defaults to false and resolves when set")
+  func transcribeOnBrowserSessionCloseResolution() {
+    let defaulted = DaemonConfigResolution.resolve(config: config(), now: now)
+    #expect(defaulted.configuration.triggers.transcribeOnBrowserSessionClose == false)
+
+    let enabled = DaemonConfigResolution.resolve(
+      config: config(
+        triggers: .table(["transcribe_on_browser_session_close": .bool(true)])),
+      now: now
+    )
+    #expect(enabled.configuration.triggers.transcribeOnBrowserSessionClose == true)
+  }
 }

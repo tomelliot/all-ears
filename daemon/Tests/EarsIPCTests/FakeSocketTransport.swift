@@ -67,6 +67,12 @@ actor FakeSocketConnection: SocketConnection {
     releaseStallWaiters()
   }
 
+  /// Make future sends block — for backpressure tests that need a connection
+  /// that upgrades/handshakes normally first and only then stops draining.
+  func stall() {
+    stalled = true
+  }
+
   private func releaseStallWaiters() {
     let waiters = stallWaiters
     stallWaiters = []

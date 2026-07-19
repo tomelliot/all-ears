@@ -49,6 +49,22 @@ public enum DataStoreLayout {
       "session.toml")
   }
 
+  /// `<data-root>/meetings/`.
+  public static func meetingsDirectory(dataRoot: URL) -> URL {
+    dataRoot.appendingPathComponent("meetings")
+  }
+
+  /// `<data-root>/meetings/<meeting-id>/`.
+  public static func meetingDirectory(dataRoot: URL, meetingID: String) -> URL {
+    meetingsDirectory(dataRoot: dataRoot).appendingPathComponent(meetingID)
+  }
+
+  /// `<data-root>/meetings/<meeting-id>/meeting.toml`.
+  public static func meetingTomlFile(dataRoot: URL, meetingID: String) -> URL {
+    meetingDirectory(dataRoot: dataRoot, meetingID: meetingID).appendingPathComponent(
+      "meeting.toml")
+  }
+
   /// The `chunks/<filename>` or `asr/<filename>` path recorded in
   /// `index.jsonl`'s `chunk`/`evict` events -- relative to the source
   /// directory, matching the doc's literal examples

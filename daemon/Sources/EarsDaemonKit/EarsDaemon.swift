@@ -40,6 +40,10 @@ public struct EarsDaemonConfiguration: Sendable {
   /// whether ``EarsDaemon/start()`` also binds the loopback ingest
   /// WebSocket.
   public var ingestWebSocket: IngestWebSocketConfiguration?
+  /// `[earsd.control_ws]`, or `nil` when disabled (the default) — gates
+  /// whether ``EarsDaemon/start()`` also binds the loopback control-plane
+  /// WebSocket (`EarsIPC.ControlWebSocketServer`).
+  public var controlWebSocket: ControlWebSocketConfiguration?
   /// `[triggers]`/`[[triggers.rule]]`, resolved. Disabled (no rules) by
   /// default — gates whether ``EarsDaemon/start()`` also starts an
   /// ``AppSignalTriggerObserver``.
@@ -60,6 +64,7 @@ public struct EarsDaemonConfiguration: Sendable {
     bitrate: Int = 64_000,
     defaultTimeCapSeconds: Int = 7_200,
     ingestWebSocket: IngestWebSocketConfiguration? = nil,
+    controlWebSocket: ControlWebSocketConfiguration? = nil,
     triggers: TriggersConfiguration = TriggersConfiguration(),
     outputRoot: URL = URL(fileURLWithPath: ".")
   ) {
@@ -73,6 +78,7 @@ public struct EarsDaemonConfiguration: Sendable {
     self.outputRoot = outputRoot
     self.defaultTimeCapSeconds = defaultTimeCapSeconds
     self.ingestWebSocket = ingestWebSocket
+    self.controlWebSocket = controlWebSocket
     self.triggers = triggers
   }
 }
@@ -81,6 +87,21 @@ public struct EarsDaemonConfiguration: Sendable {
 /// Origin allowlist to enforce before completing a WebSocket upgrade. See
 /// `EarsIPC.IngestWebSocketServer`.
 public struct IngestWebSocketConfiguration: Sendable {
+  public var port: UInt16
+  /// Empty rejects every connection (fail closed) — never "allow all".
+  public var allowedOrigins: [String]
+
+  public init(port: UInt16, allowedOrigins: [String]) {
+    self.port = port
+    self.allowedOrigins = allowedOrigins
+  }
+}
+
+/// `[earsd.control_ws]`'s resolved shape — mirrors
+/// ``IngestWebSocketConfiguration`` exactly (loopback port + fail-closed
+/// Origin allowlist), for the control-plane WebSocket. See
+/// `EarsIPC.ControlWebSocketServer`.
+public struct ControlWebSocketConfiguration: Sendable {
   public var port: UInt16
   /// Empty rejects every connection (fail closed) — never "allow all".
   public var allowedOrigins: [String]
@@ -115,6 +136,8 @@ public actor EarsDaemon {
   private var controlSocketServer: ControlSocketServer?
   private var controlServerRunTask: Task<Void, Never>?
   private var controlServer: ControlServer?
+  private var controlWebSocketServer: ControlWebSocketServer?
+  private var controlWebSocketRunTask: Task<Void, Never>?
   private var powerObserver: PowerObserver?
   private var appSignalTriggerObserver: AppSignalTriggerObserver?
 
@@ -293,6 +316,31 @@ public actor EarsDaemon {
       },
       clock: clock,
       eventSink: { [eventBus] event in await eventBus.publish(event) })
+    // The daemon-owned meeting-identity registry, serving `meeting.resolve`
+    // on both control transports.
+    let meetings = MeetingRegistry(
+      dataRoot: configuration.dataRoot, clock: clock, log: log)
+
+    // Browser-triggered on-close transcribe: the browser extension has no
+    // app-signal rule to hang a rule's `on_close` off, so a session closed
+    // with `trigger == .browserExtension` runs the transcribe stage directly
+    // — gated by `[triggers].transcribe_on_browser_session_close`, and
+    // spawned in its own task so the `session.close` reply is never blocked
+    // behind a full transcription run.
+    let onSessionClosed: (@Sendable (SessionDescriptor) async -> Void)?
+    if configuration.triggers.transcribeOnBrowserSessionClose {
+      let pipeline = OnClosePipelineRunner(outputRoot: configuration.outputRoot, log: log)
+      onSessionClosed = { descriptor in
+        guard descriptor.trigger == .browserExtension else { return }
+        Task {
+          await pipeline.run(
+            stages: ["transcribe"], for: descriptor, context: "browser-session-close")
+        }
+      }
+    } else {
+      onSessionClosed = nil
+    }
+
     let controlServer = ControlServer(
       captureActors: captureActors,
       sessions: sessions,
@@ -301,7 +349,9 @@ public actor EarsDaemon {
       clock: clock,
       // `segment.publish` → the live feed, through the same bus every other
       // event producer publishes into.
-      eventSink: { [eventBus] event in await eventBus.publish(event) })
+      eventSink: { [eventBus] event in await eventBus.publish(event) },
+      meetings: meetings,
+      onSessionClosed: onSessionClosed)
 
     let socketDirectory = URL(fileURLWithPath: configuration.socketPath).deletingLastPathComponent()
     try FileManager.default.createDirectory(
@@ -316,6 +366,15 @@ public actor EarsDaemon {
     // created source into this SAME actor's captureActors — otherwise it's
     // a value-type copy neither sees the other's later changes to.
     self.controlServer = controlServer
+
+    // The loopback control-plane WebSocket serves the SAME handler as the
+    // Unix socket — zero duplicated command dispatch between transports.
+    // Started before the event-bus attach below so its subscribers join the
+    // same fan-out.
+    if let controlWebSocket = configuration.controlWebSocket {
+      await startControlWebSocket(controlWebSocket, handler: controlServer.makeHandler())
+    }
+    let controlWebSocketServer = self.controlWebSocketServer
 
     // Only started when configured with at least one rule -- disabled (the
     // default) means no observer, no subscription, no behavior change from
@@ -342,6 +401,7 @@ public actor EarsDaemon {
     // connected yet anyway.
     await eventBus.attach { event in
       await socketServer.publish(event)
+      await controlWebSocketServer?.publish(event)
       await triggerObserver?.handle(event)
     }
 
@@ -385,6 +445,31 @@ public actor EarsDaemon {
     ingestServerRunTask = Task { await ingestServer.run() }
   }
 
+  /// Binds and starts the control-plane WebSocket. Same bind-failure
+  /// isolation as ``startIngestWebSocket(_:)``: a port conflict is logged and
+  /// leaves the control WebSocket disabled for this run — it must never take
+  /// down local capture (the isolation that was itself a bugfix for ingest,
+  /// journal #36/#37).
+  private func startControlWebSocket(
+    _ controlWebSocket: ControlWebSocketConfiguration, handler: @escaping ControlSocketServer.Handler
+  ) async {
+    let controlListener: NetworkSocketListener
+    do {
+      controlListener = try await NetworkSocketListener.bind(toLoopbackPort: controlWebSocket.port)
+    } catch {
+      log(
+        "control websocket failed to bind port \(controlWebSocket.port) and is disabled: \(error)")
+      return
+    }
+    let server = ControlWebSocketServer(
+      listener: controlListener,
+      allowedOrigins: controlWebSocket.allowedOrigins,
+      log: log,
+      handler: handler)
+    controlWebSocketServer = server
+    controlWebSocketRunTask = Task { await server.run() }
+  }
+
   /// Stops the control socket and power observer, then every source, in
   /// reverse order — no new commands can arrive mid-shutdown, and each
   /// source's in-progress chunk is flushed and indexed (``CaptureActor/stop()``'s
@@ -401,6 +486,13 @@ public actor EarsDaemon {
     controlServerRunTask = nil
     controlSocketServer = nil
     controlServer = nil
+
+    if let controlWebSocketServer {
+      await controlWebSocketServer.shutdown()
+    }
+    controlWebSocketRunTask?.cancel()
+    controlWebSocketRunTask = nil
+    controlWebSocketServer = nil
 
     if let ingestWebSocketServer {
       await ingestWebSocketServer.shutdown()
