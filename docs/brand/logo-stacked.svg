@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- All Ears — stacked lockup: mark above wordmark, centred. For square/tall formats (social avatars, splash). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 210 170" width="210" height="170" role="img" aria-label="All Ears">
+  <g transform="translate(55,0)">
+    <g transform="matrix(1 0 0 -1 0 100)">
+      <path fill="none" stroke="#1C1B1A" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"
+        d="M62,33 C43,31 29,43 29,54 C29,68 43,79 62,81"/>
+      <circle cx="61" cy="20" r="7" fill="#E0A03C"/>
+    </g>
+  </g>
+  <text x="105" y="150" text-anchor="middle" font-family="Bricolage Grotesque, -apple-system, sans-serif" font-weight="700" font-size="40" letter-spacing="-0.4" fill="#1C1B1A">All<tspan fill="#E0A03C">&#183;</tspan>Ears</text>
+</svg>

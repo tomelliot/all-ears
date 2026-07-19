@@ -19,9 +19,9 @@ const dotEl = document.getElementById("status-dot") as HTMLElement | null;
 const textEl = document.getElementById("status-text");
 
 const STATUS_COLOR: Record<TransportStatus, string> = {
-  connected: "#2e9e44",
-  connecting: "#d99a06",
-  disconnected: "#c23b3b",
+  connected: "var(--ok)",
+  connecting: "var(--accent)",
+  disconnected: "var(--bad)",
 };
 
 const STATUS_TEXT: Record<TransportStatus, string> = {

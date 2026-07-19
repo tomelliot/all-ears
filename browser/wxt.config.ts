@@ -10,7 +10,7 @@ const devHosts = process.env.WXT_DEV_LOCALHOST
 // Manifest surface per docs/specs/extension.md §WXT project layout.
 export default defineConfig({
   manifest: ({ browser }) => ({
-    name: "ears capture",
+    name: "All Ears",
     // Firefox MV3 requires an explicit extension ID.
     ...(browser === "firefox"
       ? { browser_specific_settings: { gecko: { id: "ears-capture@tomelliot.net" } } }

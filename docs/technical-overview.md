@@ -1,17 +1,17 @@
-# All Ears
+# Technical overview
 
-A macOS-native suite of small, composable command-line tools that continuously capture audio in the background and turn it into clean, summarised, searchable text.
+All Ears is a macOS-native suite of small, composable command-line tools that continuously capture audio in the background and turn it into clean, summarised, searchable text. For the product pitch and everyday usage, see the [top-level README](../README.md).
 
 The design follows the Unix philosophy: each tool does one thing well, tools compose through a documented on-disk layout and a control socket, and every stage is independently runnable, testable, and replaceable.
 
-## What it does
+## How it works
 
-A background daemon captures audio from every configured source — microphone, system audio, per-application audio, and audio pushed in from a browser plugin — into a per-source **ring buffer** on disk (default: last 2 hours, compressed). Nothing is transcribed until asked. Separate tools then, on demand or on an automatic trigger, transcribe a time range or session, clean the transcript with an LLM, and summarise it. Output is human-first Markdown with YAML frontmatter, filed wherever you configure.
+A background daemon (`earsd`) captures audio from every configured source (microphone, system audio, per-application audio, and audio pushed in from the browser plugin) into a per-source **ring buffer** on disk, keeping the last 2 hours by default, compressed. Nothing is transcribed until asked. Separate tools then, on demand or on an automatic trigger, transcribe a time range or session, clean the transcript with an LLM, and summarise it. Output is human-first Markdown with YAML frontmatter, filed wherever you configure.
 
 Two primary use cases drive the design:
 
-- **Retroactive capture** — "that thing from 20 minutes ago: transcribe and keep it." The ring buffer is the safety net; transcription is pulled on demand.
-- **Meeting notes** — a meeting app starts, a session opens automatically, and when it ends you get a cleaned, diarized, summarised transcript.
+- **Retroactive capture.** "That thing from 20 minutes ago: transcribe and keep it." The ring buffer is the safety net; transcription is pulled on demand.
+- **Meeting notes.** A meeting app starts, a session opens automatically, and when it ends you get a cleaned, diarized, summarised transcript.
 
 ## The tools
 
@@ -27,20 +27,22 @@ Each is a separate binary. They share nothing but the documented [data formats](
 
 ## Documents
 
-- [Product Requirements (PRD)](./prd.md) — vision, users, use cases, scope, non-goals, success criteria.
-- [Architecture](./architecture.md) — system decomposition, the disk-as-API contract, the control socket, data flow.
-- [Data formats](./data-formats.md) — ring buffer layout, transcript & summary schemas, vocabulary and session files.
-- [Configuration](./configuration.md) — the layered TOML + env + flags model.
-- [Logging](./logging.md) — the unified-logging standard every tool follows.
-- [Engineering practices](./engineering-practices.md) — mandatory TDD and small-incremental-commit discipline, test tiers, CI.
-- [Distribution & packaging](./distribution.md) — Developer ID + notarization, the launchd agent, model assets.
-- [Capture soak-test runbook](./operations/capture-soak-runbook.md) — the manual, multi-day procedure for checking the Phase 1 exit criterion no automated test can prove.
+- [Product Requirements (PRD)](./product/prd.md): vision, users, use cases, scope, non-goals, success criteria.
+- [Architecture](./architecture.md): system decomposition, the disk-as-API contract, the control socket, data flow.
+- [Data formats](./data-formats.md): ring buffer layout, transcript & summary schemas, vocabulary and session files.
+- [Configuration](./configuration.md): the layered TOML + env + flags model.
+- [Logging](./logging.md): the unified-logging standard every tool follows.
+- [Engineering practices](./engineering-practices.md): mandatory TDD and small-incremental-commit discipline, test tiers, CI.
+- [Distribution & packaging](./distribution.md): Developer ID + notarization, the launchd agent, model assets.
+- [Capture soak-test runbook](./operations/capture-soak-runbook.md): the manual, multi-day procedure for checking the Phase 1 exit criterion no automated test can prove.
+- [Brand guidelines](./brand-guidelines.html) and [brand assets](./brand/): logomark, logo lockups, colour, type.
 - Specs:
-  - [`earsd` + `ears` — capture daemon](./specs/capture-daemon.md)
-  - [`transcribe` — transcription](./specs/transcribe.md)
-  - [`cleanup` + `summarize` — LLM stages](./specs/llm-stages.md)
-  - [Model interface](./specs/model-interface.md)
-- [Roadmap](./roadmap.md) — phasing from MVP to full pipeline.
+  - [`earsd` + `ears`, capture daemon](./product/specs/capture-daemon.md)
+  - [`transcribe`, transcription](./product/specs/transcribe.md)
+  - [`cleanup` + `summarize`, LLM stages](./product/specs/llm-stages.md)
+  - [Model interface](./product/specs/model-interface.md)
+  - [Browser extension PRD](./product/browser/prd.md), [design brief](./product/browser/design-brief.md), [roadmap](./product/browser/roadmap.md)
+- [Roadmap](./product/roadmap.md): phasing from MVP to full pipeline.
 
 ## Foundational decisions
 

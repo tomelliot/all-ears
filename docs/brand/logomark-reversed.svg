@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- All Ears — logomark, reversed for dark surfaces (paper stroke + amber earlobe). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="All Ears">
+  <g transform="matrix(1 0 0 -1 0 100)">
+    <path fill="none" stroke="#F2EFE8" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"
+      d="M62,33 C43,31 29,43 29,54 C29,68 43,79 62,81"/>
+    <circle cx="61" cy="20" r="7" fill="#E0A03C"/>
+  </g>
+</svg>

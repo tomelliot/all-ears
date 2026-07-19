@@ -2,19 +2,134 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>ears capture</title>
+    <title>All Ears</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      :root {
+        --ink: #1c1b1a;
+        --paper: #f7f4ee;
+        --paper-2: #efe9df;
+        --fg: #1c1b1a;
+        --bg: #f7f4ee;
+        --line: #ded7ca;
+        --muted: #7c766c;
+        --accent: #e0a03c;
+        --ok: #4a7c59;
+        --bad: #c0503a;
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #f2efe8;
+          --bg: #151413;
+          --paper-2: #1e1c1a;
+          --line: #312e2a;
+          --muted: #948d81;
+          --ok: #8fce9e;
+          --bad: #e58a72;
+          color-scheme: dark;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-width: 240px;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+        font-size: 13px;
+      }
+      main {
+        padding: 14px 16px 16px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      .brand svg {
+        width: 20px;
+        height: 20px;
+        display: block;
+        color: var(--fg);
+        flex: none;
+      }
+      .brand b {
+        font-size: 15px;
+        font-weight: 700;
+        letter-spacing: -0.1px;
+      }
+      .brand b .dot {
+        color: var(--accent);
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--paper-2);
+      }
+      label.toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        cursor: pointer;
+        user-select: none;
+      }
+      label.toggle input {
+        accent-color: var(--accent);
+        width: 15px;
+        height: 15px;
+        margin: 0;
+        cursor: pointer;
+      }
+      label.toggle input:disabled {
+        cursor: default;
+        opacity: 0.5;
+      }
+      p#status {
+        margin: 10px 2px 0;
+        font-size: 12px;
+        color: var(--muted);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      #status-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--muted);
+        display: inline-block;
+        flex: none;
+      }
+    </style>
   </head>
   <body>
-    <main style="min-width: 220px; font-family: system-ui; padding: 12px">
-      <h1 style="font-size: 14px; margin: 0 0 8px">ears capture</h1>
-      <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer">
+    <main>
+      <div class="brand">
+        <svg viewBox="0 0 100 100" aria-hidden="true">
+          <g transform="matrix(1 0 0 -1 0 100)" fill="currentColor" stroke="currentColor">
+            <path fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"
+              d="M62,33 C43,31 29,43 29,54 C29,68 43,79 62,81"/>
+            <circle cx="61" cy="20" r="7.5" stroke="none" fill="var(--accent)"/>
+          </g>
+        </svg>
+        <b>All<span class="dot">&#183;</span>Ears</b>
+      </div>
+      <label class="row toggle">
         <input type="checkbox" id="toggle" disabled />
         <span id="toggle-label">capture</span>
       </label>
-      <p id="status" style="margin: 8px 0 0; font-size: 12px; display: flex; align-items: center; gap: 6px">
-        <span id="status-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #999; display: inline-block"></span>
-        <span id="status-text">loading…</span>
+      <p id="status">
+        <span id="status-dot"></span>
+        <span id="status-text">loading&hellip;</span>
       </p>
     </main>
     <script type="module" src="./main.ts"></script>

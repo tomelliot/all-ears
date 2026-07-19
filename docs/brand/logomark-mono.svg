@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- All Ears — logomark, monochrome (single colour via currentColor). Use for favicons, menu-bar glyphs, engraving, and anywhere only one colour is available. Digital floor: 16px. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="All Ears">
+  <g transform="matrix(1 0 0 -1 0 100)" fill="currentColor" stroke="currentColor">
+    <path fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"
+      d="M62,33 C43,31 29,43 29,54 C29,68 43,79 62,81"/>
+    <circle cx="61" cy="20" r="7.5" stroke="none"/>
+  </g>
+</svg>
