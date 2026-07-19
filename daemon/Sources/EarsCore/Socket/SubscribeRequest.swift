@@ -6,7 +6,7 @@
 /// ```
 ///
 /// Kept separate from ``ControlRequest`` because `subscribe` is not one of
-/// the fourteen rows in the spec's command table — it transitions the
+/// the rows in the spec's command table — it transitions the
 /// connection into an event stream of ``EarsEvent``s rather than getting a
 /// single ``ControlResponse`` — but it's still a `cmd`-tagged request worth
 /// modelling from the same literal example ``ControlRequest`` covers the

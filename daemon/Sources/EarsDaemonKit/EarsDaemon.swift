@@ -275,7 +275,10 @@ public actor EarsDaemon {
       sessions: sessions,
       dataRoot: configuration.dataRoot,
       startInstant: clock.now(),
-      clock: clock)
+      clock: clock,
+      // `segment.publish` → the live feed, through the same bus every other
+      // event producer publishes into.
+      eventSink: { [eventBus] event in await eventBus.publish(event) })
 
     let socketDirectory = URL(fileURLWithPath: configuration.socketPath).deletingLastPathComponent()
     try FileManager.default.createDirectory(

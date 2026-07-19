@@ -1,9 +1,9 @@
-/// One control-socket request: the fourteen `cmd`s in
+/// One control-socket request: the sixteen `cmd`s in
 /// `docs/specs/capture-daemon.md`'s control-socket command table.
 ///
-/// Each case mirrors one row of the spec's table, discriminated on disk by
-/// the `"cmd"` field — the same flat-tagged-union shape ``IndexEvent`` uses
-/// for `index.jsonl`'s `"t"` field:
+/// Each case mirrors one command of the spec's table, discriminated on disk
+/// by the `"cmd"` field — the same flat-tagged-union shape ``IndexEvent``
+/// uses for `index.jsonl`'s `"t"` field:
 ///
 /// ```jsonc
 /// {"cmd":"status"}
@@ -20,6 +20,7 @@
 /// {"cmd":"mark","sources":["mic"],"slug":"hallway-chat","last_seconds":1800}
 /// {"cmd":"ingest.open","source":"browser:meet","format":{"sample_rate":48000,"channels":1,"encoding":"pcm_s16le"}}
 /// {"cmd":"ingest.close","stream_id":"s7"}
+/// {"cmd":"segment.publish","session":"...standup","speaker":"You","start":604.1,"end":611.9,"text":"..."}
 /// {"cmd":"flush"}
 /// ```
 ///
@@ -58,6 +59,12 @@ public enum ControlRequest: Sendable, Hashable {
   case ingestOpen(source: SourceID, format: AudioFormatSpec)
   /// End a stream opened by `ingest.open`, by its `stream_id`.
   case ingestClose(streamID: String)
+  /// Push one finalised segment onto the daemon's live feed — the publish-in
+  /// direction of ``EarsEvent/segment(session:speaker:start:end:text:)``,
+  /// carrying the same fields. Sent by a `transcribe --follow` process so
+  /// many subscribers can watch one live transcript; notification only, the
+  /// daemon persists nothing (the durable transcript is the on-disk file).
+  case segmentPublish(session: String, speaker: String, start: Double, end: Double, text: String)
   /// Force-flush in-flight chunks and index.
   case flush
 }
@@ -65,6 +72,7 @@ public enum ControlRequest: Sendable, Hashable {
 extension ControlRequest: Codable {
   fileprivate enum CodingKeys: String, CodingKey {
     case cmd, spec, source, sources, slug, start, end, vocab, id, format
+    case session, speaker, text
     case lastSeconds = "last_seconds"
     case streamID = "stream_id"
   }
@@ -84,6 +92,7 @@ extension ControlRequest: Codable {
     case mark
     case ingestOpen = "ingest.open"
     case ingestClose = "ingest.close"
+    case segmentPublish = "segment.publish"
     case flush
   }
 
@@ -131,6 +140,14 @@ extension ControlRequest: Codable {
       )
     case .ingestClose:
       self = .ingestClose(streamID: try container.decode(String.self, forKey: .streamID))
+    case .segmentPublish:
+      self = .segmentPublish(
+        session: try container.decode(String.self, forKey: .session),
+        speaker: try container.decode(String.self, forKey: .speaker),
+        start: try container.decode(Double.self, forKey: .start),
+        end: try container.decode(Double.self, forKey: .end),
+        text: try container.decode(String.self, forKey: .text)
+      )
     case .flush:
       self = .flush
     }
@@ -216,6 +233,13 @@ extension ControlRequest: Codable {
     case .ingestClose(let streamID):
       try container.encode(Tag.ingestClose, forKey: .cmd)
       try container.encode(streamID, forKey: .streamID)
+    case .segmentPublish(let session, let speaker, let start, let end, let text):
+      try container.encode(Tag.segmentPublish, forKey: .cmd)
+      try container.encode(session, forKey: .session)
+      try container.encode(speaker, forKey: .speaker)
+      try container.encode(start, forKey: .start)
+      try container.encode(end, forKey: .end)
+      try container.encode(text, forKey: .text)
     case .flush:
       try container.encode(Tag.flush, forKey: .cmd)
     }

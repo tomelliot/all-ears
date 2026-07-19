@@ -2,6 +2,7 @@ import EarsCore
 import EarsCoreTestSupport
 import EarsIPC
 import Foundation
+import Synchronization
 import Testing
 
 @testable import EarsDaemonKit
@@ -261,6 +262,40 @@ struct ControlServerTests {
     let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
 
     let reply = await server.handle(.flush)
+    let json = try envelope(reply)
+    #expect(json["ok"] as? Bool == true)
+  }
+
+  // MARK: - segment.publish
+
+  @Test("segment.publish forwards the event to the injected sink and replies ok")
+  func segmentPublishForwardsToSink() async throws {
+    let clock = ManualClock()
+    let published = Mutex<[EarsEvent]>([])
+    let server = ControlServer(
+      captureActors: [:],
+      sessions: makeSessions(dataRoot: try makeDataRoot(), clock: clock),
+      dataRoot: try makeDataRoot(),
+      startInstant: Instant(secondsSinceEpoch: 0),
+      clock: clock,
+      eventSink: { event in published.withLock { $0.append(event) } })
+
+    let reply = await server.handle(
+      .segmentPublish(session: "s1", speaker: "You", start: 604.1, end: 611.9, text: "ship it"))
+    let json = try envelope(reply)
+    #expect(json["ok"] as? Bool == true)
+    #expect(
+      published.withLock { $0 }
+        == [.segment(session: "s1", speaker: "You", start: 604.1, end: 611.9, text: "ship it")])
+  }
+
+  @Test("segment.publish with no sink attached still replies ok (drop, don't fail)")
+  func segmentPublishWithoutSinkSucceeds() async throws {
+    let clock = ManualClock()
+    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
+
+    let reply = await server.handle(
+      .segmentPublish(session: "s1", speaker: "You", start: 0, end: 1, text: "hi"))
     let json = try envelope(reply)
     #expect(json["ok"] as? Bool == true)
   }

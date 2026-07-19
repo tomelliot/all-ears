@@ -201,7 +201,7 @@ public actor ControlSocketServer {
   }
 
   /// Minimal decode to read only the `cmd` discriminator, distinguishing a
-  /// `subscribe` (which becomes a ``SubscribeRequest``) from the fourteen
+  /// `subscribe` (which becomes a ``SubscribeRequest``) from the
   /// ``ControlRequest`` commands without committing to either decode first.
   private struct CommandPeek: Decodable {
     let cmd: String

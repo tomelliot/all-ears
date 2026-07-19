@@ -4,7 +4,7 @@ import Foundation
 /// A type-erased control-socket reply, the value a request handler hands back
 /// to ``ControlSocketServer`` for writing.
 ///
-/// The wire response envelope is uniform across all fourteen commands —
+/// The wire response envelope is uniform across every command —
 /// `{"ok":true,"data":<payload>}` or `{"ok":false,"error":"<message>"}` — but
 /// ``ControlResponse`` is generic over its payload type (`ControlResponse<StatusData>`
 /// for `status`, `ControlResponse<EmptyData>` for `flush`, and so on). A single

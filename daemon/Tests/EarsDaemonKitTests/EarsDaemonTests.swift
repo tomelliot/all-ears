@@ -360,6 +360,53 @@ struct EarsDaemonTests {
     await daemon.stop()
   }
 
+  @Test("a published segment.publish reaches a subscribed client end to end")
+  func endToEndSegmentPublish() async throws {
+    let dataRoot = try makeDataRoot()
+    let socketPath = tempSocketPath()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_000))
+
+    let configuration = EarsDaemonConfiguration(
+      sources: [makeDescriptor(id: "mic", sourceClass: .mic)],
+      dataRoot: dataRoot,
+      socketPath: socketPath)
+
+    let daemon = try EarsDaemon(
+      configuration: configuration,
+      backendFactory: { descriptor in
+        SyntheticCaptureBackend(source: descriptor.id, buffers: [])
+      },
+      clock: clock)
+    try await daemon.start()
+
+    let watcher = try await ControlSocketClient.connect(toPath: socketPath)
+    let events = try await watcher.subscribe(SubscribeRequest(events: [.segment], sources: []))
+    while await daemon.subscriberCountForTesting() == 0 { await Task.yield() }
+
+    // A second connection publishes — mirroring a real `transcribe --follow`
+    // process, which needs its own publish connection because subscribe is
+    // terminal for a connection.
+    let publisher = try await ControlSocketClient.connect(toPath: socketPath)
+    let reply = try await publisher.send(
+      .segmentPublish(session: "s_call", speaker: "You", start: 604.1, end: 611.9, text: "ship it"),
+      expecting: EmptyData.self)
+    #expect(reply == .success(EmptyData()))
+    await publisher.close()
+
+    var received: [EarsEvent] = []
+    for await event in events {
+      received.append(event)
+      break
+    }
+    #expect(
+      received == [
+        .segment(session: "s_call", speaker: "You", start: 604.1, end: 611.9, text: "ship it")
+      ])
+
+    await watcher.close()
+    await daemon.stop()
+  }
+
   @Test("openIngestSource rejects a label that isn't a browser:* source")
   func rejectsNonBrowserLabel() async throws {
     let dataRoot = try makeDataRoot()
