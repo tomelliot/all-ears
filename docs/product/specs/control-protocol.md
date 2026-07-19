@@ -5,6 +5,12 @@
 [`capture-daemon.md`](capture-daemon.md), which describes the v1 wire as currently implemented.
 The ingest WebSocket (`/ingest`, binary PCM) is **out of scope** and unchanged.
 
+**No backwards compatibility.** There is no external v1 usage: every client lives in this repo
+and moves in lockstep. v2 **replaces** the v1 wire outright — the flat-`cmd` envelope, FIFO
+response matching, and `meeting.resolve` are deleted, not deprecated, and there is no
+dual-dialect transition period. Implementation optimizes for speed, clarity, and long-term
+maintainability, never for transition safety. See [Implementation order](#implementation-order).
+
 ## One job
 
 One transport-agnostic contract that lets any frontend — the `ears` CLI, the browser extension,
@@ -36,8 +42,8 @@ with client cursors (every client must implement a matching reducer, and fronten
 state, not history — its one good idea, a durable per-meeting event log *on disk*, is kept);
 file-based metadata mutation (the extension cannot touch the filesystem). An incremental
 "just add meeting verbs to the v1 wire" option was rejected because the multi-frontend
-requirement is exactly what the v1 subscribe race and FIFO matching break on, and retrofitting
-correlation later would mean migrating every client twice.
+requirement is exactly what the v1 subscribe race and FIFO matching break on, and with no
+external users there is nothing the v1 wire's survival would buy.
 
 ## Wire envelope
 
@@ -126,14 +132,30 @@ Semantics:
 - **`meeting.start` is idempotent on `identity`.** Re-declaring an active meeting returns its
   current state. This is the recovery path for both service-worker eviction and daemon restart:
   a recovered client just re-declares and converges.
+- **Manual meetings are first-class.** `meeting.start` without `identity` creates a meeting from
+  any frontend — `ears meeting start --title "standup" --source mic` gives CLI recordings the
+  same naming, pause-as-marks, and roster powers as browser calls. Manual meetings are never
+  auto-ended (see [Orphaned meetings](#orphaned-meetings)); `ears meeting ...` subcommands are
+  part of v2 scope.
 - **Attendees are a roster with join/leave times**, upserted by whoever knows them (the
   extension's DOM layer today). `source` links an attendee to their per-participant audio source,
   which downstream feeds the transcript's speaker-name map (`[speakers]` in
   [data-formats](../../data-formats.md#speaker-attribution)).
-- **On `meeting.end`,** the daemon closes the open interval and **materializes one closed
-  `SessionDescriptor` per interval** (slug = meeting UUID, trigger preserved). `transcribe`,
-  `cleanup`, and `summarize` therefore need zero changes; auto-transcription triggers keep
-  firing off session close exactly as in v1.
+- **On `meeting.end`,** the daemon closes the open interval, **materializes one closed
+  `SessionDescriptor` per interval** (slug = meeting UUID, trigger preserved), and **writes the
+  roster into each materialized session's `[speakers]` map** (attendee `source` →
+  `display_name`), so real names flow into transcripts with no manual step. Auto-transcription
+  triggers fire off meeting end.
+
+### Transcription output
+
+The canonical artifact is **one transcript per meeting**. `transcribe` gains a
+`--meeting <id>` mode: it reads `meeting.toml`, unions the meeting's intervals (paused spans are
+skipped exactly like silence), and writes a single transcript whose frontmatter carries a
+`meeting:` field alongside the existing `session:`/`range:` fields. The per-interval sessions
+remain addressable via `transcribe --session` for partial re-runs, but the meeting-level union
+is what auto-triggers and users invoke. This is the one deliberate change to the pipeline
+contract; `cleanup` and `summarize` are untouched.
 
 ### Sessions and sources
 
@@ -162,6 +184,7 @@ the verb is retained.
 | `meetings` | `meeting.get` | `{meeting}` → meeting |
 | `sessions` | `session.open` / `session.close` / `session.list` / `session.add_source` / `mark` | as v1 |
 | `sessions` | `segment.publish` | as v1 (notification-only republish from `transcribe --follow`) |
+| `sessions` | `job.publish` | `{job, kind: "transcribe", meeting?, session?, state: "started"\|"running"\|"done"\|"failed", detail?}` → `{}`. Notification-only, same pattern as `segment.publish`: pipeline tools report progress, the daemon persists nothing, subscribers get real state instead of guessing |
 | `sources` | `sources.list` / `sources.enable` / `sources.disable` | as v1 |
 | `admin` | `sources.add` / `sources.remove` / `capture.pause` / `capture.resume` / `flush` | as v1 |
 
@@ -170,9 +193,9 @@ v1's `meeting.resolve` is subsumed by `meeting.start` and dropped from v2.
 ## State sync
 
 `subscribe`'s **result is a snapshot** of live state, tagged with a monotonic revision; every
-subsequent notification on that connection carries `rev`. This closes v1's list-then-subscribe
-race with no replay log, no cursors, and no daemon-side buffering — the daemon keeps only
-current state plus one counter.
+subsequent **state** notification carries `rev`. This closes v1's list-then-subscribe race with
+no replay log, no cursors, and no daemon-side buffering — the daemon keeps only current state
+plus one counter.
 
 ```jsonc
 // -->
@@ -184,20 +207,23 @@ current state plus one counter.
   "sources":  [ {"id": "mic", "state": "capturing"}, … ],
   "sessions": [ {…open sessions…} ]
 }}
-// <-- then revision-tagged notifications
+// <-- then notifications: state events revision-tagged, telemetry un-revved
 {"event": "meeting", "params": {"meeting": {…}}, "rev": 42}
 {"event": "source",  "params": {"id": "mic", "state": "paused"}, "rev": 43}
-{"event": "vad",     "params": {"source": "mic", "state": "speech", "t": "…"}, "rev": 44}
-{"event": "segment", "params": {"session": "…", "speaker": "You", "start": 604.1, "end": 611.9, "text": "…"}, "rev": 45}
+{"event": "vad",     "params": {"source": "mic", "state": "speech", "t": "…"}}
+{"event": "segment", "params": {"session": "…", "speaker": "You", "start": 604.1, "end": 611.9, "text": "…"}}
+{"event": "job",     "params": {"job": "j3", "kind": "transcribe", "meeting": "0d5e…", "state": "running"}}
 ```
 
-Client rule: apply a notification iff `rev == last_rev + 1`; on a gap, resubscribe (fresh
+Client rule: apply a state notification iff `rev == last_rev + 1`; on a gap, resubscribe (fresh
 snapshot). On reconnect: `hello` → compare `boot_id` → `subscribe`. An MV3 service worker can
 therefore be fully stateless: everything it needs to render or resume comes back in one snapshot.
 
-- Event kinds: `meeting`, `session`, `source`, `vad`, `segment`. (`vad` and `segment` are
-  high-frequency telemetry: they carry `rev` but a gap consisting only of un-subscribed kinds is
-  still a gap — filtering happens daemon-side via `params.events`.)
+- **Two event classes.** *State* events (`meeting`, `session`, `source`) mutate the synced state,
+  carry `rev`, and are **always delivered** to every subscriber — they're low-frequency, and
+  unconditional delivery is what keeps `rev` contiguous. *Telemetry* events (`vad`, `segment`,
+  `job`) are fire-and-forget, carry **no** `rev`, never participate in gap detection, and are the
+  kinds `params.events`/`params.sources` filter.
 - **Subscribing is no longer terminal.** With correlation IDs, a subscribed connection may keep
   issuing requests; one connection per frontend suffices.
 - Late subscribers get the snapshot, not history. Durable history lives on disk
@@ -243,25 +269,39 @@ advertised in `hello.result.capabilities`:
 - Closed meetings are read from disk, daemon-free (`ears meeting list --all` reads
   `meetings/*/meeting.toml` directly). The socket's `meeting.list` covers live + recent only.
 
-### Daemon restart policy
+### Orphaned meetings
 
-On restart, `active`/`paused` meetings reload as-is; the daemon never auto-ends a meeting by
-default (it records, it doesn't decide). An optional config
-`[meetings] auto_end_after_idle_s` may close the open interval and end a meeting whose sources
-have all been silent/absent for the given duration; `0` (default) disables it.
+A meeting can be left `active` with nobody driving it — browser crash, laptop lid closed,
+service worker gone for good. Policy, split by meeting kind:
 
-## Migration from v1
+- **Browser meetings** (any `browser:*` source in play): when the **last ingest stream** tied to
+  the meeting's sources has been closed for `[meetings] ingest_close_grace_s` (default 120 s)
+  with no re-open, the daemon closes the open interval and ends the meeting. The grace period is
+  what distinguishes a worker respawn or network blip (streams re-open, nothing happens) from a
+  real departure. The `ended` line in `events.jsonl` records `reason = "ingest-idle"` (vs
+  `"client"` for an explicit `meeting.end`).
+- **Manual meetings** (no ingest streams to observe): **never auto-ended** — the daemon records,
+  it doesn't decide. `meeting.end` is required; `ears meeting list` surfaces stale ones.
 
-1. **Dual-dialect bridge (daemon):** the first message on a connection is sniffed — `"cmd"` key →
-   v1 path (existing handlers, FIFO semantics), `"method"` key → v2. The bridge is a thin adapter
-   over the same handlers (~100 lines) and is deleted once clients are ported.
-2. **Extension:** `control-transport.ts` swaps its FIFO array for an id→resolver map;
-   `meeting-tracker.ts` shrinks to a signal forwarder (DOM `meeting-started` → `meeting.start`,
-   popup pause toggle → `meeting.pause`/`resume` — deleting the session-churn emulation and its
-   in-flight race compensation; participant join/leave → `meeting.attendee`).
-3. **CLI:** `ears` ports to v2 and gains `ears meeting start|end|pause|resume|rename|list`.
-4. Remove the v1 dialect; bump nothing else — `transcribe`/`cleanup`/`summarize` never touch the
-   control plane's changed surface.
+On daemon restart, `active`/`paused` meetings reload from `meeting.toml` as-is; a reloaded
+browser meeting whose streams don't return starts its grace clock from daemon boot.
+
+## Implementation order
+
+No migration, no bridge, no deprecation window — v2 replaces the v1 wire in one change series;
+the flat-`cmd` envelope, FIFO matching, and `meeting.resolve` are deleted. Order of work:
+
+1. **Daemon:** the v2 envelope/handshake/errors in `EarsCore/Socket`, `MeetingRegistry` as
+   lifecycle owner, snapshot+`rev` in `ControlServer`/`EventBus`, orphan grace timer,
+   per-transport capability tiers. v1 handling removed in the same change.
+2. **Extension + stub server (same series):** `control-transport.ts` swaps its FIFO array for an
+   id→resolver map; `meeting-tracker.ts` shrinks to a signal forwarder (DOM `meeting-started` →
+   `meeting.start`, popup pause toggle → `meeting.pause`/`resume` — deleting the session-churn
+   emulation and its in-flight race compensation; participant join/leave → `meeting.attendee`);
+   `browser/dev/stub-server.ts` speaks v2.
+3. **CLI + pipeline:** `ears` ports to v2 and gains
+   `ears meeting start|end|pause|resume|rename|list`; `transcribe` gains `--meeting` (interval
+   union) and `job.publish` reporting. `cleanup`/`summarize` are untouched.
 
 ## Failure model
 
@@ -280,7 +320,11 @@ have all been silent/absent for the given duration; `0` (default) disables it.
   decoded/encoded by both sides, so the two `Codable`/TS codecs can never drift.
 - `browser/dev/stub-server.ts` updated to speak v2 for extension tests.
 - Daemon tests: idempotent `meeting.start`; pause/resume interval bookkeeping (capture provably
-  untouched); restart recovery of an active meeting; snapshot+`rev` gap detection; per-transport
-  capability enforcement; dual-dialect bridge.
+  untouched); restart recovery of an active meeting; orphan grace timer (streams closed → grace
+  elapses → ended with `reason="ingest-idle"`; re-open within grace → still active); snapshot +
+  `rev` gap detection with telemetry kinds filtered; per-transport capability enforcement;
+  `[speakers]` write-back at `meeting.end`.
+- `transcribe` test: `--meeting` unions intervals (paused span provably absent from output) and
+  publishes `job` events through the daemon.
 - Extension test: service-worker kill mid-meeting recovers via `hello` + `subscribe` with no
   duplicated or dropped meeting.
