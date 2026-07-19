@@ -60,10 +60,12 @@ struct TranscribeFollowPipelineTests {
         fileURL: DataStoreLayout.indexFile(dataRoot: dataRoot, sourceID: sourceID))
     }
 
+    // `Mutex` is ~Copyable, so it can't be rebound to a local or captured
+    // by value — the closure captures `self` (a Sendable class reference)
+    // and borrows the property in place instead.
     var readerFactory: ChunkFileReaderFactory {
-      let chunkFrames = self.chunkFrames
-      return { url in
-        guard let frames = chunkFrames.withLock({ $0[url.lastPathComponent] }) else {
+      { url in
+        guard let frames = self.chunkFrames.withLock({ $0[url.lastPathComponent] }) else {
           throw FixtureMissing()
         }
         return FakeChunkReader(frameCount: frames)
@@ -96,11 +98,8 @@ struct TranscribeFollowPipelineTests {
       maxWindowSeconds: Double = 60,
       finalizePadSeconds: Double = 0.25
     ) -> TranscribeFollowPipeline.Dependencies {
-      let stopFlag = self.stopFlag
-      let stdoutLines = self.stdoutLines
-      let published = self.published
-      let logs = self.logs
-      let stderrLines = self.stderrLines
+      // Closures capture `self` and borrow the ~Copyable Mutex properties
+      // in place (they cannot be rebound or captured by value).
       return TranscribeFollowPipeline.Dependencies(
         clock: clock,
         transcriberFactory: { transcriber },
@@ -114,11 +113,11 @@ struct TranscribeFollowPipelineTests {
         finalizePadSeconds: finalizePadSeconds,
         pollInterval: .milliseconds(1),
         sleep: { _ in await Task.yield() },
-        isStopped: { stopFlag.withLock { $0 } },
-        writeStdoutLine: { line in stdoutLines.withLock { $0.append(line) } },
-        publishSegment: { event in published.withLock { $0.append(event) } },
-        log: { line in logs.withLock { $0.append(line) } },
-        writeStderr: { line in stderrLines.withLock { $0.append(line) } }
+        isStopped: { self.stopFlag.withLock { $0 } },
+        writeStdoutLine: { line in self.stdoutLines.withLock { $0.append(line) } },
+        publishSegment: { event in self.published.withLock { $0.append(event) } },
+        log: { line in self.logs.withLock { $0.append(line) } },
+        writeStderr: { line in self.stderrLines.withLock { $0.append(line) } }
       )
     }
 
@@ -128,13 +127,11 @@ struct TranscribeFollowPipelineTests {
     }
 
     func waitForStart() async {
-      let logs = self.logs
-      await waitUntil { logs.withLock { $0.contains { $0.hasPrefix("following") } } }
+      await waitUntil { self.logs.withLock { $0.contains { $0.hasPrefix("following") } } }
     }
 
     func waitForStdout(count: Int) async {
-      let stdoutLines = self.stdoutLines
-      await waitUntil { stdoutLines.withLock { $0.count } >= count }
+      await waitUntil { self.stdoutLines.withLock { $0.count } >= count }
     }
 
     func stop() {
