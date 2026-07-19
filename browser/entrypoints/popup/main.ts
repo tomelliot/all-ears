@@ -19,18 +19,24 @@ const badgeEl = document.getElementById("status-badge");
 const textEl = document.getElementById("status-text");
 
 const STATUS_TEXT: Record<TransportStatus, string> = {
+  connected: "Connected",
+  connecting: "Connecting…",
+  disconnected: "Disconnected",
+};
+
+const STATUS_TITLE: Record<TransportStatus, string> = {
   connected: "connected to earsd",
   connecting: "connecting to earsd…",
   disconnected: "earsd not reachable",
 };
 
 function renderStatus(status: TransportStatus): void {
-  // The badge's dot colour is keyed off data-status in CSS; the text only
-  // shows when the badge is expanded on hover.
+  // The badge's dot colour is keyed off data-status in CSS; the one-word
+  // label only shows when the badge is expanded on hover. The native
+  // tooltip carries the fuller description.
   if (badgeEl) badgeEl.dataset.status = status;
-  const text = STATUS_TEXT[status] ?? String(status);
-  if (textEl) textEl.textContent = text;
-  badgeEl?.setAttribute("title", text);
+  if (textEl) textEl.textContent = STATUS_TEXT[status] ?? String(status);
+  badgeEl?.setAttribute("title", STATUS_TITLE[status] ?? String(status));
 }
 
 function renderToggle(enabled: boolean): void {
