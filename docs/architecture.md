@@ -49,7 +49,7 @@ The daemon owns **writes** to the ring buffer. No other tool writes there. Pipel
 - **Audio ingestion** — external producers (the browser plugin, future sources) push audio frames for a named source. Ingested audio joins that source's ring buffer exactly like a locally-captured one.
 - **Live feed (pub/sub)** — subscribers receive events: VAD state changes, session open/close, and, when a streaming transcriber is attached, finalised transcript segments. This is how a future menu-bar app or the browser plugin UI watches live activity.
 
-The protocol is newline-delimited JSON request/response with an event-stream mode for subscribers. It is specified in the [capture-daemon spec](./specs/capture-daemon.md). The socket is for control and ingestion only — results always land on disk.
+The protocol is newline-delimited JSON request/response with an event-stream mode for subscribers. It is specified in the [capture-daemon spec](./product/specs/capture-daemon.md); a redesigned v2 contract (correlated envelope, snapshot-on-subscribe, first-class meetings) is specified in [`control-protocol.md`](./product/specs/control-protocol.md) and not yet implemented. The socket is for control and ingestion only — results always land on disk.
 
 ## Sources
 
