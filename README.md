@@ -9,10 +9,10 @@ All Ears runs a small daemon that continuously records every audio source you co
 
 ## Why All Ears
 
+- **Small tools, not one app.** Capture, transcription, cleanup, and summarisation are separate command-line tools that read and write plain files, instead of one inscrutable binary. Script them, replace one, extend them.
 - **Knows who said what, by name, on Google Meet.** The browser extension isolates each remote participant's audio into its own stream and reads their real display name straight off the call UI, without manual labelling or voice-print guessing. Zoom gets the same per-participant separation from the call's own tracks. Teams gets attributed `Speaker N` streams instead.
 - **Sources are separated before transcription, not after.** Mic, system audio, each app, and each meeting participant are captured as distinct streams from the start. Transcription and diarization run on a clean single-speaker signal instead of untangling a blended recording after the fact, so accuracy and speaker attribution are both better for it.
 - **Local-first.** Audio and transcripts stay on disk on your Mac. The only network calls are to whichever LLM you configure for cleanup and summaries.
-- **Small tools, not one app.** Capture, transcription, cleanup, and summarisation are separate command-line tools that read and write plain files, instead of one inscrutable binary. Script them, replace one, or run them standalone.
 - **Retroactive capture.** The daemon is always recording into a bounded local buffer (2 hours by default). Realise ten minutes in that you should've been taking notes? The audio is already there. Just ask for a transcript of the last 30 minutes.
 
 ## Quick start
