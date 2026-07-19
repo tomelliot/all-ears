@@ -360,6 +360,56 @@ struct EarsDaemonTests {
     await daemon.stop()
   }
 
+  @Test(
+    "a session opened after daemon start can name a browser source created by a later ingest.open")
+  func sessionCanReferenceDynamicIngestSource() async throws {
+    let dataRoot = try makeDataRoot()
+    let socketPath = tempSocketPath()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_000))
+
+    let configuration = EarsDaemonConfiguration(
+      sources: [],
+      dataRoot: dataRoot,
+      socketPath: socketPath)
+
+    let daemon = try EarsDaemon(
+      configuration: configuration,
+      backendFactory: { descriptor in SyntheticCaptureBackend(source: descriptor.id, buffers: []) },
+      clock: clock)
+    try await daemon.start()
+
+    let client = try await ControlSocketClient.connect(toPath: socketPath)
+
+    // Before the source's first ingest.open, naming it is (correctly) an
+    // unknown-source failure.
+    let early = try await client.send(
+      .sessionOpen(sources: ["browser:meet:jane-a1b2"], slug: "call", start: nil, vocab: nil),
+      expecting: SessionOpenData.self)
+    guard case .failure(let earlyError) = early else {
+      Issue.record("expected an unknown-source failure before ingest.open, got \(early)")
+      return
+    }
+    #expect(earlyError.message.contains("browser:meet:jane-a1b2"))
+
+    // The source joins mid-call. SessionRegistry's knownSourceIDs is a live
+    // lookup into the daemon's captureActors — with the pre-fix snapshot,
+    // this session.open threw unknownSource.
+    let format = AudioFormatSpec(sampleRate: 16000, channels: 1, encoding: "pcm_s16le")
+    _ = try await daemon.openIngestSource(label: "browser:meet:jane-a1b2", format: format)
+
+    let reply = try await client.send(
+      .sessionOpen(sources: ["browser:meet:jane-a1b2"], slug: "call", start: nil, vocab: nil),
+      expecting: SessionOpenData.self)
+    guard case .success(let opened) = reply else {
+      Issue.record("expected session.open to accept the dynamic source, got \(reply)")
+      return
+    }
+    #expect(opened.id.hasSuffix("_call"))
+
+    await client.close()
+    await daemon.stop()
+  }
+
   @Test("a published segment.publish reaches a subscribed client end to end")
   func endToEndSegmentPublish() async throws {
     let dataRoot = try makeDataRoot()
