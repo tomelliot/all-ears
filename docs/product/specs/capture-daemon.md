@@ -73,6 +73,8 @@ The process tap is the most crash-prone surface. An optional design (livecaption
 
 ## Control socket protocol
 
+> **Note:** a v2 control contract — id-correlated envelope, `hello` handshake, snapshot-on-subscribe, and a daemon-owned Meeting entity — is specified in [`control-protocol.md`](control-protocol.md). It is designed but not yet implemented; this section describes the v1 wire as built, which v2 supersedes when it lands.
+
 Unix domain socket, newline-delimited JSON. Each connection is either **request/response** or, after `subscribe`, an **event stream**.
 
 ### Request/response

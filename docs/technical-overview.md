@@ -38,6 +38,7 @@ Each is a separate binary. They share nothing but the documented [data formats](
 - [Brand guidelines](./brand-guidelines.html) and [brand assets](./brand/): logomark, logo lockups, colour, type.
 - Specs:
   - [`earsd` + `ears`, capture daemon](./product/specs/capture-daemon.md)
+  - [Control protocol v2](./product/specs/control-protocol.md) (designed, not yet implemented)
   - [`transcribe`, transcription](./product/specs/transcribe.md)
   - [`cleanup` + `summarize`, LLM stages](./product/specs/llm-stages.md)
   - [Model interface](./product/specs/model-interface.md)

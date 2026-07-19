@@ -99,6 +99,8 @@ A reader reconstructs available audio for any time range from `chunk` events, us
 
 A session is metadata over the ring buffer — a named time range across one or more sources — not a separate recording.
 
+> **Planned:** [control protocol v2](./product/specs/control-protocol.md) layers a Meeting entity above sessions (`meetings/<uuid>/meeting.toml` schema 2 + an append-only `events.jsonl`, transcripts gaining a `meeting:` frontmatter field). The formats below are current until it lands.
+
 ```toml
 schema = 1
 id = "2026-07-17T10-30-00Z_standup"

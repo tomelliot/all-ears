@@ -7,6 +7,7 @@ Turn ring-buffer audio for a given source + time range (or a session) into a tra
 ## Inputs
 
 - A **source** (`--source mic`) or **sources**, and a **time range** (`--from`/`--to`, or `--last 30m`), **or** a **session** (`--session <id>`, which resolves to its sources + range + vocabulary).
+- **Planned with control protocol v2** ([`control-protocol.md`](control-protocol.md)): a **meeting** (`--meeting <id>`), which reads `meeting.toml`, unions the meeting's transcription intervals (paused spans skipped like silence), and writes a **single** transcript with a `meeting:` frontmatter field; progress is reported to the daemon's live feed via `job.publish`.
 - Model/backend/compute selection (config or flags).
 - Diarization on/off; vocabulary lists.
 

@@ -19,7 +19,7 @@ Stream per-participant PCM from the extension to `earsd`'s loopback WebSocket in
 
 - Does **not** capture, resample, or inspect audio — the extension delivers finished 16 kHz `pcm_s16le`.
 - Does **not** resolve participant identity — it receives an already-stable id.
-- Does **not** speak the daemon's control plane (`status`/`sources.*`/`session.*`) — that stays on earsd's Unix socket, unreachable from the WebSocket.
+- Does **not** speak the daemon's control plane (`status`/`sources.*`/`session.*`) — that stays off the ingest socket. The extension's control traffic (`meeting.*`/`session.*`) rides the separate `/control` WebSocket (`lib/control-transport.ts`); the redesigned contract for that plane is specified in [`../../specs/control-protocol.md`](../../specs/control-protocol.md).
 
 ## Where it lives
 
