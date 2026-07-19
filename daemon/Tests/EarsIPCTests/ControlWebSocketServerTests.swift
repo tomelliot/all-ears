@@ -39,8 +39,8 @@ struct ControlWebSocketServerTests {
   }
 
   private func makeServer(
-    allowedOrigins: [String], outboundQueueBound: Int = ControlWebSocketServer
-      .defaultOutboundQueueBound,
+    allowedOrigins: [String],
+    outboundQueueBound: Int = ControlWebSocketServer.defaultOutboundQueueBound,
     handler: RecordingHandler
   ) -> (ControlWebSocketServer, FakeSocketListener) {
     let listener = FakeSocketListener()
@@ -63,7 +63,8 @@ struct ControlWebSocketServerTests {
   @Test("full control round trip: session.open dispatches to the handler and replies over WS")
   func fullRoundTrip() async throws {
     let handler = RecordingHandler()
-    let (server, listener) = makeServer(allowedOrigins: ["chrome-extension://abc"], handler: handler)
+    let (server, listener) = makeServer(
+      allowedOrigins: ["chrome-extension://abc"], handler: handler)
     let runner = Task { await server.run() }
     let connection = FakeSocketConnection()
     listener.accept(connection)
@@ -99,7 +100,8 @@ struct ControlWebSocketServerTests {
   @Test("meeting.resolve round-trips its meeting_id payload")
   func meetingResolveRoundTrip() async throws {
     let handler = RecordingHandler()
-    let (server, listener) = makeServer(allowedOrigins: ["chrome-extension://abc"], handler: handler)
+    let (server, listener) = makeServer(
+      allowedOrigins: ["chrome-extension://abc"], handler: handler)
     let runner = Task { await server.run() }
     let connection = FakeSocketConnection()
     listener.accept(connection)
@@ -145,7 +147,8 @@ struct ControlWebSocketServerTests {
   @Test("a disallowed origin gets 403; the ingest path gets 404 here")
   func originAndPathRejections() async throws {
     let handler = RecordingHandler()
-    let (server, listener) = makeServer(allowedOrigins: ["chrome-extension://abc"], handler: handler)
+    let (server, listener) = makeServer(
+      allowedOrigins: ["chrome-extension://abc"], handler: handler)
     let runner = Task { await server.run() }
 
     let evil = FakeSocketConnection()
@@ -170,7 +173,8 @@ struct ControlWebSocketServerTests {
   @Test("subscribe transitions to event-stream mode and delivers matching events")
   func subscribeDeliversEvents() async throws {
     let handler = RecordingHandler()
-    let (server, listener) = makeServer(allowedOrigins: ["chrome-extension://abc"], handler: handler)
+    let (server, listener) = makeServer(
+      allowedOrigins: ["chrome-extension://abc"], handler: handler)
     let runner = Task { await server.run() }
     let connection = FakeSocketConnection()
     listener.accept(connection)

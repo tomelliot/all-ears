@@ -451,7 +451,8 @@ public actor EarsDaemon {
   /// down local capture (the isolation that was itself a bugfix for ingest,
   /// journal #36/#37).
   private func startControlWebSocket(
-    _ controlWebSocket: ControlWebSocketConfiguration, handler: @escaping ControlSocketServer.Handler
+    _ controlWebSocket: ControlWebSocketConfiguration,
+    handler: @escaping ControlSocketServer.Handler
   ) async {
     let controlListener: NetworkSocketListener
     do {
