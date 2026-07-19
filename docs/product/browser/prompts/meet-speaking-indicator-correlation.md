@@ -1,0 +1,55 @@
+# Prompt: Meet identity — speaking-indicator correlation (Phase 4, investigation)
+
+Use this prompt against the `all-ears` repo, `browser/` extension, from a machine with Chrome, browser control (`claude-in-chrome` or manual DevTools), and the `journal` CLI (`docs/journal/journal.db`). It follows [`meet-identity.md`](meet-identity.md) and its live-verification pass (journal `#41`–`#46`): every mechanism that spec anticipated for correlating a captured audio track to a Meet participant tile — tile `<audio>`/`<video>` element matching, CSRC (`getContributingSources`), and a track/tile ordering heuristic — was tested live and confirmed dead on the current build. `identify()` in `lib/identity/meet.ts` currently returns `null` unconditionally as a documented, intentional outcome. This prompt is about a signal none of that work tried: **Meet's own tile UI visibly reacts to who is currently speaking** (a glow/ring/animation on the active speaker's tile), which means Meet's client necessarily has *some* real-time per-participant speaking signal internally — the question is whether that signal's observable DOM effect (or, for this investigation, its underlying wire format — see Task 2) can be correlated against our own independently-decoded per-track audio to recover the same track↔participant mapping.
+
+## Context (read first)
+
+- `docs/product/browser/specs/extension.md` §Platform adapter and §Constraints & MUST-NOT — the `PlatformAdapter` interface, and specifically MUST-NOT #6 (no decoding an app's private protobuf/Redux internals — Meet's `collections` datachannel is explicitly named) and #8 (no per-frame single-winner CSRC that silently drops simultaneous speakers). Both apply directly to this investigation; see Constraints below for how.
+- `lib/identity/meet.ts` — the current adapter, its `VERIFICATION STATUS` doc comment records exactly what's been ruled out and why (journal `#41`–`#46`). Read it before starting so you don't re-run dead-end experiments.
+- `lib/rtc-hook.ts` — the encoded-audio tee (journal `#28`–`#31`) is how we get real decoded PCM per track today, independent of Meet's own pipeline. `window.__earsLiveTracks` (MAIN world) is the existing registry of live tracks + transceivers; `localStorage.setItem("__earsDebugAudio","1")` + reload turns on per-participant RMS console logging (`[ears/debug] speaker-N rms=... peak=... (AUDIO|silent)`) — this is your ground truth for "is this track making sound right now."
+- `lib/identity/adapter.ts` — `identify(track, stream, transceiver)` is currently **synchronous, called once per track**, at `+track` time. A correlation built by watching speaking events over time cannot resolve synchronously at track-creation — this is a real interface tension this investigation needs to surface, not silently work around (see Task 4).
+
+## Task
+
+### 1. Find and characterize the DOM speaking-indicator signal
+
+Join a real Meet call with ≥2 other participants. While someone speaks, find exactly what changes in the tile's DOM in real time — not just static attributes (`data-participant-id`, `span.notranslate`, already known-good from journal `#41`), but something that toggles on/off in sync with actual speech. Candidates to check: a class added/removed on the tile or an ancestor, an `aria-*` state attribute, an inline style change (e.g. a border/box-shadow color), a `MutationObserver`-visible attribute flip. Confirm:
+- It fires promptly (record the apparent latency between speech onset and the DOM change — matters for correlation tolerance).
+- It's genuinely per-participant (two people speaking in overlapping windows — if you can arrange it — should show two tiles reacting, not one; if Meet's own UI is single-winner here, that's itself an important finding, not a bug in your instrumentation).
+- It correctly identifies silence (indicator clears when speech stops, not just decays visually).
+
+### 2. Investigate whether the signal is server-pushed or client-computed
+
+Check whether the indicator's timing correlates with WebSocket or `RTCDataChannel` traffic (Chrome DevTools Network panel → WS frames, or `chrome.debugger`/`read_network_requests`). For **this investigation only**, decoding the payload bytes of Meet's private channels (including the `collections` datachannel) is explicitly permitted — the goal here is to actually understand what signal exists and how it's structured, not to guess from timing alone. Go ahead and parse/inspect payload content (protobuf field-sniffing, `TextDecoder` on frames, whatever's needed) to determine, concretely, whether an active-speaker/participant-id signal is present on the wire, what it looks like, and how it maps to the DOM tiles. Record what you find (message shape, field meanings you can infer, timing relative to the DOM indicator) as journal evidence either way. If the signal instead looks purely client-computed (Meet's own WASM decode pipeline computing local audio energy per receiver, independent of any network message), say so — that's a different, lower-risk story for the correlation, and worth distinguishing clearly from the wire-format case.
+
+**Important distinction for Task 4:** this decode-to-understand exception is scoped to *this investigation*. `extension.md` MUST-NOT #6 ("no decoding an app's private protobuf/Redux internals for identity") is a standing repo constraint on what ships, not on what you're allowed to learn while investigating. If the best mechanism turns out to depend on decoding `collections` datachannel payloads in production `meet.ts` code, don't ship that unreviewed — flag it explicitly in your recommendation as a proposed exception to MUST-NOT #6 (with the concrete wire format you found, and how brittle/versioned it looks) and let that be a deliberate call, not something this investigation quietly bakes in.
+
+### 3. Build a live temporal-correlation harness and evidence-gather
+
+For each participant, log timestamped pairs: (a) our own decoded per-track RMS crossing a chosen threshold (reuse/extend the `__earsDebugAudio` logging — do not hand-wave a threshold, pick one empirically from quiet-room vs. speaking RMS values you actually observe), and (b) the DOM speaking-indicator toggling for each tile. Over a multi-turn conversation (take turns speaking, ≥10 distinct speech events across ≥2 non-self participants), check whether track→tile pairing inferred from temporal alignment is **consistent** — the same track always aligns with the same tile's indicator, turn after turn. Record every run as journal evidence (`journal add --type evidence`, link to `#41`–`#46` with `extends`), including any run where it *doesn't* line up — a mixed result is still a result.
+
+Explicitly re-test the failure modes already on file from `#44`/`#45`, since a working correlation must survive them:
+- **Track churn**: journal `#45` observed `AudioDecoder` errors killing and (presumably) replacing a participant's track mid-call. Does a freshly-replaced track re-establish the same tile pairing from its next speaking turn, or does it need to be told "this is the same participant as track X" some other way?
+- **Mute/unmute**: does the indicator (and therefore the correlation opportunity) still fire correctly across a mute/unmute cycle?
+- **Tile/track count mismatch** (`#44`): with 3 tracks against 2 non-self tiles reproduced twice already, check whether the speaking indicator only ever fires on the 2 real tiles (in which case the 3rd track is plausibly inferable as a duplicate/redundant stream of one of the other two — worth confirming) or whether it's unrelated to this mismatch entirely.
+
+### 4. Report on the architecture tension, don't paper over it
+
+`identify()` is synchronous and one-shot per the current interface (`lib/identity/adapter.ts`). A correlation that only becomes confident after observing multiple speaking turns cannot fit that contract as-is. Do not silently bolt on an async side-channel to `audio-tap.ts` to make it fit — that pipeline is explicitly out of scope for identity work (see Out of scope). Instead:
+- Report the *confidence curve* you actually observed: after 1 speaking turn, after 3, after 10 — how often is the inferred pairing correct, and does it stabilize?
+- Propose (as a written recommendation, not code) what minimal interface change would be needed for `audio-tap.ts`/the popup to consume a **late-arriving or upgraded** identity for a track that started as `speaker-<n>` — e.g. an optional `PlatformAdapter.onIdentify?(cb: (track, id) => void)` push callback, distinct from the existing synchronous `identify()`. Flag this as a decision for a follow-up scoping/implementation task, not something to build unreviewed inside this investigation.
+
+## Constraints (from `extension.md` — apply directly here)
+
+- **MUST-NOT #6**: normally, no decoding Meet's private protobuf/Redux/datachannel payloads for identity — for *this investigation*, that's explicitly relaxed (see Task 2) so you can actually understand what's on the wire. The constraint still governs what ships: production `meet.ts` code depending on decoded `collections` payloads needs an explicit, flagged decision (see Task 4), not a silent implementation.
+- **MUST-NOT #8**: never build a mechanism that silently drops simultaneous speakers by picking a single winner. If Meet's own speaking indicator is single-winner (only one tile animates at a time even when two people talk over each other), the correlation you build inherits that same blind spot — document it plainly, the same way `teams.ts` labels its dominant-speaker approach as attribution, not isolation. **Audio isolation itself is unaffected regardless of outcome here** — the tee'd per-track capture pipeline (journal `#28`–`#31`) already captures every participant's audio correctly; this investigation is only ever about the *name label* attached to an already-isolated stream, never about which samples get captured.
+- No changes to `rtc-hook.ts`/`audio-tap.ts`'s audio pipeline itself — read from `__earsLiveTracks` and the existing debug RMS logging, don't add new capture logic.
+- No `getReceivers()`/`getTransceivers()` enumeration for track discovery (MUST-NOT #5) — you already have the receiver behind each known transceiver via `__earsLiveTracks`, same allowance the CSRC work used.
+
+## Deliverable
+
+A journal-evidence trail (linked to `#41`–`#46`) answering: does the speaking-indicator signal exist, is it fast/precise enough to correlate, does it survive track churn/mute/rejoin, and what's the measured confidence over N turns. Then a short written recommendation — build it (with the interface-change proposal from Task 4), or it's also a dead end (say why) — **not** a code change to `meet.ts` unless the evidence clearly supports it and you've flagged the interface question above for review first.
+
+## Out of scope
+
+Same as `meet-identity.md`: no changes to `rtc-hook.ts`/`audio-tap.ts`'s audio pipeline; no Zoom/Teams work; no popup UI changes (Phase 7). Do not implement the `onIdentify`-style interface change speculatively — propose it, let it be scoped separately.
