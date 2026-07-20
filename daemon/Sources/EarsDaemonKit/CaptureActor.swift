@@ -195,12 +195,12 @@ public actor CaptureActor {
     do {
       stream = try await backend.start()
     } catch {
-      runtimeState = .error
+      await transition(to: .error)
       throw error
     }
 
     playhead = await encoder.currentChunkStart
-    runtimeState = .capturing
+    await transition(to: .capturing)
     startConsuming(stream)
   }
 
@@ -211,7 +211,7 @@ public actor CaptureActor {
   public func stop() async {
     guard runtimeState == .capturing || runtimeState == .paused else { return }
     await teardownCapture()
-    runtimeState = .disabled
+    await transition(to: .disabled)
   }
 
   /// Pause capture, recording the resulting downtime as a `gap`.
@@ -235,7 +235,7 @@ public actor CaptureActor {
     guard runtimeState == .capturing else { return }
     pauseStartInstant = clock.now()
     await teardownCapture()
-    runtimeState = .paused
+    await transition(to: .paused)
   }
 
   /// Resume capture after a ``pause()``: append the single `gap` event covering
@@ -260,12 +260,12 @@ public actor CaptureActor {
     do {
       stream = try await backend.start()
     } catch {
-      runtimeState = .error
+      await transition(to: .error)
       throw error
     }
 
     playhead = await encoder.currentChunkStart
-    runtimeState = .capturing
+    await transition(to: .capturing)
     startConsuming(stream)
   }
 
@@ -315,6 +315,15 @@ public actor CaptureActor {
   /// body inherits this actor's isolation, so each buffer is processed under
   /// the single-writer rule and the `for await` suspension between buffers is
   /// where `stop`/`pause`/`status`/`flush` interleave.
+  /// Assigns ``runtimeState`` and publishes the change as a v2 `source`
+  /// state event (revision-tagged by the bus). No-op when unchanged, so
+  /// idempotent verbs don't spam subscribers.
+  private func transition(to state: SourceRuntimeState) async {
+    guard runtimeState != state else { return }
+    runtimeState = state
+    await eventSink?(.source(id: descriptor.id, state: state))
+  }
+
   private func startConsuming(_ stream: AsyncStream<AudioBuffer>) {
     consumerTask = Task { [weak self] in
       for await buffer in stream {

@@ -25,6 +25,7 @@ public struct SessionSummary: Sendable, Hashable {
   public var trigger: TriggerKind
   public var triggerDetail: String?
   public var vocab: String?
+  public var speakers: [String: String]
 
   public init(_ descriptor: SessionDescriptor) {
     schema = descriptor.schema
@@ -37,6 +38,7 @@ public struct SessionSummary: Sendable, Hashable {
     trigger = descriptor.trigger
     triggerDetail = descriptor.triggerDetail
     vocab = descriptor.vocab
+    speakers = descriptor.speakers
   }
 
   /// The underlying ``SessionDescriptor`` this wire shape represents.
@@ -51,14 +53,15 @@ public struct SessionSummary: Sendable, Hashable {
       state: state,
       trigger: trigger,
       triggerDetail: triggerDetail,
-      vocab: vocab
+      vocab: vocab,
+      speakers: speakers
     )
   }
 }
 
 extension SessionSummary: Codable {
   private enum CodingKeys: String, CodingKey {
-    case schema, id, slug, sources, start, end, state, trigger, vocab
+    case schema, id, slug, sources, start, end, state, trigger, vocab, speakers
     case triggerDetail = "trigger_detail"
   }
 
@@ -74,6 +77,7 @@ extension SessionSummary: Codable {
     trigger = try container.decode(TriggerKind.self, forKey: .trigger)
     triggerDetail = try container.decodeIfPresent(String.self, forKey: .triggerDetail)
     vocab = try container.decodeIfPresent(String.self, forKey: .vocab)
+    speakers = try container.decodeIfPresent([String: String].self, forKey: .speakers) ?? [:]
   }
 
   public func encode(to encoder: any Encoder) throws {
@@ -88,5 +92,8 @@ extension SessionSummary: Codable {
     try container.encode(trigger, forKey: .trigger)
     try container.encodeIfPresent(triggerDetail, forKey: .triggerDetail)
     try container.encodeIfPresent(vocab, forKey: .vocab)
+    if !speakers.isEmpty {
+      try container.encode(speakers, forKey: .speakers)
+    }
   }
 }

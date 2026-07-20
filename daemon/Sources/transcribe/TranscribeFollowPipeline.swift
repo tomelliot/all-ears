@@ -549,8 +549,9 @@ private final class FollowRun {
     committedSegments.append(segment)
 
     let event = EarsEvent.segment(
-      session: sessionID, speaker: speaker, start: segment.start, end: segment.end,
-      text: segmentText)
+      SegmentPublishParams(
+        session: sessionID, speaker: speaker, start: segment.start, end: segment.end,
+        text: segmentText))
     dependencies.writeStdoutLine(stdoutLine(for: segment, event: event))
     writeTranscript()
     // Best-effort, after the durable write: the publisher logs and swallows
@@ -563,7 +564,7 @@ private final class FollowRun {
       // The live feed's exact wire shape, one event per line, so a piped
       // consumer and a socket subscriber parse the same JSON.
       let encoder = JSONEncoder()
-      if let data = try? encoder.encode(event) {
+      if let data = try? encoder.encode(EventFrame(event: event)) {
         return String(decoding: data, as: UTF8.self)
       }
     }

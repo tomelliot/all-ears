@@ -1,56 +1,43 @@
 import EarsCore
 import Foundation
 
-/// The control-socket server: accepts connections on a ``SocketListener``,
-/// frames newline-delimited JSON per connection, dispatches each
-/// ``ControlRequest`` to a caller-supplied handler, and fans published
-/// ``EarsEvent``s out to subscribed connections — all under a bounded,
-/// drop-on-overflow outbound queue per connection.
+/// The seam command dispatch plugs into: one decoded, capability-checked
+/// ``ControlCall`` in, one type-erased reply out. Shared by both control
+/// transports (`ControlServer.makeHandler()` supplies the closure for both,
+/// so dispatch is never duplicated across transports).
+public typealias ControlHandler = @Sendable (ControlCall) async -> ControlReply
+
+/// The v2 control server on the Unix domain socket: accepts connections,
+/// frames newline-delimited JSON, runs the shared per-connection protocol
+/// state machine (`hello` gating, capability enforcement — this transport
+/// carries the full ``Capability/all`` tier), dispatches calls to the
+/// injected handler, and fans revision-tagged ``EventFrame``s out to
+/// subscribed connections — all under a bounded, drop-on-overflow outbound
+/// queue per connection.
 ///
-/// This is the transport a future `ControlServer` actor plugs its command
-/// dispatch into: it owns framing, connection lifecycle, pub/sub fan-out, and
-/// backpressure, and knows nothing about what any command *means*. The handler
-/// is `(ControlRequest) async -> ControlReply` — the seam where business logic
-/// attaches. See ``ControlReply`` for why the reply is type-erased.
+/// ## Correlation, not FIFO
 ///
-/// The per-connection subscribe/queue/backpressure/fan-out state lives in the
-/// shared ``ControlConnectionTable`` — the same core
-/// ``ControlWebSocketServer`` runs on — so this actor is just the NDJSON
-/// transport adapter: accept, line-frame, dispatch, close.
-///
-/// ## Subscribe is terminal for a connection
-///
-/// A connection is request/response until it sends a `subscribe`; from then it
-/// is an event stream until it closes. Further inbound lines on a subscribed
-/// connection are ignored. The spec presents `subscribe` as a mode the
-/// connection *becomes* ("either request/response or, after `subscribe`, an
-/// event stream") with no example of mixing the two and no request-id field to
-/// correlate interleaved replies against a live event stream — so the simpler,
-/// unambiguous "subscribe is terminal" reading is chosen. A client that wants
-/// both opens a second connection.
+/// Every request carries a client-chosen `id` echoed on its response, so
+/// requests are dispatched as they arrive and replies may complete out of
+/// order; nothing here maintains request order. Subscribing is **not**
+/// terminal: a subscribed connection keeps issuing requests — one connection
+/// per frontend suffices.
 ///
 /// ## Backpressure: bounded queue, drop-and-log
 ///
-/// Each connection's outbound direction — both control replies and published
-/// events — passes through one bounded FIFO (`bufferingNewest`, default
-/// ``defaultOutboundQueueBound`` = 128 lines). A dedicated writer task drains
-/// it to the socket; when a slow or stalled client stops draining, the writer
-/// blocks on the socket write, the queue fills, and further lines are dropped
-/// (oldest-first, keeping the freshest events) with the drop counted in
-/// ``droppedLineCount`` and logged — never blocking the whole server or growing
-/// without bound, matching the RAM ring's drop-loud policy and the architecture
-/// doc's backpressure requirement. 128 sits mid-range of the 64–256 guidance:
-/// large enough to ride out a brief consumer stall, small enough that a truly
-/// dead client is capped at a few KB of retained lines.
+/// Unchanged from v1: each connection's outbound direction passes through
+/// one bounded FIFO (default ``defaultOutboundQueueBound`` = 128 payloads),
+/// drained by a dedicated writer task; a stalled client's lines are dropped
+/// oldest-first, counted in ``droppedLineCount`` and logged. A dropped state
+/// event surfaces to that client as a `rev` gap, whose documented recovery
+/// is resubscribe-for-snapshot.
 public actor ControlSocketServer {
-  /// The seam a future `ControlServer` plugs command dispatch into.
-  public typealias Handler = @Sendable (ControlRequest) async -> ControlReply
-
   /// Default per-connection outbound queue depth. See the type's backpressure note.
   public static let defaultOutboundQueueBound = 128
 
   private let listener: any SocketListener
-  private let handler: Handler
+  private let identity: ControlServerIdentity
+  private let handler: ControlHandler
   private let encoder = JSONEncoder()
   private let decoder = JSONDecoder()
 
@@ -59,11 +46,13 @@ public actor ControlSocketServer {
 
   public init(
     listener: any SocketListener,
+    identity: ControlServerIdentity,
     outboundQueueBound: Int = ControlSocketServer.defaultOutboundQueueBound,
     log: @escaping @Sendable (String) -> Void = { _ in },
-    handler: @escaping Handler
+    handler: @escaping ControlHandler
   ) {
     self.listener = listener
+    self.identity = identity
     self.handler = handler
     self.table = ControlConnectionTable(
       queueBound: outboundQueueBound, label: "control socket", log: log)
@@ -76,7 +65,7 @@ public actor ControlSocketServer {
   /// Number of currently-open connections.
   public var connectionCount: Int { table.count }
 
-  /// Number of open connections currently in event-stream (subscribed) mode.
+  /// Number of open connections with a registered subscription.
   public var subscriberCount: Int { table.subscriberCount }
 
   /// Accept connections until the listener closes. Returns when
@@ -87,10 +76,9 @@ public actor ControlSocketServer {
     }
   }
 
-  /// Fan `event` out to every subscribed connection whose filter matches,
-  /// encoding it once. Dropped deliveries (full queue) are counted and logged.
-  public func publish(_ event: EarsEvent) {
-    table.publish(event, using: encoder)
+  /// Fan `frame` out to every subscribed connection whose filter matches.
+  public func publish(_ frame: EventFrame) {
+    table.publish(frame, using: encoder)
   }
 
   /// Stop listening and close every open connection.
@@ -114,37 +102,40 @@ public actor ControlSocketServer {
 
   private func readLoop(id: Int, socket: any SocketConnection) async {
     var framer = LineFramer()
-    var subscribed = false
     for await chunk in socket.inbound {
       for line in framer.append(chunk) {
-        if subscribed { continue }  // terminal: ignore further input once subscribed
-        if await handle(line: line, id: id) { subscribed = true }
+        await handle(Data(line), connection: id)
       }
     }
     await teardown(id: id)
   }
 
-  /// Process one framed request line. Returns `true` when it was a `subscribe`
-  /// that transitioned the connection into event-stream mode. The handler is
-  /// awaited inline so replies stay in request order; the actor is released
-  /// during the await, so `publish` and other connections still interleave.
-  private func handle(line: [UInt8], id: Int) async -> Bool {
-    let data = Data(line)
-    if ControlCommandPeek.isSubscribe(data, using: decoder) {
-      if let subscription = try? decoder.decode(SubscribeRequest.self, from: data) {
-        table.setSubscription(subscription, for: id)
-        return true
-      }
-      table.enqueue(.failure("malformed subscribe request"), to: id, using: encoder)
-      return false
+  /// Applies the shared protocol state machine's decision for one payload.
+  /// The handler is awaited inline per line; correlation ids make ordering a
+  /// client concern, and the actor is released during the await so `publish`
+  /// and other connections still interleave.
+  private func handle(_ data: Data, connection id: Int) async {
+    switch ControlFrameProcessor.decide(
+      data, helloDone: table.helloDone(id), capabilities: Capability.all, decoder: decoder)
+    {
+    case .respond(let requestID, let reply):
+      table.respond(reply, id: requestID, to: id, using: encoder)
+    case .completeHello(let requestID):
+      table.markHello(id)
+      table.respond(
+        ControlFrameProcessor.helloReply(identity: identity, capabilities: Capability.all),
+        id: requestID, to: id, using: encoder)
+    case .subscribe(let requestID, let params):
+      // Register the filter BEFORE taking the snapshot: an event racing the
+      // snapshot is then delivered (possibly stale relative to the snapshot,
+      // which the client's rev rule ignores) rather than silently missed.
+      table.setSubscription(params, for: id)
+      let reply = await handler(.subscribe(params))
+      table.respond(reply, id: requestID, to: id, using: encoder)
+    case .dispatch(let requestID, let call):
+      let reply = await handler(call)
+      table.respond(reply, id: requestID, to: id, using: encoder)
     }
-    if let request = try? decoder.decode(ControlRequest.self, from: data) {
-      let reply = await handler(request)
-      table.enqueue(reply, to: id, using: encoder)
-      return false
-    }
-    table.enqueue(.failure("unrecognised request"), to: id, using: encoder)
-    return false
   }
 
   private func teardown(id: Int) async {

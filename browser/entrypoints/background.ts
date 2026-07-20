@@ -73,6 +73,13 @@ export default defineBackground(() => {
     broadcastStatus();
   });
 
+  // v2 recovery loop: every (re)connect hands the tracker a fresh snapshot,
+  // and it re-declares whatever the DOM says is live (meeting.start is
+  // idempotent). Job telemetry drives the "transcribing" badge with real
+  // pipeline state instead of a guessed timer.
+  control.onReady = (snapshot, bootChanged) => meetings.onReady(snapshot, bootChanged);
+  control.onEvent = (frame) => meetings.jobEvent(frame);
+
   // participantId → the port (tab) its PCM arrives on, so an ingest-stream
   // open can be routed to that tab's meeting record.
   const participantPorts = new Map<string, string>();
@@ -127,6 +134,9 @@ export default defineBackground(() => {
     port.onMessage.addListener((raw) => {
       const msg = raw as PortMessage;
       switch (msg.type) {
+        case "joined":
+          meetings.participantJoined(portId, msg.platform, msg.participantId, msg.displayName);
+          return;
         case "left":
           tracker.participantLeft(portId, msg.participantId);
           socket.participantLeft(msg.participantId);

@@ -1,237 +1,268 @@
-import { describe, expect, it, vi } from "vitest";
-import {
-  MeetingTracker,
-  type MeetingControl,
-  type MeetingState,
-  type TimersLike,
-} from "./meeting-tracker";
+import { describe, expect, it } from "vitest";
+import { MeetingTracker, type MeetingControl, type MeetingState } from "./meeting-tracker";
+import type { AttendeeUpsert, MeetingWire, SnapshotWire } from "./protocol";
 
-// Hand-rolled recording fake for the control plane (no network), plus manual
-// timers so the "transcribing" hold window is driven explicitly.
+// The tracker is a signal forwarder in v2: the daemon owns the meeting state
+// machine, so these tests assert exactly which meeting verbs each DOM signal
+// turns into — no session churn, no client-side pause emulation.
 
+function meetingWire(overrides: Partial<MeetingWire> = {}): MeetingWire {
+  return {
+    id: "m-1",
+    identity: { platform: "meet", external_id: "abc" },
+    title: "meet abc",
+    state: "active",
+    started: "2026-07-19T10:00:00.000Z",
+    intervals: [{ start: "2026-07-19T10:00:00.000Z", end: null }],
+    attendees: [],
+    sources: [],
+    trigger: "browser-extension",
+    rev: 1,
+    ...overrides,
+  };
+}
+
+type Call =
+  | { verb: "start"; platform: string; externalMeetingId: string }
+  | { verb: "end" | "pause" | "resume"; meeting: string }
+  | { verb: "attendee"; meeting: string; attendee: AttendeeUpsert };
+
+/** Records every verb; resolves immediately unless `deferStart` holds the
+ * meeting.start promise open for in-flight-race tests. */
 class FakeControl implements MeetingControl {
-  calls: Array<{ op: string; args: unknown[] }> = [];
-  nextMeetingId = "meeting-uuid-1";
-  private nextSession = 0;
-  failOpen = false;
+  calls: Call[] = [];
+  deferStart = false;
+  private startResolvers: Array<(m: MeetingWire) => void> = [];
+  startResult: MeetingWire = meetingWire();
 
-  async meetingResolve(platform: string, externalMeetingId: string): Promise<string> {
-    this.calls.push({ op: "meetingResolve", args: [platform, externalMeetingId] });
-    return this.nextMeetingId;
+  meetingStart(platform: string, externalMeetingId: string): Promise<MeetingWire> {
+    this.calls.push({ verb: "start", platform, externalMeetingId });
+    if (this.deferStart) {
+      return new Promise((resolve) => this.startResolvers.push(resolve));
+    }
+    return Promise.resolve(this.startResult);
   }
 
-  async sessionOpen(sources: readonly string[], slug: string): Promise<string> {
-    this.calls.push({ op: "sessionOpen", args: [[...sources], slug] });
-    if (this.failOpen) throw new Error("open failed");
-    return `session-${++this.nextSession}`;
+  resolveStart(meeting: MeetingWire = this.startResult): void {
+    this.startResolvers.shift()?.(meeting);
   }
 
-  async sessionClose(id: string): Promise<void> {
-    this.calls.push({ op: "sessionClose", args: [id] });
+  meetingEnd(meeting: string): Promise<MeetingWire> {
+    this.calls.push({ verb: "end", meeting });
+    return Promise.resolve(meetingWire({ id: meeting, state: "ended" }));
   }
 
-  async sessionAddSource(id: string, source: string): Promise<void> {
-    this.calls.push({ op: "sessionAddSource", args: [id, source] });
+  meetingPause(meeting: string): Promise<MeetingWire> {
+    this.calls.push({ verb: "pause", meeting });
+    return Promise.resolve(meetingWire({ id: meeting, state: "paused" }));
   }
 
-  ops(op: string): Array<unknown[]> {
-    return this.calls.filter((c) => c.op === op).map((c) => c.args);
+  meetingResume(meeting: string): Promise<MeetingWire> {
+    this.calls.push({ verb: "resume", meeting });
+    return Promise.resolve(meetingWire({ id: meeting, state: "active" }));
+  }
+
+  meetingAttendee(meeting: string, attendee: AttendeeUpsert): Promise<MeetingWire> {
+    this.calls.push({ verb: "attendee", meeting, attendee });
+    return Promise.resolve(meetingWire({ id: meeting }));
+  }
+
+  ofVerb(verb: Call["verb"]): Call[] {
+    return this.calls.filter((c) => c.verb === verb);
   }
 }
 
-class ManualTimers implements TimersLike {
-  pending: Array<{ fn: () => void }> = [];
-  set(fn: () => void): unknown {
-    const handle = { fn };
-    this.pending.push(handle);
-    return handle;
-  }
-  clear(handle: unknown): void {
-    this.pending = this.pending.filter((p) => p !== handle);
-  }
-  fireAll(): void {
-    const fire = this.pending.splice(0, this.pending.length);
-    for (const p of fire) p.fn();
-  }
-}
+const NOW = "2026-07-19T11:00:00.000Z";
 
-function makeTracker(control = new FakeControl()) {
+function makeTracker(control: FakeControl): {
+  tracker: MeetingTracker;
+  states: MeetingState[];
+} {
   const states: MeetingState[] = [];
-  const timers = new ManualTimers();
-  const tracker = new MeetingTracker(control, (s) => states.push(s), timers);
-  return { tracker, control, states, timers };
+  const tracker = new MeetingTracker(control, (s) => states.push(s), () => NOW);
+  return { tracker, states };
 }
 
-const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+async function flush(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 0));
+}
 
-describe("MeetingTracker", () => {
-  it("resolves the meeting then opens a session once a source is open, slug = meeting UUID", async () => {
-    const { tracker, control, states } = makeTracker();
+describe("MeetingTracker (v2 signal forwarder)", () => {
+  it("meeting-started declares the meeting and records its daemon id", async () => {
+    const control = new FakeControl();
+    const { tracker, states } = makeTracker(control);
 
-    tracker.meetingStarted("pcm-0", "meet", "AbC");
+    tracker.meetingStarted("p1", "meet", "abc");
     await flush();
-    expect(control.ops("meetingResolve")).toEqual([["meet", "AbC"]]);
-    expect(control.ops("sessionOpen")).toEqual([]); // no open sources yet
-    expect(tracker.state).toBe("recording");
 
-    tracker.streamOpened("pcm-0", "meet", "spaces/AbC/devices/1");
+    expect(control.calls).toEqual([{ verb: "start", platform: "meet", externalMeetingId: "abc" }]);
+    expect(states).toEqual(["recording"]);
+    expect(tracker.meetingActive).toBe(true);
+  });
+
+  it("a duplicate meeting-started is not re-declared", async () => {
+    const control = new FakeControl();
+    const { tracker } = makeTracker(control);
+
+    tracker.meetingStarted("p1", "meet", "abc");
+    tracker.meetingStarted("p1", "meet", "abc");
     await flush();
-    expect(control.ops("sessionOpen")).toEqual([
-      [["browser:meet:spaces-AbC-devices-1"], "meeting-uuid-1"],
+
+    expect(control.ofVerb("start")).toHaveLength(1);
+  });
+
+  it("attendee signals queue until the meeting id lands, then flush in order", async () => {
+    const control = new FakeControl();
+    control.deferStart = true;
+    const { tracker } = makeTracker(control);
+
+    tracker.meetingStarted("p1", "meet", "abc");
+    tracker.participantJoined("p1", "meet", "jane", "Jane Doe");
+    tracker.streamOpened("p1", "meet", "jane");
+    expect(control.ofVerb("attendee")).toHaveLength(0); // still queued
+
+    control.resolveStart();
+    await flush();
+
+    expect(control.ofVerb("attendee")).toEqual([
+      { verb: "attendee", meeting: "m-1", attendee: { id: "jane", display_name: "Jane Doe" } },
+      {
+        verb: "attendee",
+        meeting: "m-1",
+        attendee: { id: "jane", source: "browser:meet:jane" },
+      },
     ]);
-    expect(states).toContain("recording");
   });
 
-  it("adds later participants to the open session via session.add_source", async () => {
-    const { tracker, control } = makeTracker();
-    tracker.meetingStarted("pcm-0", "meet", "AbC");
+  it("participant-left upserts a left timestamp; the last leaver ends the meeting", async () => {
+    const control = new FakeControl();
+    const { tracker } = makeTracker(control);
+
+    tracker.meetingStarted("p1", "meet", "abc");
     await flush();
-    tracker.streamOpened("pcm-0", "meet", "jane");
+    tracker.participantJoined("p1", "meet", "jane", "Jane");
+    tracker.participantJoined("p1", "meet", "marcus", "Marcus");
     await flush();
 
-    tracker.streamOpened("pcm-0", "meet", "john");
+    tracker.participantLeft("p1", "jane");
     await flush();
-    expect(control.ops("sessionAddSource")).toEqual([["session-1", "browser:meet:john"]]);
+    expect(control.ofVerb("end")).toHaveLength(0);
+    expect(control.calls.at(-1)).toEqual({
+      verb: "attendee",
+      meeting: "m-1",
+      attendee: { id: "jane", left: NOW },
+    });
 
-    // A repeat open for the same participant is a no-op.
-    tracker.streamOpened("pcm-0", "meet", "john");
+    tracker.participantLeft("p1", "marcus");
     await flush();
-    expect(control.ops("sessionAddSource")).toHaveLength(1);
+    expect(control.ofVerb("end")).toEqual([{ verb: "end", meeting: "m-1" }]);
+    expect(tracker.meetingActive).toBe(false);
   });
 
-  it("pause closes the session without touching capture; resume opens a fresh one", async () => {
-    const { tracker, control } = makeTracker();
-    tracker.meetingStarted("pcm-0", "meet", "AbC");
-    await flush();
-    tracker.streamOpened("pcm-0", "meet", "jane");
+  it("the pause toggle maps to meeting.pause / meeting.resume — never session churn", async () => {
+    const control = new FakeControl();
+    const { tracker, states } = makeTracker(control);
+
+    tracker.meetingStarted("p1", "meet", "abc");
     await flush();
 
     await tracker.setPaused(true);
-    expect(control.ops("sessionClose")).toEqual([["session-1"]]);
-    expect(tracker.state).toBe("paused");
-
-    // Sources opening while paused are remembered but no session is opened.
-    tracker.streamOpened("pcm-0", "meet", "john");
-    await flush();
-    expect(control.ops("sessionOpen")).toHaveLength(1);
+    expect(control.ofVerb("pause")).toEqual([{ verb: "pause", meeting: "m-1" }]);
+    expect(states).toEqual(["recording", "paused"]);
+    expect(tracker.paused).toBe(true);
 
     await tracker.setPaused(false);
-    expect(tracker.state).toBe("recording");
-    const opens = control.ops("sessionOpen");
-    expect(opens).toHaveLength(2);
-    // The fresh session reuses the same meeting UUID as slug and carries both sources.
-    expect(opens[1]![1]).toBe("meeting-uuid-1");
-    expect(new Set(opens[1]![0] as string[])).toEqual(
-      new Set(["browser:meet:jane", "browser:meet:john"]),
-    );
+    expect(control.ofVerb("resume")).toEqual([{ verb: "resume", meeting: "m-1" }]);
+    expect(tracker.paused).toBe(false);
   });
 
-  it("meeting end closes the session and holds a time-boxed transcribing state", async () => {
-    const { tracker, control, timers } = makeTracker();
-    tracker.meetingStarted("pcm-0", "meet", "AbC");
-    await flush();
-    tracker.streamOpened("pcm-0", "meet", "jane");
-    await flush();
-
-    tracker.meetingEnded("AbC");
-    await flush();
-    expect(control.ops("sessionClose")).toEqual([["session-1"]]);
-    expect(tracker.state).toBe("transcribing");
-    expect(tracker.meetingActive).toBe(false);
-
-    timers.fireAll();
-    expect(tracker.state).toBe("idle");
-  });
-
-  it("the last participant leaving ends the meeting", async () => {
-    const { tracker, control } = makeTracker();
-    tracker.meetingStarted("pcm-0", "meet", "AbC");
-    await flush();
-    tracker.streamOpened("pcm-0", "meet", "jane");
-    tracker.streamOpened("pcm-0", "meet", "john");
-    await flush();
-
-    tracker.participantLeft("pcm-0", "jane");
-    expect(tracker.meetingActive).toBe(true);
-    tracker.participantLeft("pcm-0", "john");
-    await flush();
-    expect(tracker.meetingActive).toBe(false);
-    expect(control.ops("sessionClose")).toEqual([["session-1"]]);
-  });
-
-  it("a port disconnect ends that port's meeting", async () => {
-    const { tracker, control } = makeTracker();
-    tracker.meetingStarted("pcm-0", "meet", "AbC");
-    await flush();
-    tracker.streamOpened("pcm-0", "meet", "jane");
-    await flush();
-
-    tracker.portDisconnected("pcm-0");
-    await flush();
-    expect(tracker.meetingActive).toBe(false);
-    expect(control.ops("sessionClose")).toEqual([["session-1"]]);
-  });
-
-  it("re-joining the same meeting opens a second session under the same meeting UUID", async () => {
-    const { tracker, control, timers } = makeTracker();
-    tracker.meetingStarted("pcm-0", "meet", "AbC");
-    await flush();
-    tracker.streamOpened("pcm-0", "meet", "jane");
-    await flush();
-    tracker.meetingEnded("AbC");
-    await flush();
-    timers.fireAll();
-
-    tracker.meetingStarted("pcm-1", "meet", "AbC");
-    await flush();
-    tracker.streamOpened("pcm-1", "meet", "jane");
-    await flush();
-
-    // Two resolves for the same external id (the daemon answers with the same
-    // UUID both times), two distinct sessions sharing the slug.
-    expect(control.ops("meetingResolve")).toEqual([
-      ["meet", "AbC"],
-      ["meet", "AbC"],
-    ]);
-    const opens = control.ops("sessionOpen");
-    expect(opens).toHaveLength(2);
-    expect(opens[0]![1]).toBe("meeting-uuid-1");
-    expect(opens[1]![1]).toBe("meeting-uuid-1");
-  });
-
-  it("a session.open failure is logged, not fatal, and doesn't wedge the tracker", async () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("a pause toggled before the meeting id lands is applied when it does", async () => {
     const control = new FakeControl();
-    control.failOpen = true;
+    control.deferStart = true;
     const { tracker } = makeTracker(control);
 
-    tracker.meetingStarted("pcm-0", "meet", "AbC");
-    await flush();
-    tracker.streamOpened("pcm-0", "meet", "jane");
-    await flush();
-    expect(warnSpy).toHaveBeenCalled();
+    tracker.meetingStarted("p1", "meet", "abc");
+    await tracker.setPaused(true);
+    expect(control.ofVerb("pause")).toHaveLength(0); // no id yet
 
-    // Recovery: a later stream open retries the session.open.
-    control.failOpen = false;
-    tracker.streamOpened("pcm-0", "meet", "john");
+    control.resolveStart();
     await flush();
-    expect(control.ops("sessionOpen")).toHaveLength(2);
-    warnSpy.mockRestore();
+    expect(control.ofVerb("pause")).toEqual([{ verb: "pause", meeting: "m-1" }]);
   });
 
-  it("a meeting ending while session.open is in flight closes the just-opened session", async () => {
-    const { tracker, control } = makeTracker();
-    tracker.meetingStarted("pcm-0", "meet", "AbC");
+  it("meeting-ended and port disconnect both end the daemon meeting", async () => {
+    const control = new FakeControl();
+    const { tracker } = makeTracker(control);
+
+    tracker.meetingStarted("p1", "meet", "abc");
+    await flush();
+    tracker.meetingEnded("abc");
+    await flush();
+    expect(control.ofVerb("end")).toEqual([{ verb: "end", meeting: "m-1" }]);
+
+    control.startResult = meetingWire({
+      id: "m-2",
+      identity: { platform: "meet", external_id: "xyz" },
+    });
+    tracker.meetingStarted("p2", "meet", "xyz");
+    await flush();
+    tracker.portDisconnected("p2");
+    await flush();
+    expect(control.ofVerb("end").at(-1)).toEqual({ verb: "end", meeting: "m-2" });
+  });
+
+  it("a meeting ended while meeting.start is in flight is ended once the id lands", async () => {
+    const control = new FakeControl();
+    control.deferStart = true;
+    const { tracker } = makeTracker(control);
+
+    tracker.meetingStarted("p1", "meet", "abc");
+    tracker.meetingEnded("abc");
+    expect(control.ofVerb("end")).toHaveLength(0);
+
+    control.resolveStart();
+    await flush();
+    expect(control.ofVerb("end")).toEqual([{ verb: "end", meeting: "m-1" }]);
+  });
+
+  it("job telemetry drives the transcribing badge with real pipeline state", async () => {
+    const control = new FakeControl();
+    const { tracker, states } = makeTracker(control);
+
+    tracker.jobEvent({
+      event: "job",
+      params: { job: "j1", kind: "transcribe", meeting: "m-1", state: "started" },
+    });
+    expect(states).toEqual(["transcribing"]);
+
+    tracker.jobEvent({
+      event: "job",
+      params: { job: "j1", kind: "transcribe", meeting: "m-1", state: "done" },
+    });
+    expect(states).toEqual(["transcribing", "idle"]);
+  });
+
+  it("onReady re-declares live meetings (idempotent recovery) and adopts daemon pause state", async () => {
+    const control = new FakeControl();
+    const { tracker } = makeTracker(control);
+
+    tracker.meetingStarted("p1", "meet", "abc");
+    await flush();
+    expect(control.ofVerb("start")).toHaveLength(1);
+
+    // Reconnect: the daemon says the meeting is paused (e.g. paused from the
+    // CLI while the worker was evicted).
+    const snapshot: SnapshotWire = {
+      rev: 50,
+      meetings: [meetingWire({ state: "paused" })],
+      sources: [],
+      sessions: [],
+    };
+    control.startResult = meetingWire({ state: "paused" });
+    tracker.onReady(snapshot, true);
     await flush();
 
-    // streamOpened kicks off sessionOpen; end the meeting before it settles.
-    tracker.streamOpened("pcm-0", "meet", "jane");
-    tracker.meetingEnded("AbC");
-    await flush();
-
-    // The open landed after the end, so the tracker closed it right back.
-    expect(control.ops("sessionOpen")).toHaveLength(1);
-    expect(control.ops("sessionClose")).toEqual([["session-1"]]);
-    expect(tracker.meetingActive).toBe(false);
+    expect(control.ofVerb("start")).toHaveLength(2); // re-declared, converges
+    expect(tracker.paused).toBe(true);
   });
 });

@@ -190,13 +190,10 @@ struct EarsDaemonTests {
     try await daemon.start()
 
     let client = try await ControlSocketClient.connect(toPath: socketPath)
-    let response = try await client.send(.status, expecting: StatusData.self)
+    _ = try await client.hello(client: "test/0")
+    let data = try await client.send(.status, expecting: StatusData.self)
     await client.close()
 
-    guard case .success(let data) = response else {
-      Issue.record("expected a successful status reply, got \(response)")
-      return
-    }
     #expect(data.sources.count == 1)
     #expect(data.sources.first?.id == "mic")
     #expect(data.sources.first?.state == .capturing)
@@ -234,34 +231,29 @@ struct EarsDaemonTests {
     try await daemon.start()
 
     let watcher = try await ControlSocketClient.connect(toPath: socketPath)
-    let events = try await watcher.subscribe(SubscribeRequest(events: [.session], sources: []))
-    // Wait until the server has registered the subscription before driving
-    // the lifecycle, else the events could fan out to nobody.
+    _ = try await watcher.hello(client: "test/0")
+    let (_, events) = try await watcher.subscribe(SubscribeParams())
+    // The subscription is registered before the snapshot reply, but wait for
+    // the server-side count anyway so the lifecycle below can't outrun it.
     while await daemon.subscriberCountForTesting() == 0 { await Task.yield() }
 
     let controller = try await ControlSocketClient.connect(toPath: socketPath)
-    let openReply = try await controller.send(
-      .sessionOpen(sources: ["mic"], slug: "standup", start: nil, vocab: nil, trigger: nil),
+    _ = try await controller.hello(client: "test/0")
+    let opened = try await controller.send(
+      .sessionOpen(SessionOpenParams(sources: ["mic"], slug: "standup")),
       expecting: SessionOpenData.self)
-    guard case .success(let opened) = openReply else {
-      Issue.record("expected a successful session.open reply, got \(openReply)")
-      return
-    }
-    let closeReply = try await controller.send(
-      .sessionClose(id: opened.id), expecting: EmptyData.self)
-    #expect(closeReply == .success(EmptyData()))
+    _ = try await controller.send(.sessionClose(id: opened.id), expecting: EmptyData.self)
     await controller.close()
 
-    var received: [EarsEvent] = []
-    for await event in events {
-      received.append(event)
+    var received: [SessionSummary] = []
+    for await frame in events {
+      guard case .session(let summary) = frame.event else { continue }
+      #expect(frame.rev != nil)  // session events are revision-tagged state
+      received.append(summary)
       if received.count == 2 { break }
     }
-    #expect(
-      received == [
-        .session(id: opened.id, state: .open),
-        .session(id: opened.id, state: .closed),
-      ])
+    #expect(received.map(\.id) == [opened.id, opened.id])
+    #expect(received.map(\.state) == [.open, .closed])
 
     await watcher.close()
     await daemon.stop()
@@ -379,18 +371,15 @@ struct EarsDaemonTests {
     try await daemon.start()
 
     let client = try await ControlSocketClient.connect(toPath: socketPath)
+    _ = try await client.hello(client: "test/0")
 
     // Before the source's first ingest.open, naming it is (correctly) an
     // unknown-source failure.
-    let early = try await client.send(
-      .sessionOpen(
-        sources: ["browser:meet:jane-a1b2"], slug: "call", start: nil, vocab: nil, trigger: nil),
-      expecting: SessionOpenData.self)
-    guard case .failure(let earlyError) = early else {
-      Issue.record("expected an unknown-source failure before ingest.open, got \(early)")
-      return
+    await #expect(throws: WireError.self) {
+      _ = try await client.send(
+        .sessionOpen(SessionOpenParams(sources: ["browser:meet:jane-a1b2"], slug: "call")),
+        expecting: SessionOpenData.self)
     }
-    #expect(earlyError.message.contains("browser:meet:jane-a1b2"))
 
     // The source joins mid-call. SessionRegistry's knownSourceIDs is a live
     // lookup into the daemon's captureActors — with the pre-fix snapshot,
@@ -398,14 +387,9 @@ struct EarsDaemonTests {
     let format = AudioFormatSpec(sampleRate: 16000, channels: 1, encoding: "pcm_s16le")
     _ = try await daemon.openIngestSource(label: "browser:meet:jane-a1b2", format: format)
 
-    let reply = try await client.send(
-      .sessionOpen(
-        sources: ["browser:meet:jane-a1b2"], slug: "call", start: nil, vocab: nil, trigger: nil),
+    let opened = try await client.send(
+      .sessionOpen(SessionOpenParams(sources: ["browser:meet:jane-a1b2"], slug: "call")),
       expecting: SessionOpenData.self)
-    guard case .success(let opened) = reply else {
-      Issue.record("expected session.open to accept the dynamic source, got \(reply)")
-      return
-    }
     #expect(opened.id.hasSuffix("_call"))
 
     await client.close()
@@ -432,28 +416,25 @@ struct EarsDaemonTests {
     try await daemon.start()
 
     let watcher = try await ControlSocketClient.connect(toPath: socketPath)
-    let events = try await watcher.subscribe(SubscribeRequest(events: [.segment], sources: []))
+    _ = try await watcher.hello(client: "test/0")
+    let (_, events) = try await watcher.subscribe(SubscribeParams(events: [.segment]))
     while await daemon.subscriberCountForTesting() == 0 { await Task.yield() }
 
     // A second connection publishes — mirroring a real `transcribe --follow`
-    // process, which needs its own publish connection because subscribe is
-    // terminal for a connection.
+    // process, which keeps its own connection for publishing.
     let publisher = try await ControlSocketClient.connect(toPath: socketPath)
-    let reply = try await publisher.send(
-      .segmentPublish(session: "s_call", speaker: "You", start: 604.1, end: 611.9, text: "ship it"),
-      expecting: EmptyData.self)
-    #expect(reply == .success(EmptyData()))
+    _ = try await publisher.hello(client: "test/0")
+    let segment = SegmentPublishParams(
+      session: "s_call", speaker: "You", start: 604.1, end: 611.9, text: "ship it")
+    _ = try await publisher.send(.segmentPublish(segment), expecting: EmptyData.self)
     await publisher.close()
 
     var received: [EarsEvent] = []
-    for await event in events {
-      received.append(event)
+    for await frame in events {
+      received.append(frame.event)
       break
     }
-    #expect(
-      received == [
-        .segment(session: "s_call", speaker: "You", start: 604.1, end: 611.9, text: "ship it")
-      ])
+    #expect(received == [.segment(segment)])
 
     await watcher.close()
     await daemon.stop()

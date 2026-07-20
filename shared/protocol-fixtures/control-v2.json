@@ -1,0 +1,244 @@
+{
+  "comment": "Golden wire fixtures for control protocol v2 (docs/product/specs/control-protocol.md). Decoded AND re-encoded by both the Swift (EarsCoreTests/ControlProtocolV2FixtureTests) and TypeScript (browser/lib/protocol.test.ts) suites so the two codecs can never drift. Every frame is the canonical encoding: optional keys absent when nil, empty filter lists omitted, instants as ISO-8601 UTC with millisecond precision.",
+  "requests": [
+    {
+      "name": "hello",
+      "frame": {
+        "id": 1,
+        "method": "hello",
+        "params": { "protocol": 2, "client": "browser-extension/0.1.0" }
+      }
+    },
+    {
+      "name": "subscribe-job-filter",
+      "frame": { "id": 2, "method": "subscribe", "params": { "events": ["job"] } }
+    },
+    {
+      "name": "meeting.start-browser",
+      "frame": {
+        "id": 3,
+        "method": "meeting.start",
+        "params": {
+          "platform": "meet",
+          "external_id": "abc-defg-hij",
+          "trigger": "browser-extension"
+        }
+      }
+    },
+    {
+      "name": "meeting.start-manual",
+      "frame": {
+        "id": 4,
+        "method": "meeting.start",
+        "params": { "title": "standup", "sources": ["mic"] }
+      }
+    },
+    {
+      "name": "meeting.pause",
+      "frame": { "id": 5, "method": "meeting.pause", "params": { "meeting": "0d5e1111-aaaa-bbbb-cccc-222233334444" } }
+    },
+    {
+      "name": "meeting.resume",
+      "frame": { "id": 6, "method": "meeting.resume", "params": { "meeting": "0d5e1111-aaaa-bbbb-cccc-222233334444" } }
+    },
+    {
+      "name": "meeting.end",
+      "frame": { "id": 7, "method": "meeting.end", "params": { "meeting": "0d5e1111-aaaa-bbbb-cccc-222233334444" } }
+    },
+    {
+      "name": "meeting.rename-if-rev",
+      "frame": {
+        "id": 8,
+        "method": "meeting.rename",
+        "params": { "meeting": "0d5e1111-aaaa-bbbb-cccc-222233334444", "title": "Weekly sync", "if_rev": 41 }
+      }
+    },
+    {
+      "name": "meeting.attendee-upsert",
+      "frame": {
+        "id": 9,
+        "method": "meeting.attendee",
+        "params": {
+          "meeting": "0d5e1111-aaaa-bbbb-cccc-222233334444",
+          "id": "spaces/x/devices/y",
+          "display_name": "Jane Doe",
+          "source": "browser:meet:jane-a1b2"
+        }
+      }
+    },
+    {
+      "name": "session.open",
+      "frame": {
+        "id": 10,
+        "method": "session.open",
+        "params": { "sources": ["mic"], "slug": "standup", "trigger": "manual" }
+      }
+    },
+    {
+      "name": "mark-last-seconds",
+      "frame": {
+        "id": 11,
+        "method": "mark",
+        "params": { "sources": ["mic"], "slug": "hallway-chat", "last_seconds": 1800 }
+      }
+    },
+    {
+      "name": "job.publish-running",
+      "frame": {
+        "id": 12,
+        "method": "job.publish",
+        "params": {
+          "job": "transcribe-4fd1a2b0",
+          "kind": "transcribe",
+          "meeting": "0d5e1111-aaaa-bbbb-cccc-222233334444",
+          "state": "running"
+        }
+      }
+    },
+    {
+      "name": "string-request-id",
+      "frame": { "id": "req-77", "method": "meeting.list" }
+    }
+  ],
+  "responses": [
+    {
+      "name": "hello-result",
+      "expecting": "hello",
+      "frame": {
+        "id": 1,
+        "result": {
+          "protocol": 2,
+          "daemon": "earsd 0.1.0",
+          "boot_id": "b3f1c0de-0000-1111-2222-333344445555",
+          "capabilities": ["observe", "meetings"]
+        }
+      }
+    },
+    {
+      "name": "meeting-result",
+      "expecting": "meeting",
+      "frame": {
+        "id": 3,
+        "result": {
+          "id": "0d5e1111-aaaa-bbbb-cccc-222233334444",
+          "identity": { "platform": "meet", "external_id": "abc-defg-hij" },
+          "title": "Weekly sync",
+          "state": "active",
+          "started": "2026-07-19T10:00:00.000Z",
+          "intervals": [
+            { "start": "2026-07-19T10:00:00.000Z", "end": "2026-07-19T10:12:30.000Z" },
+            { "start": "2026-07-19T10:20:05.000Z", "end": null }
+          ],
+          "attendees": [
+            {
+              "id": "spaces/x/devices/y",
+              "display_name": "Jane Doe",
+              "joined": "2026-07-19T10:00:12.000Z",
+              "source": "browser:meet:jane-a1b2"
+            }
+          ],
+          "sources": ["mic", "browser:meet:jane-a1b2"],
+          "trigger": "browser-extension",
+          "rev": 43
+        }
+      }
+    },
+    {
+      "name": "snapshot-result",
+      "expecting": "snapshot",
+      "frame": {
+        "id": 2,
+        "result": {
+          "rev": 41,
+          "meetings": [],
+          "sources": [
+            { "id": "mic", "state": "capturing", "codec": "aac", "bytes_used": 0 }
+          ],
+          "sessions": []
+        }
+      }
+    },
+    {
+      "name": "error-meeting-not-found",
+      "expecting": "error",
+      "frame": {
+        "id": 7,
+        "error": {
+          "code": "meeting_not_found",
+          "message": "no active meeting 0d5e1111-aaaa-bbbb-cccc-222233334444"
+        }
+      }
+    },
+    {
+      "name": "error-hello-required",
+      "expecting": "error",
+      "frame": {
+        "id": 1,
+        "error": { "code": "hello_required", "message": "hello must be the first request on a connection" }
+      }
+    }
+  ],
+  "events": [
+    {
+      "name": "meeting-event",
+      "frame": {
+        "event": "meeting",
+        "rev": 43,
+        "params": {
+          "meeting": {
+            "id": "0d5e1111-aaaa-bbbb-cccc-222233334444",
+            "identity": { "platform": "meet", "external_id": "abc-defg-hij" },
+            "title": "Weekly sync",
+            "state": "paused",
+            "started": "2026-07-19T10:00:00.000Z",
+            "intervals": [{ "start": "2026-07-19T10:00:00.000Z", "end": "2026-07-19T10:12:30.000Z" }],
+            "attendees": [],
+            "sources": ["browser:meet:jane-a1b2"],
+            "trigger": "browser-extension",
+            "rev": 43
+          }
+        }
+      }
+    },
+    {
+      "name": "source-event",
+      "frame": {
+        "event": "source",
+        "rev": 44,
+        "params": { "id": "mic", "state": "paused" }
+      }
+    },
+    {
+      "name": "vad-event",
+      "frame": {
+        "event": "vad",
+        "params": { "source": "mic", "state": "speech", "t": "2026-07-19T10:30:02.140Z" }
+      }
+    },
+    {
+      "name": "segment-event",
+      "frame": {
+        "event": "segment",
+        "params": {
+          "session": "2026-07-19T10-00-00Z_0d5e1111-aaaa-bbbb-cccc-222233334444",
+          "speaker": "Jane Doe",
+          "start": 604.1,
+          "end": 611.9,
+          "text": "Nothing from me, the deploy went out last night."
+        }
+      }
+    },
+    {
+      "name": "job-event",
+      "frame": {
+        "event": "job",
+        "params": {
+          "job": "transcribe-4fd1a2b0",
+          "kind": "transcribe",
+          "meeting": "0d5e1111-aaaa-bbbb-cccc-222233334444",
+          "state": "running"
+        }
+      }
+    }
+  ]
+}

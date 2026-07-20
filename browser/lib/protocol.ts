@@ -93,6 +93,9 @@ export function isControlEnvelope(data: unknown): data is ControlEnvelope {
  */
 export type PortMessage =
   | { type: "pcm"; participantId: ParticipantId; platform: Platform; b64: string }
+  // Participant identity (with display name, when the DOM knows it) — what
+  // the background upserts onto the daemon meeting's roster.
+  | { type: "joined"; participantId: ParticipantId; platform: Platform; displayName?: string }
   | { type: "left"; participantId: ParticipantId }
   | { type: "meeting-started"; platform: Platform; externalMeetingId: string }
   | { type: "meeting-ended"; platform: Platform; externalMeetingId: string };
@@ -113,24 +116,112 @@ export function sourceLabel(platform: Platform, participantId: ParticipantId): s
 }
 
 // ── earsd control-plane wire (background.ts → earsd ws://…/control) ──────────
+//
+// Control protocol v2 (docs/specs/control-protocol.md): an
+// id-correlated {id, method, params} envelope, a mandatory `hello`
+// handshake, and revision-tagged {event, params, rev} notifications. The
+// same frames the CLI speaks over the Unix socket; this transport's
+// capability tier is `observe` + `meetings`.
 
-/** Provenance recorded on daemon sessions this extension opens (earsd's
+/** Provenance recorded on daemon meetings this extension declares (earsd's
  * TriggerKind.browserExtension). */
 export const BROWSER_TRIGGER = "browser-extension" as const;
 
+/** The one protocol version both sides of this repo speak. */
+export const PROTOCOL_VERSION = 2;
+
+export type RequestId = number | string;
+
+/** Stable machine-readable error codes — switch on `code`, never `message`. */
+export interface WireError {
+  code: string;
+  message: string;
+}
+
+/** Response frame: exactly one per request, correlated by the echoed id. */
+export interface ResponseFrame {
+  id: RequestId;
+  result?: unknown;
+  error?: WireError;
+}
+
+/** Notification frame; `rev` is present iff the event is a state event. */
+export interface EventFrame {
+  event: string;
+  params: Record<string, unknown>;
+  rev?: number;
+}
+
+/** `hello`'s result. */
+export interface HelloResult {
+  protocol: number;
+  daemon: string;
+  boot_id: string;
+  capabilities: string[];
+}
+
+/** The v2 meeting object (wire shape). */
+export interface MeetingWire {
+  id: string;
+  identity?: { platform: string; external_id: string };
+  title: string;
+  state: "active" | "paused" | "ended";
+  started: string;
+  ended?: string | null;
+  intervals: Array<{ start: string; end: string | null }>;
+  attendees: Array<{
+    id: string;
+    display_name?: string;
+    joined?: string;
+    left?: string;
+    source?: string;
+  }>;
+  sources: string[];
+  trigger: string;
+  rev: number;
+}
+
+/** `subscribe`'s snapshot result. */
+export interface SnapshotWire {
+  rev: number;
+  meetings: MeetingWire[];
+  sources: Array<{ id: string; state: string }>;
+  sessions: Array<Record<string, unknown>>;
+}
+
+/** `meeting.attendee` upsert params (minus the meeting id, which the
+ * transport fills in). */
+export interface AttendeeUpsert {
+  id: string;
+  display_name?: string;
+  joined?: string;
+  left?: string;
+  source?: string;
+}
+
 /**
- * JSON builders for the control-plane requests the extension sends over the
- * control WebSocket (control-transport.ts) — the same ControlRequest wire
- * shapes the CLI speaks over the Unix socket.
+ * JSON frame builders for the v2 requests the extension sends over the
+ * control WebSocket (control-transport.ts).
  */
 export const controlRequest = {
-  meetingResolve: (platform: Platform, externalMeetingId: string) =>
-    ({ cmd: "meeting.resolve", platform, external_id: externalMeetingId }) as const,
-  sessionOpen: (sources: readonly string[], slug: string) =>
-    ({ cmd: "session.open", sources, slug, trigger: BROWSER_TRIGGER }) as const,
-  sessionClose: (id: string) => ({ cmd: "session.close", id }) as const,
-  sessionAddSource: (id: string, source: string) =>
-    ({ cmd: "session.add_source", id, source }) as const,
+  hello: (id: RequestId, client: string) =>
+    ({ id, method: "hello", params: { protocol: PROTOCOL_VERSION, client } }) as const,
+  subscribe: (id: RequestId, events: readonly string[]) =>
+    ({ id, method: "subscribe", params: { events } }) as const,
+  meetingStart: (id: RequestId, platform: Platform, externalMeetingId: string) =>
+    ({
+      id,
+      method: "meeting.start",
+      params: { platform, external_id: externalMeetingId, trigger: BROWSER_TRIGGER },
+    }) as const,
+  meetingEnd: (id: RequestId, meeting: string) =>
+    ({ id, method: "meeting.end", params: { meeting } }) as const,
+  meetingPause: (id: RequestId, meeting: string) =>
+    ({ id, method: "meeting.pause", params: { meeting } }) as const,
+  meetingResume: (id: RequestId, meeting: string) =>
+    ({ id, method: "meeting.resume", params: { meeting } }) as const,
+  meetingAttendee: (id: RequestId, meeting: string, attendee: AttendeeUpsert) =>
+    ({ id, method: "meeting.attendee", params: { meeting, ...attendee } }) as const,
 };
 
 /**

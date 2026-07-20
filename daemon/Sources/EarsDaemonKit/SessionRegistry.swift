@@ -44,8 +44,10 @@ public actor SessionRegistry {
   /// The validation seam: returns the ids of every currently-known source, so
   /// `open`/`mark` can reject unknown ones without referencing `CaptureActor`.
   private let knownSourceIDs: @Sendable () async -> Set<SourceID>
-  /// Where live-feed `session` lifecycle events are published (the spec's
-  /// `{"ev":"session","id":...,"state":...}`); `nil` publishes nothing.
+  /// Where live-feed `session` state events are published (the v2
+  /// `{"event":"session","params":{"session":{…}},"rev":…}` feed — the full
+  /// summary, so subscribers can sync their session set from events alone);
+  /// `nil` publishes nothing.
   private let eventSink: EventSink?
 
   /// Open and recently-closed sessions, keyed by id.
@@ -121,7 +123,7 @@ public actor SessionRegistry {
     )
     try SessionStore.write(descriptor, dataRoot: dataRoot)
     sessions[descriptor.id] = descriptor
-    await eventSink?(.session(id: descriptor.id, state: .open))
+    await eventSink?(.session(SessionSummary(descriptor)))
     return descriptor
   }
 
@@ -143,7 +145,7 @@ public actor SessionRegistry {
     descriptor.state = .closed
     try SessionStore.write(descriptor, dataRoot: dataRoot)
     sessions[id] = descriptor
-    await eventSink?(.session(id: id, state: .closed))
+    await eventSink?(.session(SessionSummary(descriptor)))
     return descriptor
   }
 
@@ -175,6 +177,9 @@ public actor SessionRegistry {
     descriptor.sources.append(source)
     try SessionStore.write(descriptor, dataRoot: dataRoot)
     sessions[id] = descriptor
+    // The descriptor changed, so subscribers get the refreshed summary —
+    // session events are v2 state events carrying the full object.
+    await eventSink?(.session(SessionSummary(descriptor)))
     return descriptor
   }
 
@@ -220,7 +225,7 @@ public actor SessionRegistry {
     sessions[descriptor.id] = descriptor
     // A mark comes into existence already closed, so a single `closed` event
     // announces it — there was never an open interval to announce.
-    await eventSink?(.session(id: descriptor.id, state: .closed))
+    await eventSink?(.session(SessionSummary(descriptor)))
     return descriptor
   }
 

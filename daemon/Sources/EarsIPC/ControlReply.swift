@@ -1,38 +1,40 @@
 import EarsCore
 import Foundation
 
-/// A type-erased control-socket reply, the value a request handler hands back
-/// to ``ControlSocketServer`` for writing.
+/// A type-erased v2 reply, the value a request handler hands back to the
+/// control transports for writing.
 ///
-/// The wire response envelope is uniform across every command —
-/// `{"ok":true,"data":<payload>}` or `{"ok":false,"error":"<message>"}` — but
-/// ``ControlResponse`` is generic over its payload type (`ControlResponse<StatusData>`
-/// for `status`, `ControlResponse<EmptyData>` for `flush`, and so on). A single
-/// handler signature that dispatches *every* command therefore cannot name one
-/// concrete payload type. `ControlReply` erases the payload: it captures a
-/// typed ``ControlResponse`` and remembers only how to encode its envelope, so
-/// the transport writes any command's reply through one code path. This is why
-/// the server handler is `(ControlRequest) async -> ControlReply` rather than
-/// the (non-compiling) `-> ControlResponse` the task sketched.
+/// The wire response envelope is uniform — `{"id":…,"result":…}` or
+/// `{"id":…,"error":{"code":…,"message":…}}` — but result payloads differ
+/// per method, and a single handler signature can't name every concrete
+/// `ControlResponseFrame<Payload>`. `ControlReply` erases the payload: it
+/// captures the typed result (or a ``WireError``) and remembers only how to
+/// encode the frame once the transport supplies the request's echoed `id`.
 public struct ControlReply: Sendable {
-  private let encodeEnvelope: @Sendable (JSONEncoder) throws -> Data
+  private let encodeFrame: @Sendable (RequestID, JSONEncoder) throws -> Data
 
-  /// Wraps a typed response. `Payload: Sendable` makes the captured value safe
-  /// to hold in the `@Sendable` encoding closure.
-  public init<Payload>(_ response: ControlResponse<Payload>) {
-    self.encodeEnvelope = { encoder in try encoder.encode(response) }
+  /// Wraps a typed success result.
+  public init<Payload: Codable & Sendable & Hashable>(result: Payload) {
+    self.encodeFrame = { id, encoder in
+      try encoder.encode(ControlResponseFrame<Payload>.result(id: id, result))
+    }
   }
 
-  /// A failure envelope (`{"ok":false,"error":...}`) — the payload type is
-  /// irrelevant on the wire for failures, so this fixes it to ``EmptyData``.
-  /// Used by the server for protocol-level errors (an undecodable request)
-  /// that arise before any handler runs.
-  public static func failure(_ error: ControlError) -> ControlReply {
-    ControlReply(ControlResponse<EmptyData>.failure(error))
+  /// Wraps a failure.
+  public init(error: WireError) {
+    self.encodeFrame = { id, encoder in
+      try encoder.encode(ControlResponseFrame<EmptyData>.error(id: id, error))
+    }
   }
 
-  /// The reply's JSON envelope, without a trailing newline.
-  public func encoded(using encoder: JSONEncoder) throws -> Data {
-    try encodeEnvelope(encoder)
+  /// Convenience failure constructor.
+  public static func failure(_ code: ControlErrorCode, _ message: String) -> ControlReply {
+    ControlReply(error: WireError(code: code, message: message))
+  }
+
+  /// The reply's JSON frame for the request identified by `id`, without a
+  /// trailing newline.
+  public func encoded(id: RequestID, using encoder: JSONEncoder) throws -> Data {
+    try encodeFrame(id, encoder)
   }
 }

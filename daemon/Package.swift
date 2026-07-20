@@ -181,6 +181,9 @@ let package = Package(
         "EarsLogging",
         "EarsCLISupport",
         "EarsIPC",
+        // For MeetingStore: `ears meeting list --all` reads closed-meeting
+        // history straight from `meetings/*/meeting.toml`, daemon-free.
+        "EarsDataStore",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
     ),

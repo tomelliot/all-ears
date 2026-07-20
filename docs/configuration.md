@@ -59,6 +59,12 @@ backend        = "energy"  # currently ignored: an energy-threshold VAD is alway
 speech_pad_ms  = 300       # pad around detected speech spans
 min_silence_ms = 700       # gap before declaring silence
 
+[earsd.meetings]
+# How long a browser meeting's last ingest stream may stay closed before the
+# daemon ends the meeting on its own (events.jsonl reason "ingest-idle").
+# Manual meetings are never auto-ended.
+ingest_close_grace_s = 120
+
 # Audio ingestion from the browser extension (binary PCM). Off by default.
 [earsd.ingest_ws]
 enabled         = false

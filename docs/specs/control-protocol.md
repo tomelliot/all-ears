@@ -1,9 +1,11 @@
 # Spec: control protocol v2
 
-**Status: designed, not yet implemented.** This spec defines the target control contract between
-`earsd` and every frontend. When it lands it supersedes the "Control protocol" section of
-[`capture-daemon.md`](capture-daemon.md), which describes the v1 wire as currently implemented.
-The ingest WebSocket (`/ingest`, binary PCM) is **out of scope** and unchanged.
+**Status: implemented.** This spec defines the control contract between `earsd` and every
+frontend, and is the implemented wire — it supersedes the v1 flat-`cmd` protocol
+[`capture-daemon.md`](capture-daemon.md) used to describe (that doc now defers here for
+everything but ingest). The golden wire fixtures both codecs are tested against live in
+`shared/protocol-fixtures/control-v2.json`. The ingest WebSocket (`/ingest`, binary PCM) is
+**out of scope** and unchanged.
 
 **No backwards compatibility.** There is no external v1 usage: every client lives in this repo
 and moves in lockstep. v2 **replaces** the v1 wire outright — the flat-`cmd` envelope, FIFO

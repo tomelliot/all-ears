@@ -56,6 +56,11 @@ struct Transcribe: AsyncParsableCommand {
     name: .customLong("session"), help: "Resolve range, sources, and vocab from a session id.")
   var session: String?
 
+  @Option(
+    name: .customLong("meeting"),
+    help: "Union a meeting's transcription intervals into one transcript (meeting id).")
+  var meeting: String?
+
   @Option(name: .customLong("source"), help: "Source(s) to transcribe; repeatable.")
   var sources: [String] = []
 
@@ -89,9 +94,10 @@ struct Transcribe: AsyncParsableCommand {
       // Follow is attach-and-tail; batch is resolve-a-range-and-exit. The
       // flags that shape a batch range make no sense here, so mixing them
       // is a precise error rather than a silent ignore.
-      guard last == nil, from == nil, to == nil, session == nil, sources.isEmpty else {
+      guard last == nil, from == nil, to == nil, session == nil, meeting == nil, sources.isEmpty
+      else {
         throw ValidationError(
-          "--follow cannot be combined with --last/--from/--to/--session/--source")
+          "--follow cannot be combined with --last/--from/--to/--session/--meeting/--source")
       }
       let followExitCode = await FollowRuntime.run(
         arguments: arguments,
@@ -103,11 +109,20 @@ struct Transcribe: AsyncParsableCommand {
     guard !json else {
       throw ValidationError("--json is only meaningful with --follow")
     }
+    if meeting != nil {
+      // A meeting names its own range and sources; mixing selectors is a
+      // precise error rather than a silent ignore.
+      guard last == nil, from == nil, to == nil, session == nil, sources.isEmpty else {
+        throw ValidationError(
+          "--meeting cannot be combined with --last/--from/--to/--session/--source")
+      }
+    }
 
     let transcribeExitCode = await TranscribeRuntime.run(
       arguments: arguments,
       inputs: TranscribePipeline.Inputs(
-        last: last, from: from, to: to, session: session, sourceIDs: sources, out: out)
+        last: last, from: from, to: to, session: session, meeting: meeting, sourceIDs: sources,
+        out: out)
     )
     guard transcribeExitCode == 0 else { throw ExitCode(transcribeExitCode) }
   }

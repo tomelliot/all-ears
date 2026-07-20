@@ -23,13 +23,17 @@ struct SourceTranscription {
 enum TranscriptAssembly {
   /// Speaker label for a source with no diarization stage (not implemented
   /// yet -- see `docs/specs/model-interface.md`'s `Diarizer`
-  /// protocol, out of scope for this pass): `mic` maps to `You` per
-  /// `docs/data-formats.md`'s speaker-attribution rule; any other source
-  /// (a future `app:`/`system`/`browser:` capture) is labelled with its own
-  /// raw source id, a defensible placeholder until per-speaker diarization
-  /// exists to split a multi-speaker source into `Speaker N` labels.
-  static func speakerLabel(for sourceID: SourceID) -> String {
-    sourceID == SourceID("mic") ? "You" : sourceID.rawValue
+  /// protocol, out of scope for this pass): a `speakers` name-map entry
+  /// (`docs/data-formats.md`'s `[speakers]` -- e.g. a meeting roster's
+  /// attendee names) wins; otherwise `mic` maps to `You` per the
+  /// source-level attribution rule; any other source is labelled with its
+  /// own raw source id, a defensible placeholder until per-speaker
+  /// diarization exists.
+  static func speakerLabel(
+    for sourceID: SourceID, speakers: [String: String] = [:]
+  ) -> String {
+    if let name = speakers[sourceID.rawValue] { return name }
+    return sourceID == SourceID("mic") ? "You" : sourceID.rawValue
   }
 
   static func assemble(
@@ -37,6 +41,8 @@ enum TranscriptAssembly {
     transcriptions: [SourceTranscription],
     requested: TimeRange,
     sessionIdentifier: String,
+    meeting: String? = nil,
+    speakers: [String: String] = [:],
     model: TranscriptModelInfo,
     generated: Instant,
     speechSeconds: Double
@@ -47,7 +53,7 @@ enum TranscriptAssembly {
         turns.append(
           TranscriptSegment(
             source: transcription.sourceID,
-            speaker: speakerLabel(for: transcription.sourceID),
+            speaker: speakerLabel(for: transcription.sourceID, speakers: speakers),
             segment: segment,
             sourceProvenance: false
           ))
@@ -67,6 +73,7 @@ enum TranscriptAssembly {
       schema: 1,
       kind: .transcript,
       session: sessionIdentifier,
+      meeting: meeting,
       sources: sourceIDs,
       range: requested,
       model: model,

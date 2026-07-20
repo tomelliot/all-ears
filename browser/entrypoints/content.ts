@@ -67,6 +67,14 @@ function relay(msg: MainMessage, port: ReconnectingPort, platforms: Map<string, 
   switch (msg.kind) {
     case "participant-joined":
       platforms.set(msg.participantId, msg.platform);
+      // Forward identity (display name included) so the background can
+      // upsert the daemon meeting's attendee roster.
+      port.post({
+        type: "joined",
+        participantId: msg.participantId,
+        platform: msg.platform,
+        ...(msg.displayName ? { displayName: msg.displayName } : {}),
+      });
       console.log(`[ears/relay] joined ${msg.participantId} gen${msg.generation} (${msg.platform})`);
       break;
     case "participant-left":

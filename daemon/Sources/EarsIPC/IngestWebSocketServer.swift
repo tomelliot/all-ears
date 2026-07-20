@@ -21,11 +21,11 @@ import Foundation
 /// ## Ingest-only
 ///
 /// This WebSocket accepts only `ingest.open`/`ingest.close` text frames
-/// (decoded as the same `ControlRequest`/`ControlResponse` Codable types the
-/// Unix socket uses) and binary PCM frames. Every other `cmd` — including
-/// `subscribe` — is rejected: the daemon's control plane stays on the
-/// privileged Unix socket, so an allowed Origin still cannot drive the
-/// daemon from a web page.
+/// (the v1-era flat-`cmd` `IngestRequest`/`ControlResponse` shapes — the
+/// ingest contract is explicitly out of control protocol v2's scope and
+/// unchanged) and binary PCM frames. Every other `cmd` is rejected: the
+/// daemon's control plane lives on its own transports, so an allowed Origin
+/// still cannot drive the daemon from this endpoint.
 ///
 /// ## Domain logic lives elsewhere
 ///
@@ -206,13 +206,14 @@ public actor IngestWebSocketServer {
     _ text: String, socket: any SocketConnection, openStreams: inout [String: OpenStream]
   ) async {
     guard let data = text.data(using: .utf8),
-      let request = try? decoder.decode(ControlRequest.self, from: data)
+      let request = try? decoder.decode(IngestRequest.self, from: data)
     else {
-      try? await socket.send(WebSocketFrameWriter.text(failureText("unrecognised request")))
+      try? await socket.send(
+        WebSocketFrameWriter.text(failureText("unsupported cmd on the ingest WebSocket")))
       return
     }
     switch request {
-    case .ingestOpen(let source, let format):
+    case .open(let source, let format):
       do {
         let streamID = try await openHandler(source, format)
         openStreams[streamID] = OpenStream(format: format)
@@ -224,16 +225,11 @@ public actor IngestWebSocketServer {
           WebSocketFrameWriter.text(
             replyText(ControlResponse<IngestOpenData>.failure(ControlError("\(error)")))))
       }
-    case .ingestClose(let streamID):
+    case .close(let streamID):
       openStreams.removeValue(forKey: streamID)
       await closeHandler(streamID)
       try? await socket.send(
         WebSocketFrameWriter.text(replyText(ControlResponse<EmptyData>.success(EmptyData()))))
-    default:
-      // Ingest-only: every non-ingest cmd is refused, `subscribe` included —
-      // the control plane stays on the privileged Unix socket.
-      try? await socket.send(
-        WebSocketFrameWriter.text(failureText("unsupported cmd on the ingest WebSocket")))
     }
   }
 

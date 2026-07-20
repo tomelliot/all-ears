@@ -1,143 +1,78 @@
 import EarsCore
 import Foundation
 
-/// The control-socket client: connects to a daemon's Unix domain socket, sends
-/// one ``ControlRequest`` at a time and awaits its typed ``ControlResponse``,
-/// or subscribes and yields decoded ``EarsEvent``s.
+/// The v2 control client: connects to a daemon's Unix domain socket, performs
+/// the `hello` handshake, sends id-correlated requests, and (optionally)
+/// subscribes to the live feed — all over one connection, because with
+/// correlation ids a subscribed connection may keep issuing requests.
 ///
-/// ## One outstanding request per connection
+/// ## Correlation
 ///
-/// The wire protocol has no request-id/correlation field — neither
-/// ``ControlRequest`` nor ``ControlResponse`` carries one, and the spec's
-/// examples are strictly one request then its one response. A client therefore
-/// cannot match responses to requests if it pipelines several; the only sound
-/// rule is to send one request and await its response before sending the next.
-///
-/// That rule is the intended calling convention (a real caller like the
-/// `ears` CLI issues one command, awaits it, then issues the next), but it is
-/// also enforced defensively inside ``send(_:expecting:)`` via an internal
-/// FIFO lock (see ``withRequestLock(_:)``), rather than left to Swift actor
-/// isolation. Actor methods are *reentrant* at `await` suspension points, so
-/// two overlapping `send` calls are not automatically serialized by actor
-/// isolation alone — without the explicit lock, a second call's wait for a
-/// reply can silently displace the first's, leaking its continuation and
-/// hanging that call forever. The lock makes concurrent misuse merely queue
-/// (safe, if not the documented usage pattern) instead of deadlocking.
-///
-/// ``subscribe(_:)`` is terminal (see ``ControlSocketServer``): after it the
-/// connection is an event stream. Calling ``send(_:expecting:)`` afterward — or
-/// calling ``subscribe(_:)`` a second time — throws a clear
-/// ``SocketTransportError`` rather than risking the same kind of hang: it
-/// waits for any request already in flight to finish, then permanently claims
-/// the read side, so a subsequent misuse fails fast instead of deadlocking.
+/// Every request gets a fresh integer id and a pending continuation keyed by
+/// it; a single reader loop routes each inbound line by shape — `id` present
+/// ⇒ a response resolved against the pending map, `event` present ⇒ a
+/// notification yielded to the subscription stream. Out-of-order completion
+/// is therefore fine by construction; a disconnect fails every pending
+/// request instead of stranding them.
 public actor ControlSocketClient {
   private let connection: any SocketConnection
   private let encoder = JSONEncoder()
   private let decoder = JSONDecoder()
 
   private var framer = LineFramer()
-  private var lineBuffer: [[UInt8]] = []
-  private var lineWaiter: CheckedContinuation<[UInt8]?, Never>?
+  private var nextID: Int64 = 0
+  private var pending: [RequestID: CheckedContinuation<Data, any Error>] = [:]
+  private var eventContinuation: AsyncStream<EventFrame>.Continuation?
   private var readerFinished = false
-  private var subscribed = false
 
-  /// Whether a `send`/`subscribe` critical section currently holds the request
-  /// lock, and the FIFO of callers waiting to acquire it next. See
-  /// ``withRequestLock(_:)``.
-  private var requestLockHeld = false
-  private var requestLockWaiters: [CheckedContinuation<Void, Never>] = []
-
-  /// Wrap an established connection (used with a fake transport in tests, and
-  /// by ``connect(toPath:)`` for the real one).
+  /// Wrap an established connection (a fake transport in tests,
+  /// ``connect(toPath:)``'s real one otherwise).
   public init(connection: any SocketConnection) {
     self.connection = connection
     Task { await self.runReadLoop() }
   }
 
   /// Connect to a daemon listening at `path`. Throws ``SocketTransportError``
-  /// promptly if nothing is listening there.
+  /// promptly if nothing is listening there. The caller still must
+  /// ``hello(client:)`` before anything else — the daemon requires it.
   public static func connect(toPath path: String) async throws -> ControlSocketClient {
     let connection = try await NetworkSocketConnection.connect(toPath: path)
     return ControlSocketClient(connection: connection)
   }
 
-  /// Send one request and await its typed response. Concurrent calls on the
-  /// same client queue in FIFO order (see the type's doc comment) rather than
-  /// racing on the wire or deadlocking. Throws if ``subscribe(_:)`` has
-  /// already transitioned this connection to event-stream mode.
-  public func send<Payload>(
-    _ request: ControlRequest, expecting: Payload.Type
-  ) async throws -> ControlResponse<Payload> {
-    try requireNotSubscribed()
-    return try await withRequestLock {
-      try requireNotSubscribed()
-      try await connection.send(LineFramer.encodeLine(request, using: encoder))
-      guard let line = await nextLine() else {
-        throw SocketTransportError.connectionFailed(
-          "connection closed before a response arrived")
-      }
-      return try decoder.decode(ControlResponse<Payload>.self, from: Data(line))
-    }
+  /// The mandatory first request on every connection.
+  @discardableResult
+  public func hello(client: String) async throws -> HelloResult {
+    let id = allocateID()
+    let frame = ControlRequestFrame.hello(id: id, params: HelloParams(client: client))
+    let data = try await roundTrip(frame, id: id)
+    return try decoder.decode(ControlResponseFrame<HelloResult>.self, from: data).get()
   }
 
-  private func requireNotSubscribed() throws {
-    guard !subscribed else {
-      throw SocketTransportError.connectionFailed(
-        "send(_:expecting:) called after subscribe(_:) put this connection in event-stream mode")
-    }
+  /// Send one call and await its typed result, throwing the response's
+  /// ``WireError`` on an error frame.
+  public func send<Payload: Codable & Sendable & Hashable>(
+    _ call: ControlCall, expecting: Payload.Type
+  ) async throws -> Payload {
+    let id = allocateID()
+    let data = try await roundTrip(.call(id: id, call: call), id: id)
+    return try decoder.decode(ControlResponseFrame<Payload>.self, from: data).get()
   }
 
-  /// Runs `body` as a critical section admitting only one caller at a time,
-  /// queueing others in FIFO arrival order. This is what makes ``send(_:expecting:)``
-  /// safe under concurrent calls: without it, two callers could both reach
-  /// the inbound-line wait before either's response arrives, and the second's
-  /// wait would silently replace the first's, orphaning it forever (a real
-  /// hang this type shipped with once, before this lock was added).
-  private func withRequestLock<T>(_ body: () async throws -> T) async rethrows -> T {
-    await acquireRequestLock()
-    defer { releaseRequestLock() }
-    return try await body()
-  }
-
-  private func acquireRequestLock() async {
-    if requestLockHeld {
-      await withCheckedContinuation { requestLockWaiters.append($0) }
-    } else {
-      requestLockHeld = true
-    }
-  }
-
-  private func releaseRequestLock() {
-    if !requestLockWaiters.isEmpty {
-      requestLockWaiters.removeFirst().resume()  // ownership passes; stays held
-    } else {
-      requestLockHeld = false
-    }
-  }
-
-  /// Switch this connection into event-stream mode and yield decoded events
-  /// until the connection closes. Terminal: waits for any ``send(_:expecting:)``
-  /// already in flight to finish, then permanently claims the read side, so a
-  /// `send` (or a second `subscribe`) issued after this returns fails fast via
-  /// ``requireNotSubscribed()`` instead of racing or hanging. Cancelling the
-  /// returned stream stops decoding but does not itself close the connection —
-  /// call ``close()`` for that.
-  public func subscribe(_ request: SubscribeRequest) async throws -> AsyncStream<EarsEvent> {
-    try requireNotSubscribed()
-    await acquireRequestLock()  // wait for any in-flight send; deliberately never released
-    subscribed = true
-    try await connection.send(LineFramer.encodeLine(request, using: encoder))
-    return AsyncStream { continuation in
-      let task = Task {
-        while let line = await self.nextLine() {
-          if let event = try? JSONDecoder().decode(EarsEvent.self, from: Data(line)) {
-            continuation.yield(event)
-          }
-        }
-        continuation.finish()
-      }
-      continuation.onTermination = { _ in task.cancel() }
-    }
+  /// Subscribe: returns the state snapshot and the notification stream.
+  /// The stream finishes when the connection closes; cancelling it stops
+  /// decoding but does not itself close the connection — call ``close()``.
+  public func subscribe(
+    _ params: SubscribeParams = SubscribeParams()
+  ) async throws -> (snapshot: SnapshotData, events: AsyncStream<EventFrame>) {
+    // The stream exists before the request goes out, so an event delivered
+    // between the daemon registering the subscription and the snapshot
+    // response arriving is buffered, not lost.
+    let (stream, continuation) = AsyncStream.makeStream(
+      of: EventFrame.self, bufferingPolicy: .unbounded)
+    eventContinuation = continuation
+    let snapshot = try await send(.subscribe(params), expecting: SnapshotData.self)
+    return (snapshot, stream)
   }
 
   /// Close the underlying connection.
@@ -145,42 +80,67 @@ public actor ControlSocketClient {
     await connection.close()
   }
 
-  // MARK: - Inbound line handoff
+  // MARK: - Internals
+
+  private func allocateID() -> RequestID {
+    nextID += 1
+    return .int(nextID)
+  }
+
+  private func roundTrip(_ frame: ControlRequestFrame, id: RequestID) async throws -> Data {
+    guard !readerFinished else {
+      throw SocketTransportError.connectionFailed("connection is closed")
+    }
+    let line = try LineFramer.encodeLine(frame, using: encoder)
+    return try await withCheckedThrowingContinuation { continuation in
+      pending[id] = continuation
+      Task {
+        do {
+          try await self.connection.send(line)
+        } catch {
+          await self.fail(id: id, with: error)
+        }
+      }
+    }
+  }
+
+  private func fail(id: RequestID, with error: any Error) {
+    pending.removeValue(forKey: id)?.resume(throwing: error)
+  }
 
   private func runReadLoop() async {
     for await chunk in connection.inbound {
-      let lines = framer.append(chunk)
-      if !lines.isEmpty { deliver(lines) }
+      for line in framer.append(chunk) {
+        route(Data(line))
+      }
     }
     readerFinished = true
-    wakeWaiter()
-  }
-
-  private func deliver(_ lines: [[UInt8]]) {
-    lineBuffer.append(contentsOf: lines)
-    wakeWaiter()
-  }
-
-  /// The next complete inbound line, or `nil` once the connection has closed
-  /// and no buffered lines remain. At most one waiter exists at a time: the
-  /// request lock serializes `send` callers, and `subscribe` only starts
-  /// pulling lines after acquiring (and never releasing) that same lock.
-  private func nextLine() async -> [UInt8]? {
-    if !lineBuffer.isEmpty { return lineBuffer.removeFirst() }
-    if readerFinished { return nil }
-    return await withCheckedContinuation { continuation in
-      lineWaiter = continuation
+    let stranded = pending
+    pending = [:]
+    for (_, continuation) in stranded {
+      continuation.resume(
+        throwing: SocketTransportError.connectionFailed(
+          "connection closed before a response arrived"))
     }
+    eventContinuation?.finish()
+    eventContinuation = nil
   }
 
-  private func wakeWaiter() {
-    guard let waiter = lineWaiter else { return }
-    if !lineBuffer.isEmpty {
-      lineWaiter = nil
-      waiter.resume(returning: lineBuffer.removeFirst())
-    } else if readerFinished {
-      lineWaiter = nil
-      waiter.resume(returning: nil)
+  /// Routes one inbound line by shape: `id` ⇒ response, `event` ⇒
+  /// notification. Unroutable lines are dropped (nothing useful to do with
+  /// them client-side).
+  private func route(_ data: Data) {
+    struct Peek: Decodable {
+      var id: RequestID?
+      var event: EventKind?
+    }
+    guard let peek = try? decoder.decode(Peek.self, from: data) else { return }
+    if let id = peek.id, let continuation = pending.removeValue(forKey: id) {
+      continuation.resume(returning: data)
+      return
+    }
+    if peek.event != nil, let frame = try? decoder.decode(EventFrame.self, from: data) {
+      eventContinuation?.yield(frame)
     }
   }
 }

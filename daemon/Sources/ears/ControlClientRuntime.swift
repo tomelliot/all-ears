@@ -1,3 +1,4 @@
+import ArgumentParser
 import EarsConfig
 import EarsCore
 import EarsIPC
@@ -14,13 +15,16 @@ struct ConfigResolutionError: Error, CustomStringConvertible {
 /// socket from the same layered config every tool reads, connect, and run
 /// one request -- kept out of each `ParsableCommand` so those stay thin.
 enum ControlClientRuntime {
+  /// What every `hello` from this tool identifies itself as.
+  static let clientName = "ears/0.1.0"
+
   /// Resolves `socket_path` from config (the same precedence/defaults
   /// `EarsCLI` and `earsd` use -- `Phase0ConfigSchema`'s shared keys, which
-  /// already cover `data_root`/`socket_path`) and connects. On any failure
-  /// (bad config, unreachable daemon) this writes a clear message to stderr
-  /// and returns `nil`, so a subcommand can exit non-zero without dumping a
-  /// raw Swift error. `debug` traces each resolution/connection step when
-  /// `--verbose` is set.
+  /// already cover `data_root`/`socket_path`), connects, and performs the
+  /// mandatory `hello` handshake. On any failure (bad config, unreachable
+  /// daemon) this writes a clear message to stderr and returns `nil`, so a
+  /// subcommand can exit non-zero without dumping a raw Swift error. `debug`
+  /// traces each resolution/connection step when `--verbose` is set.
   static func connect(
     configFlag: String?, debug: DebugLog = DebugLog(enabled: false)
   ) async -> ControlSocketClient? {
@@ -34,7 +38,12 @@ enum ControlClientRuntime {
       debug.log("resolved control socket path: \(path)")
       do {
         let client = try await ControlSocketClient.connect(toPath: path)
-        debug.log("connected to earsd at \(path)")
+        // `hello` MUST be the first request on every v2 connection.
+        let hello = try await client.hello(client: clientName)
+        debug.log(
+          "connected to \(hello.daemon) at \(path) "
+            + "(boot \(hello.bootID), capabilities: \(hello.capabilities.map(\.rawValue).joined(separator: ",")))"
+        )
         return client
       } catch {
         debug.log("connect failed: \(error)")
@@ -45,21 +54,25 @@ enum ControlClientRuntime {
     }
   }
 
-  /// `ControlSocketClient.send` plus `--verbose` tracing of the request and
-  /// reply JSON (and any transport failure) -- the one seam every
-  /// request/response subcommand routes through, so none of them re-implement
-  /// the trace lines.
+  /// `ControlSocketClient.send` plus `--verbose` tracing and uniform wire
+  /// error rendering -- the one seam every request/response subcommand
+  /// routes through. A ``WireError`` becomes a printed
+  /// `error [<code>]: <message>` and a thrown exit code 1.
   static func send<Payload: Codable & Sendable & Hashable>(
-    _ request: ControlRequest,
+    _ call: ControlCall,
     expecting: Payload.Type,
     via client: ControlSocketClient,
     debug: DebugLog
-  ) async throws -> ControlResponse<Payload> {
-    debug.log("sending request: \(debug.json(request))")
+  ) async throws -> Payload {
+    debug.log("sending request: \(call.method.rawValue)")
     do {
-      let response = try await client.send(request, expecting: Payload.self)
-      debug.log("received reply: \(debug.json(response))")
-      return response
+      let result = try await client.send(call, expecting: Payload.self)
+      debug.log("received result: \(debug.json(result))")
+      return result
+    } catch let error as WireError {
+      debug.log("request failed: [\(error.code.rawValue)] \(error.message)")
+      writeStderr("error [\(error.code.rawValue)]: \(error.message)")
+      throw ExitCode(1)
     } catch {
       debug.log("request failed: \(error)")
       throw error
@@ -77,6 +90,22 @@ enum ControlClientRuntime {
       let configured = stringValue(loaded.value, ["socket_path"])
       let path = configured.isEmpty ? DefaultSocketPath.resolve(dataRoot: dataRoot) : configured
       return .success(path)
+    case .failure(let error):
+      return .failure(ConfigResolutionError(description: describe(error)))
+    }
+  }
+
+  /// Resolves `data_root` from the same layered config, for the daemon-free
+  /// disk reads (`ears meeting list --all`).
+  static func resolveDataRoot(configFlag: String?) -> Result<String, ConfigResolutionError> {
+    let environment = ProcessInfo.processInfo.environment
+    let homeDirectory = FileManager.default.homeDirectoryForCurrentUser.path
+    let inputs = ConfigLoadInputs(
+      configFlag: configFlag, environment: environment, homeDirectory: homeDirectory)
+    switch loadConfig(inputs) {
+    case .success(let loaded):
+      let dataRoot = stringValue(loaded.value, ["data_root"])
+      return .success(dataRoot.isEmpty ? "." : dataRoot)
     case .failure(let error):
       return .failure(ConfigResolutionError(description: describe(error)))
     }

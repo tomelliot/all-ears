@@ -204,16 +204,16 @@ struct TranscribeFollowPipelineTests {
       requestedStart: now, sourceIDs: [sourceID])
     let events = harness.published.withLock { $0 }
     #expect(events.count == 2)
-    guard case .segment(let session, let speaker, let start, let end, let text) = events.first
+    guard case .segment(let segment) = events.first
     else {
       Issue.record("expected a segment event, got \(String(describing: events.first))")
       return
     }
-    #expect(session == sessionID)
-    #expect(speaker == "You")
-    #expect(start == 0)
-    #expect(abs(end - 1.5) < 0.001)
-    #expect(text == "hello world")
+    #expect(segment.session == sessionID)
+    #expect(segment.speaker == "You")
+    #expect(segment.start == 0)
+    #expect(abs(segment.end - 1.5) < 0.001)
+    #expect(segment.text == "hello world")
 
     // Transcript file: the same renderer/format batch mode writes, complete
     // and well-formed at exit.
@@ -392,13 +392,14 @@ struct TranscribeFollowPipelineTests {
     #expect(await run.value == 0)
 
     let line = try #require(harness.stdoutLines.withLock { $0.first })
-    let decoded = try JSONDecoder().decode(EarsEvent.self, from: Data(line.utf8))
-    guard case .segment(_, let speaker, _, _, let text) = decoded else {
+    // --json emits the live feed's exact wire shape: the v2 EventFrame.
+    let decoded = try JSONDecoder().decode(EventFrame.self, from: Data(line.utf8))
+    guard case .segment(let segment) = decoded.event else {
       Issue.record("expected a segment event line, got \(decoded)")
       return
     }
-    #expect(speaker == "You")
-    #expect(text == "structured output")
+    #expect(segment.speaker == "You")
+    #expect(segment.text == "structured output")
   }
 
   @Test("an unknown source is a precise, non-zero error")

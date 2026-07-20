@@ -176,9 +176,10 @@ struct CaptureActorTests {
 
     // Each transition is stamped on the buffer-derived timeline: speech at the
     // first speech span's start (0 within its fully-voiced buffer), silence at
-    // its buffer's start.
+    // its buffer's start. (`source` runtime-state events also flow through the
+    // sink in v2 — filtered out here, this test is about vad coarseness.)
     #expect(
-      recorded.withLock { $0 } == [
+      recorded.withLock { $0 }.filter { $0.kind == .vad } == [
         .vad(source: "mic", state: .speech, t: Instant(secondsSinceEpoch: startEpoch)),
         .vad(source: "mic", state: .silence, t: Instant(secondsSinceEpoch: startEpoch + 1.0)),
         .vad(source: "mic", state: .speech, t: Instant(secondsSinceEpoch: startEpoch + 2.0)),
@@ -199,7 +200,7 @@ struct CaptureActorTests {
     try await actor.start()
     await actor.drainForTesting()
 
-    #expect(recorded.withLock { $0 }.isEmpty)
+    #expect(recorded.withLock { $0 }.filter { $0.kind == .vad }.isEmpty)
   }
 
   @Test("pause/resume re-announces speech instead of assuming continuity across the gap")
@@ -222,7 +223,7 @@ struct CaptureActorTests {
     try await actor.resume()
     await actor.drainForTesting()
 
-    let events = recorded.withLock { $0 }
+    let events = recorded.withLock { $0 }.filter { $0.kind == .vad }
     #expect(events.count == 2)
     for event in events {
       guard case .vad(let source, let state, _) = event else {
