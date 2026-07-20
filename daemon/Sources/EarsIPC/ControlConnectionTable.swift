@@ -1,28 +1,30 @@
 import EarsCore
 import Foundation
 
-/// The transport-agnostic core of a control-plane server's per-connection
+/// The transport-agnostic core of a v2 control server's per-connection
 /// state: bounded outbound queues with drop-oldest backpressure, the
-/// "subscribe is terminal" subscription state, and `EventFilter`-matched
-/// pub/sub fan-out — everything ``ControlSocketServer`` (NDJSON over the Unix
-/// socket) and ``ControlWebSocketServer`` (JSON text frames over the loopback
-/// WebSocket) share, factored out so a backpressure or event-filter change
-/// never needs two hand-synced implementations.
+/// `hello`-handshake and subscription state, and event fan-out — everything
+/// ``ControlSocketServer`` (NDJSON over the Unix socket) and
+/// ``ControlWebSocketServer`` (JSON text frames over the loopback WebSocket)
+/// share, factored out so a backpressure or filter change never needs two
+/// hand-synced implementations.
 ///
 /// Parameterized per connection only by "how does one encoded JSON payload
-/// become wire bytes" (`encodeWire`: append `\n` for NDJSON, wrap in an RFC
-/// 6455 text frame for WebSocket) and "how do bytes reach the peer" (`send`).
+/// become wire bytes" (`encodeWire`) and "how do bytes reach the peer"
+/// (`send`). The *capability tier* is fixed per table (one table per
+/// transport, and privilege differs by transport, not by dialect).
 ///
 /// Not an actor: each server actor owns one instance inside its own
 /// isolation, and every method here is synchronous — the async parts
 /// (awaiting the request handler, reading the transport) stay in the owning
-/// actor, so no `inout` state ever spans a suspension point.
+/// actor.
 struct ControlConnectionTable {
   struct Connection {
     let outbound: AsyncStream<[UInt8]>.Continuation
     let writer: Task<Void, Never>
     let encodeWire: @Sendable (Data) -> [UInt8]
-    var subscription: SubscribeRequest?
+    var helloDone = false
+    var subscription: SubscribeParams?
   }
 
   private var connections: [Int: Connection] = [:]
@@ -65,38 +67,50 @@ struct ControlConnectionTable {
       }
     }
     connections[id] = Connection(
-      outbound: continuation, writer: writer, encodeWire: encodeWire, subscription: nil)
+      outbound: continuation, writer: writer, encodeWire: encodeWire)
     return id
   }
 
-  func isSubscribed(_ id: Int) -> Bool {
-    connections[id]?.subscription != nil
+  func helloDone(_ id: Int) -> Bool {
+    connections[id]?.helloDone ?? false
   }
 
-  /// Transitions `id` into event-stream mode ("subscribe is terminal").
-  mutating func setSubscription(_ subscription: SubscribeRequest, for id: Int) {
+  /// Marks the handshake complete — every later request on this connection
+  /// skips the `hello_required` gate.
+  mutating func markHello(_ id: Int) {
+    connections[id]?.helloDone = true
+  }
+
+  /// Registers (or replaces) this connection's subscription. Unlike v1,
+  /// subscribing is not terminal — the connection keeps serving requests.
+  mutating func setSubscription(_ subscription: SubscribeParams, for id: Int) {
     connections[id]?.subscription = subscription
   }
 
-  /// Fan `event` out to every subscribed connection whose filter matches,
-  /// encoding the JSON once (wire framing is still per connection). Dropped
-  /// deliveries (full queue) are counted and logged.
-  mutating func publish(_ event: EarsEvent, using encoder: JSONEncoder) {
+  /// Fan `frame` out to every subscribed connection whose filter matches,
+  /// encoding the JSON once (wire framing is still per connection). State
+  /// frames are always delivered to every subscriber — unconditional
+  /// delivery is what keeps `rev` contiguous; telemetry frames pass through
+  /// the subscription's kind/source filter. Dropped deliveries (full queue)
+  /// are counted and logged.
+  mutating func publish(_ frame: EventFrame, using encoder: JSONEncoder) {
     var encoded: Data?
     for (id, connection) in connections {
       guard let subscription = connection.subscription,
-        EventFilter.matches(event, subscription)
+        EventFilter.matches(frame, subscription)
       else { continue }
-      if encoded == nil { encoded = try? encoder.encode(event) }
+      if encoded == nil { encoded = try? encoder.encode(frame) }
       guard let payload = encoded else { return }
       deliver(payload, to: id, what: "event")
     }
   }
 
-  /// Queues one control reply for `id`.
-  mutating func enqueue(_ reply: ControlReply, to id: Int, using encoder: JSONEncoder) {
-    guard let payload = try? reply.encoded(using: encoder) else { return }
-    deliver(payload, to: id, what: "reply")
+  /// Queues one reply frame for `id`'s request on connection `connectionID`.
+  mutating func respond(
+    _ reply: ControlReply, id: RequestID, to connectionID: Int, using encoder: JSONEncoder
+  ) {
+    guard let payload = try? reply.encoded(id: id, using: encoder) else { return }
+    deliver(payload, to: connectionID, what: "reply")
   }
 
   private mutating func deliver(_ payload: Data, to id: Int, what: String) {
@@ -128,16 +142,108 @@ struct ControlConnectionTable {
   }
 }
 
-/// Minimal decode to read only the `cmd` discriminator, distinguishing a
-/// `subscribe` (which becomes a ``SubscribeRequest``) from the
-/// ``ControlRequest`` commands without committing to either decode first —
-/// shared by both control-plane transports.
-enum ControlCommandPeek {
-  private struct Peek: Decodable {
-    let cmd: String
+/// The daemon identity a `hello` result advertises — one value shared by
+/// both control transports.
+public struct ControlServerIdentity: Sendable {
+  /// e.g. `earsd 0.9.0`.
+  public var daemon: String
+  /// Fresh per daemon start; revision counters are scoped to it.
+  public var bootID: String
+
+  public init(daemon: String, bootID: String) {
+    self.daemon = daemon
+    self.bootID = bootID
+  }
+}
+
+/// What to do with one inbound control text payload — the transport-agnostic
+/// protocol state machine (`hello` gating, capability enforcement, envelope
+/// validation), factored out of both servers as a pure decision so it is
+/// unit-testable with no sockets or actors. The owning server actor applies
+/// the decision: mutate its table, call its handler, enqueue the reply.
+enum ControlFrameDecision {
+  /// Reply immediately (a protocol-level error, or the hello result).
+  case respond(id: RequestID, ControlReply)
+  /// A valid `hello`: mark the connection and reply with `helloResult`.
+  case completeHello(id: RequestID)
+  /// A valid `subscribe`: register the filter *first*, then dispatch the
+  /// call to the handler for the snapshot result.
+  case subscribe(id: RequestID, SubscribeParams)
+  /// Any other valid call: dispatch to the handler.
+  case dispatch(id: RequestID, ControlCall)
+}
+
+enum ControlFrameProcessor {
+  /// Decides how to handle one inbound JSON payload given the connection's
+  /// handshake state and its transport's capability tier.
+  static func decide(
+    _ data: Data,
+    helloDone: Bool,
+    capabilities: Set<Capability>,
+    decoder: JSONDecoder
+  ) -> ControlFrameDecision {
+    let head = try? decoder.decode(ControlRequestHead.self, from: data)
+    guard let rawMethod = head?.method, let id = head?.id else {
+      return .respond(
+        id: head?.id ?? .none,
+        .failure(.invalidRequest, "malformed request envelope: expected {id, method, params?}"))
+    }
+    guard let method = ControlMethod(rawValue: rawMethod) else {
+      return .respond(id: id, .failure(.unknownMethod, "unknown method '\(rawMethod)'"))
+    }
+
+    if method == .hello {
+      guard let frame = try? decoder.decode(ControlRequestFrame.self, from: data),
+        case .hello(_, let params) = frame
+      else {
+        return .respond(id: id, .failure(.invalidRequest, "malformed hello params"))
+      }
+      guard params.protocolVersion == ControlProtocolV2.version else {
+        return .respond(
+          id: id,
+          .failure(
+            .unsupportedProtocol,
+            "this daemon speaks protocol \(ControlProtocolV2.version)"))
+      }
+      return .completeHello(id: id)
+    }
+
+    guard helloDone else {
+      return .respond(
+        id: id, .failure(.helloRequired, "hello must be the first request on a connection"))
+    }
+    guard let capability = method.capability, capabilities.contains(capability) else {
+      return .respond(
+        id: id,
+        .failure(.notPermitted, "method '\(method.rawValue)' is not permitted on this transport"))
+    }
+
+    let call: ControlCall
+    do {
+      let frame = try decoder.decode(ControlRequestFrame.self, from: data)
+      guard case .call(_, let decoded) = frame else {
+        return .respond(id: id, .failure(.invalidRequest, "malformed request"))
+      }
+      call = decoded
+    } catch {
+      return .respond(
+        id: id, .failure(.invalidRequest, "invalid params for '\(method.rawValue)': \(error)"))
+    }
+
+    if case .subscribe(let params) = call {
+      return .subscribe(id: id, params)
+    }
+    return .dispatch(id: id, call)
   }
 
-  static func isSubscribe(_ data: Data, using decoder: JSONDecoder) -> Bool {
-    (try? decoder.decode(Peek.self, from: data))?.cmd == "subscribe"
+  /// The hello result for a connection on a transport with `capabilities`.
+  static func helloReply(
+    identity: ControlServerIdentity, capabilities: Set<Capability>
+  ) -> ControlReply {
+    ControlReply(
+      result: HelloResult(
+        daemon: identity.daemon,
+        bootID: identity.bootID,
+        capabilities: Capability.allCases.filter { capabilities.contains($0) }))
   }
 }

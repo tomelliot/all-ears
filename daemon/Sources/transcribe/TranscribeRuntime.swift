@@ -40,6 +40,7 @@ enum TranscribeRuntime {
 
     let root = loaded.value
     let dataRootPath = stringValue(root, ["data_root"])
+    let configuredSocketPath = stringValue(root, ["socket_path"])
     guard !dataRootPath.isEmpty else {
       writeStderr("error: data_root is not configured")
       return 1
@@ -50,11 +51,18 @@ enum TranscribeRuntime {
     let compute = computePreference(
       stringValue(root, ["transcribe", "compute"], default: "automatic"))
 
+    // Same precedence and default as `ears`/`earsd` — for the best-effort
+    // `job.publish` progress feed a `--meeting` run reports through.
+    let socketPath =
+      configuredSocketPath.isEmpty
+      ? DefaultSocketPath.resolve(dataRoot: dataRootPath) : configuredSocketPath
+
     return await TranscribePipeline.run(
       inputs: inputs,
       dataRoot: URL(fileURLWithPath: dataRootPath),
       outputRoot: URL(fileURLWithPath: outputRootPath.isEmpty ? "." : outputRootPath),
       backendName: backendName,
+      socketPath: socketPath,
       dependencies: .production(
         loadOptions: LoadOptions(
           modelIdentifier: modelIdentifier.isEmpty ? nil : modelIdentifier,

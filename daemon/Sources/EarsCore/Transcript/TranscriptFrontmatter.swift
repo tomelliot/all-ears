@@ -25,6 +25,10 @@ public struct TranscriptFrontmatter: Sendable, Hashable {
   public var kind: TranscriptKind
   /// The session id, e.g. `2026-07-17T10-30-00Z_standup` (``SessionDescriptor/id``).
   public var session: String
+  /// The meeting UUID this transcript unions the intervals of
+  /// (`transcribe --meeting`); `nil` for plain range/session transcripts.
+  /// Rendered as a `meeting:` line right after `session`.
+  public var meeting: String?
   public var sources: [SourceID]
   public var range: TimeRange
   public var model: TranscriptModelInfo
@@ -50,6 +54,7 @@ public struct TranscriptFrontmatter: Sendable, Hashable {
     schema: Int,
     kind: TranscriptKind,
     session: String,
+    meeting: String? = nil,
     sources: [SourceID],
     range: TimeRange,
     model: TranscriptModelInfo,
@@ -65,6 +70,7 @@ public struct TranscriptFrontmatter: Sendable, Hashable {
     self.schema = schema
     self.kind = kind
     self.session = session
+    self.meeting = meeting
     self.sources = sources
     self.range = range
     self.model = model

@@ -9,11 +9,11 @@
 /// range rather than "how long ago" (e.g. a future non-CLI trigger).
 ///
 /// Exactly one form is valid on the wire: `last_seconds`, or both `start`
-/// and `end` — never both, never neither. ``ControlRequest``'s decoder
+/// and `end` — never both, never neither. ``ControlRequestFrame``'s decoder
 /// (which owns the actual `Codable` logic, since these fields sit flat
-/// alongside `mark`'s `sources`/`slug` rather than nested under a `range`
-/// key) enforces this and throws a `DecodingError` otherwise, rather than
-/// silently preferring one form.
+/// alongside `mark`'s `sources`/`slug` inside the params object rather than
+/// nested under a `range` key) enforces this and throws a `DecodingError`
+/// otherwise, rather than silently preferring one form.
 public enum MarkRange: Sendable, Hashable {
   /// The last `seconds` up to now (`ears mark --last 30m` → `1800`).
   case lastSeconds(Double)

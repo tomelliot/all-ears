@@ -155,7 +155,7 @@ struct IngestWebSocketServerTests {
     #expect(line.contains("101"))
 
     let format = AudioFormatSpec(sampleRate: 16000, channels: 1, encoding: "pcm_s16le")
-    let openRequest = ControlRequest.ingestOpen(source: "browser:meet:jane-a1b2", format: format)
+    let openRequest = IngestRequest.open(source: "browser:meet:jane-a1b2", format: format)
     connection.feed(
       TestWebSocketClient.text(
         String(data: try JSONEncoder().encode(openRequest), encoding: .utf8)!))
@@ -274,7 +274,7 @@ struct IngestWebSocketServerTests {
 
     // The connection must still be alive and usable afterwards.
     let format = AudioFormatSpec(sampleRate: 16000, channels: 1, encoding: "pcm_s16le")
-    let openRequest = ControlRequest.ingestOpen(source: "browser:meet:jane", format: format)
+    let openRequest = IngestRequest.open(source: "browser:meet:jane", format: format)
     connection.feed(
       TestWebSocketClient.text(
         String(data: try JSONEncoder().encode(openRequest), encoding: .utf8)!))

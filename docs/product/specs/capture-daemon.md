@@ -71,37 +71,28 @@ The process tap is the most crash-prone surface. An optional design (livecaption
 - Idle (sources silent): negligible CPU beyond VAD; stable resident memory. Target a low, flat baseline with no growth over a multi-day run (no per-chunk leaks; bounded queues).
 - Memory must not scale with buffer length on disk — the buffer is files, not RAM.
 
-## Control socket protocol
+## Control protocol
 
-> **Note:** a v2 control contract — id-correlated envelope, `hello` handshake, snapshot-on-subscribe, and a daemon-owned Meeting entity — is specified in [`control-protocol.md`](control-protocol.md). It is designed but not yet implemented; this section describes the v1 wire as built, which v2 supersedes when it lands.
+The control contract — the id-correlated `{id, method, params}` envelope, the mandatory `hello`
+handshake, per-transport capability tiers, the daemon-owned **Meeting** entity, and
+snapshot-on-subscribe state sync — is specified in [`control-protocol.md`](control-protocol.md)
+(control protocol v2, the implemented wire). Identical frames are served over the Unix domain
+socket (newline-delimited JSON, full privilege) and the loopback control WebSocket
+(`[earsd.control_ws]`, `observe` + `meetings` only). This section keeps only what is *not* part
+of that contract: the audio-ingestion WebSocket, which is deliberately out of v2's scope and
+unchanged.
 
-Unix domain socket, newline-delimited JSON. Each connection is either **request/response** or, after `subscribe`, an **event stream**.
-
-### Request/response
+### Request/response (see control-protocol.md)
 
 ```jsonc
 // --> request
-{"cmd":"status"}
+{"id": 7, "method": "status"}
 // <-- response
-{"ok":true,"data":{"uptime_s":3600,"sources":[{"id":"mic","state":"capturing","codec":"aac"}]}}
+{"id": 7, "result": {"uptime_s": 3600, "sources": [{"id": "mic", "state": "capturing", "codec": "aac"}], "meetings": [], "sessions": []}}
 ```
 
-Commands:
-
-| `cmd` | Effect |
-|-------|--------|
-| `status` | Daemon + per-source state, buffer occupancy, active sessions. |
-| `sources.list` | All configured sources and state. |
-| `sources.add` / `sources.remove` | Add/remove a source at runtime. |
-| `sources.enable` / `sources.disable` | Start/stop capturing a source. |
-| `capture.pause` / `capture.resume` | Pause/resume a source or all (records a `gap`). |
-| `session.open` | Open a session: `{sources, slug, start?, vocab?}` → session id. |
-| `session.close` | Close a session by id (sets `end`, state=closed). |
-| `session.list` | Open/recent sessions. |
-| `mark` | Convenience: retroactively define a range (e.g. "last 30m") as a session. |
-| `ingest.open` / `ingest.close` | **Not usable here** — always fail clearly. Browser audio ingestion is a separate loopback WebSocket, not the Unix socket; see [Audio ingestion](#audio-ingestion) below. |
-| `segment.publish` | Publish one finalised `segment` event onto the live feed: `{session, speaker, start, end, text}`, the same fields the event carries. Sent by a `transcribe --follow` process (see [Live feed](#live-feed-pubsub)). Notification only — the daemon persists nothing and validates nothing beyond the wire shape; the durable transcript is the publisher's on-disk file. |
-| `flush` | Finalizes and indexes each enabled source's in-progress chunk, then opens a fresh one — not a bare fsync of an unindexed partial. |
+The full method table — `meeting.*` lifecycle verbs included — lives in
+[`control-protocol.md`](control-protocol.md#methods).
 
 ### Audio ingestion
 
@@ -109,7 +100,7 @@ Browser-sourced (`browser:<label>`) audio does **not** flow over the Unix contro
 
 - **Bind:** `127.0.0.1` only, never `0.0.0.0`/`::`. Serves exactly one path, `GET /ingest`; anything else gets `404`.
 - **Origin allowlist:** the WebSocket upgrade validates the handshake's `Origin` header against `[earsd.ingest_ws].allowed_origins` *before* completing it — a disallowed origin (or, with an empty allowlist, *any* origin) gets `403` and no upgrade. Browsers set `Origin` truthfully on the handshake and page content cannot forge it, so this is what keeps a random web page from streaming audio in even though the port is open.
-- **Wire protocol:** control is text frames, reusing the same `ControlRequest`/`ControlResponse` Codable types as the Unix socket — but **ingest-only**: only `ingest.open`/`ingest.close` are accepted; every other `cmd` (`subscribe` included) is rejected, so an allowed origin still cannot drive the daemon.
+- **Wire protocol:** control is text frames in the v1-era flat-`cmd` shape (`IngestRequest`/`ControlResponse`) — **ingest-only** and deliberately untouched by control protocol v2: only `ingest.open`/`ingest.close` are accepted; every other `cmd` is rejected, so an allowed origin still cannot drive the daemon from this endpoint.
 
   ```jsonc
   // text frame --> declare a stream
@@ -133,15 +124,18 @@ Full client-side detail — the browser extension's connection lifecycle, reconn
 
 ### Live feed (pub/sub)
 
+`subscribe`'s result is a **snapshot** of live state tagged with a monotonic revision; state
+events (`meeting`, `session`, `source`) arrive revision-tagged and telemetry events (`vad`,
+`segment`, `job`) untagged — see [`control-protocol.md`](control-protocol.md#state-sync).
+
 ```jsonc
-// --> {"cmd":"subscribe","events":["vad","session","segment"],"sources":["mic","app:us.zoom.xos"]}
-// <-- stream of events:
-{"ev":"vad","source":"mic","state":"speech","t":"2026-07-17T10:30:02.14Z"}
-{"ev":"session","id":"...standup","state":"open"}
-{"ev":"segment","session":"...standup","speaker":"You","start":604.1,"end":611.9,"text":"..."}  // published by a streaming transcriber
+// --> {"id": 1, "method": "subscribe", "params": {"events": ["vad", "segment"]}}
+// <-- {"id": 1, "result": {"rev": 41, "meetings": […], "sources": […], "sessions": […]}}
+{"event":"vad","params":{"source":"mic","state":"speech","t":"2026-07-17T10:30:02.14Z"}}
+{"event":"segment","params":{"session":"...standup","speaker":"You","start":604.1,"end":611.9,"text":"..."}}
 ```
 
-`segment` events originate from a `transcribe --follow` process that publishes back to the daemon (the `segment.publish` command above), letting many consumers watch one live transcript. The socket is notification only: a subscriber that connects late gets no replay — the durable transcript is the on-disk file.
+`segment` events originate from a `transcribe --follow` process that publishes back to the daemon (the `segment.publish` method), letting many consumers watch one live transcript; `job` events likewise republish `job.publish` progress from a meeting-level transcribe run. The socket is notification only: a subscriber that connects late gets the snapshot, not history — the durable record is on disk.
 
 ## `ears` — control client
 

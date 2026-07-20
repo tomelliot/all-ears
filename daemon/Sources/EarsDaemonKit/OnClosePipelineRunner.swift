@@ -54,6 +54,21 @@ public struct OnClosePipelineRunner: Sendable {
     }
   }
 
+  /// Runs a meeting-level transcribe against an ended meeting — the v2
+  /// auto-transcription trigger (`transcribe --meeting <id>` unions the
+  /// meeting's intervals into one transcript; see
+  /// `docs/product/specs/control-protocol.md`'s "Transcription output").
+  /// Only the transcribe stage runs at meeting level today; `cleanup`/
+  /// `summarize` chains stay session-path-based.
+  public func runMeetingTranscribe(meetingID: String, context: String) async {
+    let exitCode = await runProcess("transcribe", ["--meeting", meetingID])
+    if exitCode == 0 {
+      log("\(context) on_end: transcribe succeeded for meeting '\(meetingID)'")
+    } else {
+      log("\(context) on_end: transcribe failed (exit \(exitCode)) for meeting '\(meetingID)'")
+    }
+  }
+
   /// Builds each stage's argv. `transcribe` resolves the session directly;
   /// `cleanup`/`summarize` are handed the file path the *previous* stage is
   /// expected to have written, per `docs/product/specs/llm-stages.md`'s

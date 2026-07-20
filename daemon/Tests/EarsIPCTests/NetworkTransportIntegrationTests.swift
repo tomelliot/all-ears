@@ -25,15 +25,19 @@ struct NetworkTransportIntegrationTests {
   func realRoundTrip() async throws {
     let path = tempSocketPath()
     let listener = try await NetworkSocketListener.bind(toPath: path)
-    let server = ControlSocketServer(listener: listener) { request in
-      #expect(request == .flush)
-      return ControlReply(ControlResponse.success(EmptyData()))
+    let server = ControlSocketServer(
+      listener: listener, identity: ControlServerIdentity(daemon: "earsd test", bootID: "boot-net")
+    ) { call in
+      #expect(call == .flush)
+      return ControlReply(result: EmptyData())
     }
     let runner = Task { await server.run() }
 
     let client = try await ControlSocketClient.connect(toPath: path)
+    let hello = try await client.hello(client: "test/0")
+    #expect(hello.bootID == "boot-net")
     let response = try await client.send(.flush, expecting: EmptyData.self)
-    #expect(response == .success(EmptyData()))
+    #expect(response == EmptyData())
 
     await client.close()
     await server.shutdown()
@@ -45,10 +49,13 @@ struct NetworkTransportIntegrationTests {
     let path = tempSocketPath()
     let listener = try await NetworkSocketListener.bind(toPath: path)
     // Echo the requested session id back as the uptime.
-    let server = ControlSocketServer(listener: listener) { request in
-      guard case .sessionClose(let id) = request else { return ControlReply.failure("no") }
-      return ControlReply(
-        ControlResponse.success(StatusData(uptimeSeconds: Int(id) ?? -1, sources: [])))
+    let server = ControlSocketServer(
+      listener: listener, identity: ControlServerIdentity(daemon: "earsd test", bootID: "boot-net")
+    ) { call in
+      guard case .sessionClose(let id) = call else {
+        return .failure(.internalError, "no")
+      }
+      return ControlReply(result: StatusData(uptimeSeconds: Int(id) ?? -1, sources: []))
     }
     let runner = Task { await server.run() }
 
@@ -56,9 +63,10 @@ struct NetworkTransportIntegrationTests {
       for index in 0..<12 {
         group.addTask {
           let client = try await ControlSocketClient.connect(toPath: path)
+          _ = try await client.hello(client: "test/0")
           let response = try await client.send(
             .sessionClose(id: String(index)), expecting: StatusData.self)
-          #expect(response == .success(StatusData(uptimeSeconds: index, sources: [])))
+          #expect(response == StatusData(uptimeSeconds: index, sources: []))
           await client.close()
         }
       }
@@ -73,26 +81,34 @@ struct NetworkTransportIntegrationTests {
   func realSubscribe() async throws {
     let path = tempSocketPath()
     let listener = try await NetworkSocketListener.bind(toPath: path)
-    let server = ControlSocketServer(listener: listener) { _ in ControlReply.failure("no") }
+    let server = ControlSocketServer(
+      listener: listener, identity: ControlServerIdentity(daemon: "earsd test", bootID: "boot-net")
+    ) { call in
+      guard case .subscribe = call else { return .failure(.internalError, "no") }
+      return ControlReply(result: SnapshotData(rev: 5, meetings: [], sources: [], sessions: []))
+    }
     let runner = Task { await server.run() }
 
     let client = try await ControlSocketClient.connect(toPath: path)
-    let events = try await client.subscribe(SubscribeRequest(events: [.session], sources: []))
+    _ = try await client.hello(client: "test/0")
+    let (snapshot, events) = try await client.subscribe(SubscribeParams())
+    #expect(snapshot.rev == 5)
 
-    // Wait until the server has registered the subscription, then publish.
+    // The subscription is registered before the snapshot reply is sent, so
+    // it is guaranteed live by now.
     while await server.subscriberCount == 0 { await Task.yield() }
-    await server.publish(.session(id: "standup", state: .open))
-    await server.publish(.session(id: "standup", state: .closed))
+    await server.publish(EventFrame(event: .source(id: "mic", state: .paused), rev: 6))
+    await server.publish(EventFrame(event: .source(id: "mic", state: .capturing), rev: 7))
 
-    var received: [EarsEvent] = []
-    for await event in events {
-      received.append(event)
+    var received: [EventFrame] = []
+    for await frame in events {
+      received.append(frame)
       if received.count == 2 { break }
     }
     #expect(
       received == [
-        .session(id: "standup", state: .open),
-        .session(id: "standup", state: .closed),
+        EventFrame(event: .source(id: "mic", state: .paused), rev: 6),
+        EventFrame(event: .source(id: "mic", state: .capturing), rev: 7),
       ])
 
     await client.close()
@@ -112,12 +128,15 @@ struct NetworkTransportIntegrationTests {
   func shutdownClosesRealConnections() async throws {
     let path = tempSocketPath()
     let listener = try await NetworkSocketListener.bind(toPath: path)
-    let server = ControlSocketServer(listener: listener) { _ in
-      ControlReply(ControlResponse.success(EmptyData()))
+    let server = ControlSocketServer(
+      listener: listener, identity: ControlServerIdentity(daemon: "earsd test", bootID: "boot-net")
+    ) { _ in
+      ControlReply(result: EmptyData())
     }
     let runner = Task { await server.run() }
 
     let client = try await ControlSocketClient.connect(toPath: path)
+    _ = try await client.hello(client: "test/0")
     _ = try await client.send(.flush, expecting: EmptyData.self)
 
     await server.shutdown()

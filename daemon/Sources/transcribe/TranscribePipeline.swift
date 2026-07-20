@@ -62,11 +62,47 @@ enum TranscribePipeline {
     var from: String?
     var to: String?
     var session: String?
+    /// `--meeting <id>`: union the meeting's intervals into one transcript
+    /// (paused spans are skipped exactly like silence). Mutually exclusive
+    /// with every other range flag — `Transcribe` validates that before the
+    /// pipeline runs.
+    var meeting: String? = nil
     var sourceIDs: [String]
     var out: String?
   }
 
+  /// Entry point. `socketPath` (when resolvable) lets a `--meeting` run
+  /// report its lifecycle through the daemon's `job.publish` feed —
+  /// best-effort, never load-bearing.
   static func run(
+    inputs: Inputs,
+    dataRoot: URL,
+    outputRoot: URL,
+    backendName: String,
+    socketPath: String? = nil,
+    dependencies: Dependencies
+  ) async -> Int32 {
+    guard let meetingID = inputs.meeting else {
+      return await runResolved(
+        inputs: inputs, dataRoot: dataRoot, outputRoot: outputRoot, backendName: backendName,
+        dependencies: dependencies)
+    }
+    let job = JobEventPublisher(
+      socketPath: socketPath,
+      jobID: "transcribe-\(UUID().uuidString.lowercased().prefix(8))",
+      meetingID: meetingID,
+      log: dependencies.log)
+    await job.publish(state: .started)
+    let code = await runResolved(
+      inputs: inputs, dataRoot: dataRoot, outputRoot: outputRoot, backendName: backendName,
+      dependencies: dependencies)
+    await job.publish(
+      state: code == 0 ? .done : .failed, detail: code == 0 ? nil : "exit \(code)")
+    await job.shutdown()
+    return code
+  }
+
+  private static func runResolved(
     inputs: Inputs,
     dataRoot: URL,
     outputRoot: URL,
@@ -74,21 +110,56 @@ enum TranscribePipeline {
     dependencies: Dependencies
   ) async -> Int32 {
     let now = dependencies.clock.now()
+
+    // `--meeting` resolves to the meeting's interval union; every other
+    // flag combination resolves to exactly one range.
     let resolved: TranscribeRangeResolution.Resolved
-    switch TranscribeRangeResolution.resolve(
-      last: inputs.last, from: inputs.from, to: inputs.to, session: inputs.session, now: now,
-      sessionReader: { id in
-        do {
-          return .success(try SessionStore.read(sessionID: id, dataRoot: dataRoot))
-        } catch {
-          return .failure(.unknownSession(id))
-        }
+    let intervalRanges: [TimeRange]
+    let meetingRecord: Meeting?
+    if let meetingID = inputs.meeting {
+      let meeting: Meeting
+      do {
+        meeting = try MeetingStore.read(meetingID: meetingID, dataRoot: dataRoot)
+      } catch {
+        dependencies.writeStderr("error: unknown meeting '\(meetingID)': \(error)")
+        return 1
       }
-    ) {
-    case .success(let value): resolved = value
-    case .failure(let error):
-      dependencies.writeStderr("error: \(error.description)")
-      return 1
+      // A still-open interval (meeting active) reads up to now, matching
+      // --session's own in-progress semantics.
+      let ranges = meeting.intervals.compactMap { interval -> TimeRange? in
+        let end = interval.end ?? now
+        return interval.start < end ? TimeRange(start: interval.start, end: end) : nil
+      }
+      guard let first = ranges.first, let last = ranges.last else {
+        dependencies.writeStderr("error: meeting '\(meetingID)' has no non-empty intervals")
+        return 1
+      }
+      resolved = TranscribeRangeResolution.Resolved(
+        range: TimeRange(start: first.start, end: last.end),
+        sourceIDs: meeting.sources,
+        vocab: nil,
+        sessionIdentifier: meeting.id,
+        sessionSlug: meeting.id)
+      intervalRanges = ranges
+      meetingRecord = meeting
+    } else {
+      switch TranscribeRangeResolution.resolve(
+        last: inputs.last, from: inputs.from, to: inputs.to, session: inputs.session, now: now,
+        sessionReader: { id in
+          do {
+            return .success(try SessionStore.read(sessionID: id, dataRoot: dataRoot))
+          } catch {
+            return .failure(.unknownSession(id))
+          }
+        }
+      ) {
+      case .success(let value): resolved = value
+      case .failure(let error):
+        dependencies.writeStderr("error: \(error.description)")
+        return 1
+      }
+      intervalRanges = [resolved.range]
+      meetingRecord = nil
     }
     let requestedRange = resolved.range
 
@@ -135,13 +206,17 @@ enum TranscribePipeline {
     var speechSeconds: Double = 0
 
     for sourceID in sourceIDs {
-      let slices: [AudioSlice]
-      do {
-        slices = try audioReader.slices(source: sourceID, range: requestedRange)
-      } catch {
-        dependencies.writeStderr(
-          "error: failed to read audio for source '\(sourceID.rawValue)': \(error)")
-        return 1
+      // One read per interval: a paused span is simply never read, so it is
+      // provably absent from the output, exactly like silence.
+      var slices: [AudioSlice] = []
+      for range in intervalRanges {
+        do {
+          slices.append(contentsOf: try audioReader.slices(source: sourceID, range: range))
+        } catch {
+          dependencies.writeStderr(
+            "error: failed to read audio for source '\(sourceID.rawValue)': \(error)")
+          return 1
+        }
       }
 
       var segments: [Segment] = []
@@ -194,11 +269,24 @@ enum TranscribePipeline {
       ?? OutputPathResolution.sessionIdentifier(
         requestedStart: requestedRange.start, sourceIDs: sourceIDs)
 
+    // The meeting roster's name map (attendee source → display name) feeds
+    // speaker labels, so real names flow into the transcript directly.
+    var speakers: [String: String] = [:]
+    if let meetingRecord {
+      for attendee in meetingRecord.attendees {
+        if let source = attendee.source, let name = attendee.displayName {
+          speakers[source.rawValue] = name
+        }
+      }
+    }
+
     let document = TranscriptAssembly.assemble(
       sourceIDs: sourceIDs,
       transcriptions: transcriptions,
       requested: requestedRange,
       sessionIdentifier: sessionIdentifier,
+      meeting: meetingRecord?.id,
+      speakers: speakers,
       model: modelInfo,
       generated: generated,
       speechSeconds: speechSeconds

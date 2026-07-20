@@ -1,25 +1,31 @@
-import { sourceLabel, type ParticipantId, type Platform } from "./protocol";
+import {
+  sourceLabel,
+  type AttendeeUpsert,
+  type EventFrame,
+  type MeetingWire,
+  type ParticipantId,
+  type Platform,
+  type SnapshotWire,
+} from "./protocol";
 
-// Background-side meeting lifecycle, parallel to session-state.ts's
-// SessionTracker (which owns the worker keepalive; this owns the daemon-facing
-// meeting/session marking). Keyed by externalMeetingId, one record per live
-// meeting:
+// Background-side meeting signal forwarder. The daemon owns the meeting
+// state machine in protocol v2 (docs/product/specs/control-protocol.md);
+// this class just translates what the tabs' DOM layers observe into the
+// daemon's meeting verbs:
 //
-//   meeting-started  → meeting.resolve (daemon-owned UUID) → session.open with
-//                      the participant sources already confirmed open on earsd,
-//                      slug = the meeting UUID, trigger = browser-extension
-//   stream opened    → session.add_source (sources that appear mid-call would
-//                      otherwise be excluded from that session's transcription)
-//   pause            → session.close; resume → a fresh session.open under the
-//                      same meeting UUID (audio ingest is untouched — sessions
-//                      are metadata over the ring buffer, never a capture gate)
-//   meeting-ended /  → session.close (+ a time-boxed "transcribing" badge
-//   port gone /        state — optimistic, real transcription progress is not
-//   last leaver        observable today; see the plan's scope note)
+//   meeting-started      → meeting.start (idempotent on platform+external id)
+//   participant joined   → meeting.attendee upsert (display name)
+//   ingest stream opened → meeting.attendee upsert (source link)
+//   participant left     → meeting.attendee upsert (left timestamp)
+//   popup pause toggle   → meeting.pause / meeting.resume (marks, never capture)
+//   meeting-ended / port → meeting.end
+//   job events           → the "transcribing" badge (real pipeline state,
+//                          not a guessed timer)
 //
-// Re-entry needs no dedup here: meeting.resolve is a persisted daemon-side
-// lookup, so rejoining resolves to the SAME meeting UUID and simply opens a
-// second, distinct session sharing it — exactly the wanted semantics.
+// Recovery is re-declaration: after service-worker eviction or a daemon
+// restart, the transport's onReady fires with a fresh snapshot and this
+// tracker re-declares every meeting its records (rebuilt from the DOM's
+// signals) say are live — meeting.start converges instead of duplicating.
 
 /** What the meeting layer contributes to the popup badge. */
 export type MeetingState = "idle" | "recording" | "paused" | "transcribing";
@@ -37,55 +43,39 @@ export type BadgeState =
 /** The control-plane surface MeetingTracker consumes — ControlSocket
  * (control-transport.ts) in production, a recording fake in tests. */
 export interface MeetingControl {
-  meetingResolve(platform: Platform, externalMeetingId: string): Promise<string>;
-  sessionOpen(sources: readonly string[], slug: string): Promise<string>;
-  sessionClose(id: string): Promise<void>;
-  sessionAddSource(id: string, source: string): Promise<void>;
+  meetingStart(platform: Platform, externalMeetingId: string): Promise<MeetingWire>;
+  meetingEnd(meeting: string): Promise<MeetingWire>;
+  meetingPause(meeting: string): Promise<MeetingWire>;
+  meetingResume(meeting: string): Promise<MeetingWire>;
+  meetingAttendee(meeting: string, attendee: AttendeeUpsert): Promise<MeetingWire>;
 }
-
-/** Injectable timers so tests control the "transcribing" hold window. */
-export interface TimersLike {
-  set(fn: () => void, ms: number): unknown;
-  clear(handle: unknown): void;
-}
-
-/** How long the optimistic "transcribing" badge state holds after a meeting
- * ends before falling back to idle/connected. */
-export const TRANSCRIBING_HOLD_MS = 8_000;
 
 interface MeetingRecord {
   portId: string;
   platform: Platform;
   externalMeetingId: string;
-  /** Daemon-assigned meeting UUID, once meeting.resolve lands. */
+  /** Daemon-assigned meeting UUID, once meeting.start lands. */
   meetingId?: string;
-  /** The currently-open daemon session, if any (absent while paused). */
-  sessionId?: string;
-  /** A session.open is in flight. */
-  opening: boolean;
+  /** A meeting.start is in flight. */
+  starting: boolean;
   paused: boolean;
   ended: boolean;
-  /** Source labels confirmed open on earsd (ingest.open succeeded). */
-  openSources: Set<string>;
-  /** Source labels already on the current session's descriptor. */
-  sessionSources: Set<string>;
+  /** Attendee upserts observed before the meeting id was known. */
+  pendingAttendees: AttendeeUpsert[];
   participants: Set<ParticipantId>;
 }
 
 export class MeetingTracker {
   private readonly meetings = new Map<string, MeetingRecord>();
-  private transcribing = false;
-  private transcribingHandle: unknown;
+  /** Live transcribe jobs, from `job` telemetry events. */
+  private readonly activeJobs = new Set<string>();
   private lastState: MeetingState = "idle";
 
   constructor(
     private readonly control: MeetingControl,
     private readonly onState: (s: MeetingState) => void = () => {},
-    private readonly timers: TimersLike = {
-      set: (fn, ms) => setTimeout(fn, ms),
-      clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
-    },
-    private readonly transcribingHoldMs = TRANSCRIBING_HOLD_MS,
+    /** Injectable wall clock for the roster's `left` timestamps. */
+    private readonly nowISO: () => string = () => new Date().toISOString(),
   ) {}
 
   get state(): MeetingState {
@@ -93,7 +83,7 @@ export class MeetingTracker {
       if (m.ended) continue;
       return m.paused ? "paused" : "recording";
     }
-    return this.transcribing ? "transcribing" : "idle";
+    return this.activeJobs.size > 0 ? "transcribing" : "idle";
   }
 
   /** True while any meeting is live (drives the popup's pause-toggle row). */
@@ -106,8 +96,7 @@ export class MeetingTracker {
     return this.state === "paused";
   }
 
-  /** meeting-started from a tab: resolve the daemon meeting UUID, then open a
-   * session as soon as at least one participant source is open on earsd. */
+  /** meeting-started from a tab: declare it to the daemon. */
   meetingStarted(portId: string, platform: Platform, externalMeetingId: string): void {
     const existing = this.meetings.get(externalMeetingId);
     if (existing && !existing.ended) return; // duplicate start — already tracked
@@ -115,27 +104,15 @@ export class MeetingTracker {
       portId,
       platform,
       externalMeetingId,
-      opening: false,
+      starting: false,
       paused: false,
       ended: false,
-      openSources: new Set(),
-      sessionSources: new Set(),
+      pendingAttendees: [],
       participants: new Set(),
     };
     this.meetings.set(externalMeetingId, record);
+    this.declare(record);
     this.emitState();
-
-    void this.control
-      .meetingResolve(platform, externalMeetingId)
-      .then((meetingId) => {
-        if (record.ended) return;
-        record.meetingId = meetingId;
-        console.log(`[ears] meeting ${externalMeetingId} resolved to ${meetingId}`);
-        void this.maybeOpenSession(record);
-      })
-      .catch((err) => {
-        console.warn(`[ears] meeting.resolve failed for ${externalMeetingId}:`, err);
-      });
   }
 
   /** meeting-ended from the tab (capture toggled off, call teardown). */
@@ -144,25 +121,34 @@ export class MeetingTracker {
     if (record) this.endMeeting(record);
   }
 
-  /** An ingest stream for this participant is confirmed open on earsd, so its
-   * source can be named on a session. */
+  /** A participant's identity (with display name, when known) from the
+   * tab's DOM layer — upserted onto the daemon meeting's roster. */
+  participantJoined(
+    portId: string,
+    platform: Platform,
+    participantId: ParticipantId,
+    displayName?: string,
+  ): void {
+    const record = this.findRecord(portId, platform);
+    if (!record) return;
+    record.participants.add(participantId);
+    this.upsertAttendee(record, {
+      id: participantId,
+      ...(displayName ? { display_name: displayName } : {}),
+    });
+  }
+
+  /** An ingest stream for this participant is confirmed open on earsd — link
+   * the attendee to their per-participant source (which downstream feeds the
+   * transcript's speaker-name map). */
   streamOpened(portId: string, platform: Platform, participantId: ParticipantId): void {
     const record = this.findRecord(portId, platform);
     if (!record) return;
     record.participants.add(participantId);
-    const label = sourceLabel(platform, participantId);
-    if (record.openSources.has(label)) return;
-    record.openSources.add(label);
-
-    if (record.sessionId && !record.sessionSources.has(label)) {
-      record.sessionSources.add(label);
-      const sessionId = record.sessionId;
-      void this.control.sessionAddSource(sessionId, label).catch((err) => {
-        console.warn(`[ears] session.add_source(${label}) failed:`, err);
-      });
-      return;
-    }
-    void this.maybeOpenSession(record);
+    this.upsertAttendee(record, {
+      id: participantId,
+      source: sourceLabel(platform, participantId),
+    });
   }
 
   /** A participant left; when the last one goes, the call is over. */
@@ -170,7 +156,7 @@ export class MeetingTracker {
     for (const record of this.meetings.values()) {
       if (record.portId !== portId || record.ended) continue;
       if (!record.participants.delete(participantId)) continue;
-      record.openSources.delete(sourceLabel(record.platform, participantId));
+      this.upsertAttendee(record, { id: participantId, left: this.nowISO() });
       if (record.participants.size === 0) this.endMeeting(record);
     }
   }
@@ -183,29 +169,59 @@ export class MeetingTracker {
   }
 
   /**
-   * The popup's pause toggle. Pause = close the current session (the paused
-   * span is simply never covered by any session, so transcription never sees
-   * it); resume = open a fresh session under the same meeting UUID. Capture
-   * and PCM ingest are untouched throughout.
+   * The popup's pause toggle → meeting.pause / meeting.resume. Pausing
+   * closes the meeting's open transcription mark on the daemon; capture and
+   * PCM ingest are untouched throughout (marks, never capture control).
    */
   async setPaused(paused: boolean): Promise<void> {
     for (const record of this.meetings.values()) {
       if (record.ended || record.paused === paused) continue;
       record.paused = paused;
-      if (paused) {
-        const sessionId = record.sessionId;
-        record.sessionId = undefined;
-        record.sessionSources = new Set();
-        if (sessionId) {
-          try {
-            await this.control.sessionClose(sessionId);
-          } catch (err) {
-            console.warn(`[ears] session.close(${sessionId}) on pause failed:`, err);
-          }
-        }
-      } else {
-        await this.maybeOpenSession(record);
+      if (!record.meetingId) continue; // declared state applies once start lands
+      try {
+        const meeting = paused
+          ? await this.control.meetingPause(record.meetingId)
+          : await this.control.meetingResume(record.meetingId);
+        record.paused = meeting.state === "paused";
+      } catch (err) {
+        console.warn(`[ears] meeting.${paused ? "pause" : "resume"} failed:`, err);
       }
+    }
+    this.emitState();
+  }
+
+  /** A `job` telemetry event — real transcription progress for the badge. */
+  jobEvent(frame: EventFrame): void {
+    if (frame.event !== "job") return;
+    const params = frame.params as { job?: string; kind?: string; state?: string };
+    if (params.kind !== "transcribe" || !params.job) return;
+    if (params.state === "done" || params.state === "failed") {
+      this.activeJobs.delete(params.job);
+    } else {
+      this.activeJobs.add(params.job);
+    }
+    this.emitState();
+  }
+
+  /**
+   * The transport (re)connected: hello + subscribe landed and `snapshot` is
+   * fresh. Re-declare every meeting this tracker believes is live —
+   * meeting.start is idempotent on identity, so this converges after
+   * service-worker eviction and daemon restart alike.
+   */
+  onReady(snapshot: SnapshotWire, _bootChanged: boolean): void {
+    for (const meeting of snapshot.meetings) {
+      // Adopt daemon-side pause state for meetings we're re-syncing with.
+      const record = meeting.identity
+        ? this.meetings.get(meeting.identity.external_id)
+        : undefined;
+      if (record && !record.ended) {
+        record.meetingId = meeting.id;
+        record.paused = meeting.state === "paused";
+      }
+    }
+    for (const record of this.meetings.values()) {
+      if (!record.ended) this.declare(record);
     }
     this.emitState();
   }
@@ -217,71 +233,66 @@ export class MeetingTracker {
     return undefined;
   }
 
-  private async maybeOpenSession(record: MeetingRecord): Promise<void> {
-    if (
-      !record.meetingId ||
-      record.sessionId ||
-      record.opening ||
-      record.paused ||
-      record.ended ||
-      record.openSources.size === 0
-    ) {
+  /** meeting.start (idempotent), then flush queued attendee upserts. */
+  private declare(record: MeetingRecord): void {
+    if (record.starting) return;
+    record.starting = true;
+    void this.control
+      .meetingStart(record.platform, record.externalMeetingId)
+      .then((meeting) => {
+        record.starting = false;
+        if (record.ended) {
+          // Ended while the start was in flight — end it right back.
+          void this.control.meetingEnd(meeting.id).catch(() => {});
+          return;
+        }
+        const wantPaused = record.paused;
+        record.meetingId = meeting.id;
+        console.log(`[ears] meeting ${record.externalMeetingId} → ${meeting.id}`);
+        // The popup may have toggled pause before the id was known; apply
+        // it now. Otherwise adopt the daemon's state (idempotent re-declare
+        // of an already-paused meeting stays paused).
+        const daemonPaused = meeting.state === "paused";
+        if (wantPaused && !daemonPaused) {
+          void this.control.meetingPause(meeting.id).catch(() => {});
+        } else {
+          record.paused = daemonPaused;
+        }
+        const queued = record.pendingAttendees.splice(0, record.pendingAttendees.length);
+        for (const attendee of queued) this.upsertAttendee(record, attendee);
+        this.emitState();
+      })
+      .catch((err) => {
+        record.starting = false;
+        console.warn(`[ears] meeting.start failed for ${record.externalMeetingId}:`, err);
+      });
+  }
+
+  private upsertAttendee(record: MeetingRecord, attendee: AttendeeUpsert): void {
+    if (record.ended) return;
+    if (!record.meetingId) {
+      record.pendingAttendees.push(attendee);
       return;
     }
-    record.opening = true;
-    const sources = [...record.openSources];
-    try {
-      const sessionId = await this.control.sessionOpen(sources, record.meetingId);
-      record.opening = false;
-      if (record.ended || record.paused) {
-        // Ended/paused while the open was in flight — close it right back.
-        void this.control.sessionClose(sessionId).catch(() => {});
-        return;
-      }
-      record.sessionId = sessionId;
-      record.sessionSources = new Set(sources);
-      console.log(`[ears] session ${sessionId} opened for meeting ${record.meetingId}`);
-      // Sources that opened while session.open was in flight still need adding.
-      for (const label of record.openSources) {
-        if (!record.sessionSources.has(label)) {
-          record.sessionSources.add(label);
-          void this.control.sessionAddSource(sessionId, label).catch((err) => {
-            console.warn(`[ears] session.add_source(${label}) failed:`, err);
-          });
-        }
-      }
-    } catch (err) {
-      record.opening = false;
-      console.warn(`[ears] session.open for meeting ${record.meetingId} failed:`, err);
-    }
-    this.emitState();
+    const meetingId = record.meetingId;
+    void this.control.meetingAttendee(meetingId, attendee).catch((err) => {
+      console.warn(`[ears] meeting.attendee(${attendee.id}) failed:`, err);
+    });
   }
 
   private endMeeting(record: MeetingRecord): void {
     if (record.ended) return;
     record.ended = true;
     this.meetings.delete(record.externalMeetingId);
-    const sessionId = record.sessionId;
-    record.sessionId = undefined;
-    if (sessionId) {
-      void this.control.sessionClose(sessionId).catch((err) => {
-        console.warn(`[ears] session.close(${sessionId}) failed:`, err);
+    if (record.meetingId) {
+      void this.control.meetingEnd(record.meetingId).catch((err) => {
+        console.warn(`[ears] meeting.end(${record.meetingId}) failed:`, err);
       });
-      this.startTranscribingHold();
     }
+    // No meetingId yet: declare() notices `ended` when the start lands and
+    // ends it then. If the start never landed at all, the daemon's
+    // ingest-idle grace ends the meeting server-side.
     this.emitState();
-  }
-
-  /** Optimistic, time-boxed "transcribing" — real progress isn't observable
-   * today (the transcribe process has no channel back to the daemon). */
-  private startTranscribingHold(): void {
-    this.transcribing = true;
-    if (this.transcribingHandle) this.timers.clear(this.transcribingHandle);
-    this.transcribingHandle = this.timers.set(() => {
-      this.transcribing = false;
-      this.transcribingHandle = undefined;
-      this.emitState();
-    }, this.transcribingHoldMs);
   }
 
   private emitState(): void {

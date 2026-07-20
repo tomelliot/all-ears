@@ -3,7 +3,7 @@ import EarsIPC
 import Foundation
 
 /// Best-effort publisher of finalised segments onto the daemon's live feed
-/// via the `segment.publish` control-socket command.
+/// via the v2 `segment.publish` method.
 ///
 /// Best-effort is the contract (`docs/product/specs/transcribe.md`: the
 /// socket is "notification only; the durable transcript is the on-disk
@@ -12,12 +12,9 @@ import Foundation
 /// per outage, not per segment) and swallowed, never thrown, so a publish
 /// problem can never abort the follow run or drop an on-disk write.
 ///
-/// Owns its own dedicated request/response connection: `subscribe` is
-/// terminal for a control-socket connection (see ``ControlSocketClient``),
-/// so a publisher can never share a connection with anything that watches
-/// the feed. The connection is dialled lazily on first publish and
-/// re-dialled after a send failure, so a daemon that starts (or restarts)
-/// mid-follow picks the stream back up.
+/// Owns its own request/response connection, dialled (and `hello`'d) lazily
+/// on first publish and re-dialled after a send failure, so a daemon that
+/// starts (or restarts) mid-follow picks the stream back up.
 actor SegmentEventPublisher {
   private let socketPath: String?
   private let log: @Sendable (String) -> Void
@@ -37,13 +34,20 @@ actor SegmentEventPublisher {
   /// Publishes one `segment` event; any non-`segment` event is ignored (the
   /// publisher exists for exactly this event kind).
   func publish(_ event: EarsEvent) async {
-    guard case .segment(let session, let speaker, let start, let end, let text) = event else {
+    guard case .segment(let params) = event else {
       return
     }
     guard let socketPath else { return }
 
     if client == nil {
-      client = try? await ControlSocketClient.connect(toPath: socketPath)
+      if let dialled = try? await ControlSocketClient.connect(toPath: socketPath) {
+        do {
+          try await dialled.hello(client: "transcribe/0.1.0")
+          client = dialled
+        } catch {
+          await dialled.close()
+        }
+      }
     }
     guard let client else {
       warnOnce(
@@ -53,12 +57,11 @@ actor SegmentEventPublisher {
     }
 
     do {
-      let response = try await client.send(
-        .segmentPublish(session: session, speaker: speaker, start: start, end: end, text: text),
-        expecting: EmptyData.self)
-      if case .failure(let error) = response {
-        log("segment.publish rejected by daemon: \(error.message)")
-      }
+      _ = try await client.send(.segmentPublish(params), expecting: EmptyData.self)
+      warnedThisOutage = false
+    } catch let error as WireError {
+      // The daemon answered but refused — the connection is fine.
+      log("segment.publish rejected by daemon: [\(error.code.rawValue)] \(error.message)")
       warnedThisOutage = false
     } catch {
       warnOnce("segment.publish failed (\(error)); will retry the connection on the next segment")

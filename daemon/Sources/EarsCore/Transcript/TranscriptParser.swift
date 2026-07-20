@@ -147,6 +147,7 @@ public enum TranscriptParser {
     let derivedFrom = fields["derived_from"].map(unquote)
     let preset = fields["preset"].map(unquote)
     let session = try field("session")
+    let meeting = fields["meeting"].map(unquote)
     let sources = try splitFlowArray(field("sources")).map { SourceID(unquote($0)) }
 
     let rangeMapping = try flowMappingFields(field("range"))
@@ -175,6 +176,7 @@ public enum TranscriptParser {
       schema: schema,
       kind: kind,
       session: session,
+      meeting: meeting,
       sources: sources,
       range: range,
       model: model,

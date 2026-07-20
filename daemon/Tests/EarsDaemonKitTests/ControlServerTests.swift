@@ -7,36 +7,18 @@ import Testing
 
 @testable import EarsDaemonKit
 
-/// Coverage scope (see the task report for the full rationale): at the time
-/// this file was written, ``CaptureActor``'s and ``SessionRegistry``'s method
-/// *bodies* are still `fatalError` stubs -- two other in-flight tasks fill
-/// them in. Every method on both types crashes unconditionally when called,
-/// regardless of arguments or receiver state, so any dispatch path that would
-/// actually invoke one can't be exercised yet.
-///
-/// This suite therefore covers exactly the paths ``ControlServer/handle(_:)``
-/// can run **without** calling into either collaborator's stubbed bodies:
-///
-/// - `sources.add` / `ingest.open`: fixed "not supported" replies that never
-///   touch either collaborator.
-/// - Unknown-source-id error mapping for `sources.enable`/`disable`/`remove`
-///   and single-source `capture.pause`/`resume`: the `captureActors[id]`
-///   lookup fails before any actor method would be called.
-/// - `status` / `sources.list` / fan-out `capture.pause`/`resume` / `flush`
-///   with an **empty** `captureActors` map: the aggregation/fan-out loops
-///   correctly do nothing when there's nothing to iterate, without calling
-///   `CaptureActor.status()`/`.pause()`/etc.
-///
-/// `session.open`/`session.close`/`session.list`/`mark` call straight into
-/// `SessionRegistry` with no prior validation in `ControlServer` itself, so
-/// there is no reachable path through them that doesn't hit a `fatalError` --
-/// not even the error-mapping paths. Full dispatch coverage for those, and
-/// for the success/error paths through a real `CaptureActor`, is deferred to
-/// the Wave 4 integration step once all three pieces are merged.
+/// Covers ``ControlServer``'s v2 dispatch: the reply frames it builds
+/// (`{"id", "result"}` / `{"id", "error": {"code", "message"}}`), the stable
+/// error-code mapping, the `subscribe` snapshot, and routing into the
+/// meeting/session registries. Transport-level concerns (`hello` gating,
+/// capability tiers) live in `EarsIPCTests` — every call reaching this actor
+/// has already cleared them.
 @Suite("ControlServer")
 struct ControlServerTests {
-  private func makeSessions(dataRoot: URL, clock: any NowProviding) -> SessionRegistry {
-    SessionRegistry(dataRoot: dataRoot, knownSourceIDs: { [] }, clock: clock)
+  private func makeSessions(
+    dataRoot: URL, clock: any NowProviding, known: Set<SourceID> = []
+  ) -> SessionRegistry {
+    SessionRegistry(dataRoot: dataRoot, knownSourceIDs: { known }, clock: clock)
   }
 
   private func makeDataRoot() throws -> URL {
@@ -50,57 +32,60 @@ struct ControlServerTests {
     captureActors: [SourceID: CaptureActor] = [:],
     dataRoot: URL,
     startInstant: Instant = Instant(secondsSinceEpoch: 0),
-    clock: any NowProviding
+    clock: any NowProviding,
+    bus: EventBus? = nil,
+    meetings: MeetingRegistry? = nil,
+    known: Set<SourceID> = [],
+    onSessionClosed: (@Sendable (SessionDescriptor) async -> Void)? = nil
   ) -> ControlServer {
     ControlServer(
       captureActors: captureActors,
-      sessions: makeSessions(dataRoot: dataRoot, clock: clock),
+      sessions: makeSessions(dataRoot: dataRoot, clock: clock, known: known),
       dataRoot: dataRoot,
       startInstant: startInstant,
-      clock: clock)
+      clock: clock,
+      bus: bus,
+      meetings: meetings,
+      onSessionClosed: onSessionClosed)
   }
 
-  /// Decodes a `ControlReply`'s JSON envelope for assertions, mirroring
-  /// `EarsIPCTests.ControlReplyTests`'s helper.
-  private func envelope(_ reply: ControlReply) throws -> [String: Any] {
-    let data = try reply.encoded(using: JSONEncoder())
+  /// Decodes a `ControlReply`'s JSON frame (with a fixed test id) for
+  /// assertions.
+  private func frame(_ reply: ControlReply) throws -> [String: Any] {
+    let data = try reply.encoded(id: .int(1), using: JSONEncoder())
     let object: [String: Any]? = try JSONSerialization.jsonObject(with: data) as? [String: Any]
     return try #require(object)
   }
 
-  /// `json[key]` as a `[String: Any]`, or fails the test with a clear message.
-  ///
-  /// Deliberately splits the `as?` cast onto its own statement rather than
-  /// writing `try #require(json[key] as? [String: Any])` inline: the compiler
-  /// mis-diagnoses that inline form as "no calls to throwing functions occur
-  /// within 'try' expression" (a false positive -- the cast can fail and
-  /// `#require` does throw), which the strict zero-warnings build rejects.
-  private func requireDict(_ json: [String: Any], key: String) throws -> [String: Any] {
-    let value: [String: Any]? = json[key] as? [String: Any]
+  /// The reply's `result` object, failing the test on an error frame.
+  private func result(_ reply: ControlReply) throws -> [String: Any] {
+    let json = try frame(reply)
+    #expect(json["error"] == nil, "expected a result frame, got \(json)")
+    let value: [String: Any]? = json["result"] as? [String: Any]
     return try #require(value)
   }
 
-  /// `json[key]` as a `String`, or fails the test. See ``requireDict(_:key:)``
-  /// for why the cast is split onto its own statement.
-  private func requireString(_ json: [String: Any], key: String) throws -> String {
-    let value: String? = json[key] as? String
-    return try #require(value)
+  /// The reply's `error.code`, failing the test on a result frame.
+  private func errorCode(_ reply: ControlReply) throws -> String {
+    let json = try frame(reply)
+    let error: [String: Any]? = json["error"] as? [String: Any]
+    let code: String? = try #require(error)["code"] as? String
+    return try #require(code)
   }
 
-  // MARK: - status / sources.list
+  // MARK: - status / subscribe
 
-  @Test("status reports uptime derived from the clock and startInstant, with no sources")
+  @Test("status reports uptime, sources, and the (empty) meeting/session lists")
   func statusReportsUptime() async throws {
     let clock = ManualClock(Instant(secondsSinceEpoch: 1000))
     let server = makeServer(
       dataRoot: try makeDataRoot(), startInstant: Instant(secondsSinceEpoch: 100), clock: clock)
 
-    let reply = await server.handle(.status)
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == true)
-    let data = try requireDict(json, key: "data")
+    let data = try result(await server.handle(.status))
     #expect(data["uptime_s"] as? Int == 900)
     #expect((data["sources"] as? [Any])?.isEmpty == true)
+    #expect((data["meetings"] as? [Any])?.isEmpty == true)
+    #expect((data["sessions"] as? [Any])?.isEmpty == true)
   }
 
   @Test("status never reports negative uptime, even if the clock precedes startInstant")
@@ -109,243 +94,193 @@ struct ControlServerTests {
     let server = makeServer(
       dataRoot: try makeDataRoot(), startInstant: Instant(secondsSinceEpoch: 100), clock: clock)
 
-    let reply = await server.handle(.status)
-    let json = try envelope(reply)
-    let data = try requireDict(json, key: "data")
+    let data = try result(await server.handle(.status))
     #expect(data["uptime_s"] as? Int == 0)
   }
 
-  @Test("sources.list returns an empty list when there are no sources")
-  func sourcesListEmpty() async throws {
+  @Test("subscribe returns a snapshot tagged with the bus's current revision")
+  func subscribeSnapshot() async throws {
+    let dataRoot = try makeDataRoot()
     let clock = ManualClock()
-    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
+    let bus = EventBus()
+    await bus.publish(.source(id: "mic", state: .capturing))  // rev 1
+    let meetings = MeetingRegistry(dataRoot: dataRoot, clock: clock, bus: bus)
+    let started = try await meetings.start(MeetingStartParams(title: "standup"))  // rev 2
+    let server = makeServer(dataRoot: dataRoot, clock: clock, bus: bus, meetings: meetings)
 
-    let reply = await server.handle(.sourcesList)
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == true)
-    let data = try requireDict(json, key: "data")
-    #expect((data["sources"] as? [Any])?.isEmpty == true)
+    let data = try result(await server.handle(.subscribe(SubscribeParams())))
+    #expect(data["rev"] as? Int == 2)
+    let snapshotMeetings: [[String: Any]]? = data["meetings"] as? [[String: Any]]
+    #expect(try #require(snapshotMeetings).count == 1)
+    #expect(try #require(snapshotMeetings).first?["id"] as? String == started.id)
   }
 
-  // MARK: - sources.add (not supported)
+  // MARK: - sources / capture error mapping
 
   @Test("sources.add fails clearly rather than silently accepting")
   func sourcesAddNotSupported() async throws {
-    let clock = ManualClock()
-    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
-
+    let server = makeServer(dataRoot: try makeDataRoot(), clock: ManualClock())
     let spec = SourceSpec(id: "app:us.zoom.xos", sourceClass: .app)
-    let reply = await server.handle(.sourcesAdd(spec))
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == false)
-    let message = try requireString(json, key: "error")
-    #expect(message.contains("sources.add"))
-    #expect(message.contains("not supported"))
+    #expect(try errorCode(await server.handle(.sourcesAdd(spec))) == "invalid_request")
   }
 
-  // MARK: - ingest.open (not supported)
-
-  @Test("ingest.open fails clearly on the control socket — it's WebSocket-only")
-  func ingestOpenNotSupported() async throws {
-    let clock = ManualClock()
-    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
-
-    let format = AudioFormatSpec(sampleRate: 48000, channels: 1, encoding: "pcm_s16le")
-    let reply = await server.handle(.ingestOpen(source: "browser:meet", format: format))
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == false)
-    let message = try requireString(json, key: "error")
-    #expect(message.contains("ingest.open"))
-    #expect(message.contains("WebSocket"))
+  @Test(
+    "source verbs on an unknown id fail with source_not_found",
+    arguments: [
+      ControlCall.sourcesEnable(source: "mic"),
+      .sourcesDisable(source: "mic"),
+      .sourcesRemove(source: "mic"),
+      .capturePause(source: "mic"),
+      .captureResume(source: "mic"),
+    ])
+  func unknownSourceMapping(call: ControlCall) async throws {
+    let server = makeServer(dataRoot: try makeDataRoot(), clock: ManualClock())
+    let reply = await server.handle(call)
+    #expect(try errorCode(reply) == "source_not_found")
+    let json = try frame(reply)
+    let error: [String: Any]? = json["error"] as? [String: Any]
+    #expect((try #require(error)["message"] as? String)?.contains("mic") == true)
   }
 
-  @Test("ingest.close fails clearly on the control socket — it's WebSocket-only")
-  func ingestCloseNotSupported() async throws {
-    let clock = ManualClock()
-    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
-
-    let reply = await server.handle(.ingestClose(streamID: "s1"))
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == false)
-    let message = try requireString(json, key: "error")
-    #expect(message.contains("ingest.close"))
-    #expect(message.contains("WebSocket"))
+  @Test(
+    "fan-out verbs over zero sources succeed trivially",
+    arguments: [ControlCall.capturePause(source: nil), .captureResume(source: nil), .flush])
+  func fanOutEmpty(call: ControlCall) async throws {
+    let server = makeServer(dataRoot: try makeDataRoot(), clock: ManualClock())
+    _ = try result(await server.handle(call))
   }
 
-  // MARK: - unknown source id mapping
+  // MARK: - notification-only publishes
 
-  @Test("sources.enable on an unknown source fails with a message naming the id")
-  func sourcesEnableUnknownSource() async throws {
+  @Test("segment.publish and job.publish forward to the bus and reply ok")
+  func publishesForwardToBus() async throws {
     let clock = ManualClock()
-    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
+    let bus = EventBus()
+    let recorded = Mutex<[EventFrame]>([])
+    await bus.attach { frame in recorded.withLock { $0.append(frame) } }
+    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock, bus: bus)
 
-    let reply = await server.handle(.sourcesEnable(source: "mic"))
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == false)
-    let message = try requireString(json, key: "error")
-    #expect(message.contains("mic"))
+    let segment = SegmentPublishParams(
+      session: "s1", speaker: "You", start: 604.1, end: 611.9, text: "ship it")
+    _ = try result(await server.handle(.segmentPublish(segment)))
+    let job = JobPublishParams(job: "j1", kind: "transcribe", meeting: "m1", state: .running)
+    _ = try result(await server.handle(.jobPublish(job)))
+
+    for _ in 0..<1_000 {
+      if recorded.withLock({ $0.count }) >= 2 { break }
+      await Task.yield()
+    }
+    let frames = recorded.withLock { $0 }
+    #expect(frames.map(\.event) == [.segment(segment), .job(job)])
+    #expect(frames.allSatisfy { $0.rev == nil })  // telemetry, never revved
   }
 
-  @Test("sources.disable on an unknown source fails with a message naming the id")
-  func sourcesDisableUnknownSource() async throws {
-    let clock = ManualClock()
-    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
-
-    let reply = await server.handle(.sourcesDisable(source: "mic"))
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == false)
-    let message = try requireString(json, key: "error")
-    #expect(message.contains("mic"))
-  }
-
-  @Test("sources.remove on an unknown source fails with a message naming the id")
-  func sourcesRemoveUnknownSource() async throws {
-    let clock = ManualClock()
-    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
-
-    let reply = await server.handle(.sourcesRemove(source: "mic"))
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == false)
-    let message = try requireString(json, key: "error")
-    #expect(message.contains("mic"))
-  }
-
-  @Test("capture.pause on an unknown concrete source fails with a message naming the id")
-  func capturePauseUnknownSource() async throws {
-    let clock = ManualClock()
-    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
-
-    let reply = await server.handle(.capturePause(source: "mic"))
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == false)
-    let message = try requireString(json, key: "error")
-    #expect(message.contains("mic"))
-  }
-
-  @Test("capture.resume on an unknown concrete source fails with a message naming the id")
-  func captureResumeUnknownSource() async throws {
-    let clock = ManualClock()
-    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
-
-    let reply = await server.handle(.captureResume(source: "mic"))
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == false)
-    let message = try requireString(json, key: "error")
-    #expect(message.contains("mic"))
-  }
-
-  // MARK: - fan-out with no sources (capture.pause/resume with source == nil, flush)
-
-  @Test("capture.pause with no source fans out to (zero) sources and succeeds trivially")
-  func capturePauseFanOutEmpty() async throws {
-    let clock = ManualClock()
-    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
-
-    let reply = await server.handle(.capturePause(source: nil))
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == true)
-  }
-
-  @Test("capture.resume with no source fans out to (zero) sources and succeeds trivially")
-  func captureResumeFanOutEmpty() async throws {
-    let clock = ManualClock()
-    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
-
-    let reply = await server.handle(.captureResume(source: nil))
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == true)
-  }
-
-  @Test("flush fans out to (zero) sources and succeeds trivially")
-  func flushFanOutEmpty() async throws {
-    let clock = ManualClock()
-    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
-
-    let reply = await server.handle(.flush)
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == true)
-  }
-
-  // MARK: - segment.publish
-
-  @Test("segment.publish forwards the event to the injected sink and replies ok")
-  func segmentPublishForwardsToSink() async throws {
-    let clock = ManualClock()
-    let published = Mutex<[EarsEvent]>([])
-    let server = ControlServer(
-      captureActors: [:],
-      sessions: makeSessions(dataRoot: try makeDataRoot(), clock: clock),
-      dataRoot: try makeDataRoot(),
-      startInstant: Instant(secondsSinceEpoch: 0),
-      clock: clock,
-      eventSink: { event in published.withLock { $0.append(event) } })
-
-    let reply = await server.handle(
-      .segmentPublish(session: "s1", speaker: "You", start: 604.1, end: 611.9, text: "ship it"))
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == true)
-    #expect(
-      published.withLock { $0 }
-        == [.segment(session: "s1", speaker: "You", start: 604.1, end: 611.9, text: "ship it")])
-  }
-
-  @Test("segment.publish with no sink attached still replies ok (drop, don't fail)")
-  func segmentPublishWithoutSinkSucceeds() async throws {
-    let clock = ManualClock()
-    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
-
-    let reply = await server.handle(
-      .segmentPublish(session: "s1", speaker: "You", start: 0, end: 1, text: "hi"))
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == true)
+  @Test("segment.publish with no bus attached still replies ok (drop, don't fail)")
+  func segmentPublishWithoutBusSucceeds() async throws {
+    let server = makeServer(dataRoot: try makeDataRoot(), clock: ManualClock())
+    _ = try result(
+      await server.handle(
+        .segmentPublish(
+          SegmentPublishParams(session: "s1", speaker: "You", start: 0, end: 1, text: "hi"))))
   }
 
   // MARK: - makeHandler wiring
 
   @Test("makeHandler forwards to handle(_:)")
   func makeHandlerForwards() async throws {
-    let clock = ManualClock()
-    let server = makeServer(dataRoot: try makeDataRoot(), clock: clock)
-    let handler = server.makeHandler()
-
-    let reply = await handler(.sourcesList)
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == true)
-  }
-
-  // MARK: - meeting.resolve / session.add_source / trigger provenance
-
-  @Test("meeting.resolve fails clearly when no meeting registry is wired")
-  func meetingResolveWithoutRegistryFails() async throws {
     let server = makeServer(dataRoot: try makeDataRoot(), clock: ManualClock())
-
-    let reply = await server.handle(.meetingResolve(platform: "meet", externalID: "abc"))
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == false)
+    let handler = server.makeHandler()
+    let data = try result(await handler(.sourcesList))
+    #expect((data["sources"] as? [Any])?.isEmpty == true)
   }
 
-  @Test("meeting.resolve returns a stable meeting_id via the registry")
-  func meetingResolveReturnsStableID() async throws {
+  // MARK: - meeting dispatch
+
+  @Test("meeting verbs fail with internal when no registry is wired")
+  func meetingWithoutRegistryFails() async throws {
+    let server = makeServer(dataRoot: try makeDataRoot(), clock: ManualClock())
+    #expect(
+      try errorCode(await server.handle(.meetingStart(MeetingStartParams()))) == "internal")
+  }
+
+  @Test("meeting.start is idempotent through the wire and returns the full meeting object")
+  func meetingStartIdempotent() async throws {
     let dataRoot = try makeDataRoot()
     let clock = ManualClock()
-    let server = ControlServer(
-      captureActors: [:],
-      sessions: makeSessions(dataRoot: dataRoot, clock: clock),
-      dataRoot: dataRoot,
-      startInstant: Instant(secondsSinceEpoch: 0),
-      clock: clock,
-      meetings: MeetingRegistry(dataRoot: dataRoot, clock: clock))
+    let meetings = MeetingRegistry(dataRoot: dataRoot, clock: clock)
+    let server = makeServer(dataRoot: dataRoot, clock: clock, meetings: meetings)
+    let params = MeetingStartParams(
+      platform: "meet", externalID: "abc", trigger: .browserExtension)
 
-    let first = try envelope(
-      await server.handle(.meetingResolve(platform: "meet", externalID: "AbC")))
-    #expect(first["ok"] as? Bool == true)
-    let firstID = try requireString(try requireDict(first, key: "data"), key: "meeting_id")
-    #expect(!firstID.isEmpty)
+    let first = try result(await server.handle(.meetingStart(params)))
+    let firstID = try #require(first["id"] as? String)
+    #expect(first["state"] as? String == "active")
+    #expect((first["intervals"] as? [Any])?.count == 1)
 
-    let again = try envelope(
-      await server.handle(.meetingResolve(platform: "meet", externalID: "AbC")))
-    let againID = try requireString(try requireDict(again, key: "data"), key: "meeting_id")
-    #expect(againID == firstID)
+    let again = try result(await server.handle(.meetingStart(params)))
+    #expect(again["id"] as? String == firstID)
+  }
+
+  @Test("meeting error mapping: not-found, ended, and rename conflict codes")
+  func meetingErrorMapping() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock()
+    let meetings = MeetingRegistry(dataRoot: dataRoot, clock: clock)
+    let server = makeServer(dataRoot: dataRoot, clock: clock, meetings: meetings)
+
+    #expect(
+      try errorCode(await server.handle(.meetingPause(meeting: "nope"))) == "meeting_not_found")
+
+    let started = try result(
+      await server.handle(.meetingStart(MeetingStartParams(title: "standup"))))
+    let id = try #require(started["id"] as? String)
+    _ = try result(await server.handle(.meetingEnd(meeting: id)))
+    #expect(try errorCode(await server.handle(.meetingResume(meeting: id))) == "meeting_ended")
+    #expect(
+      try errorCode(
+        await server.handle(
+          .meetingRename(MeetingRenameParams(meeting: "nope", title: "x", ifRev: nil))))
+        == "meeting_not_found")
+
+    let second = try result(
+      await server.handle(.meetingStart(MeetingStartParams(title: "retro"))))
+    let secondID = try #require(second["id"] as? String)
+    #expect(
+      try errorCode(
+        await server.handle(
+          .meetingRename(MeetingRenameParams(meeting: secondID, title: "x", ifRev: 999))))
+        == "conflict")
+  }
+
+  @Test("meeting.list returns live + recent meetings")
+  func meetingList() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock()
+    let meetings = MeetingRegistry(dataRoot: dataRoot, clock: clock)
+    let server = makeServer(dataRoot: dataRoot, clock: clock, meetings: meetings)
+    _ = try result(await server.handle(.meetingStart(MeetingStartParams(title: "standup"))))
+
+    let data = try result(await server.handle(.meetingList))
+    #expect((data["meetings"] as? [Any])?.count == 1)
+  }
+
+  // MARK: - session dispatch
+
+  @Test("session errors map to the stable codes")
+  func sessionErrorMapping() async throws {
+    let server = makeServer(dataRoot: try makeDataRoot(), clock: ManualClock(), known: ["mic"])
+
+    #expect(
+      try errorCode(await server.handle(.sessionClose(id: "nope"))) == "session_not_found")
+    #expect(
+      try errorCode(
+        await server.handle(
+          .sessionOpen(SessionOpenParams(sources: ["bogus"], slug: "x"))))
+        == "source_not_found")
+    #expect(
+      try errorCode(
+        await server.handle(.sessionOpen(SessionOpenParams(sources: [], slug: "x"))))
+        == "invalid_request")
   }
 
   @Test("session.open records the wire trigger, and close fires onSessionClosed with it")
@@ -353,28 +288,21 @@ struct ControlServerTests {
     let dataRoot = try makeDataRoot()
     let clock = ManualClock(Instant(secondsSinceEpoch: 1_784_284_200))
     let closed = Mutex<[SessionDescriptor]>([])
-    let server = ControlServer(
-      captureActors: [:],
-      sessions: SessionRegistry(dataRoot: dataRoot, knownSourceIDs: { ["mic"] }, clock: clock),
-      dataRoot: dataRoot,
-      startInstant: Instant(secondsSinceEpoch: 0),
-      clock: clock,
+    let server = makeServer(
+      dataRoot: dataRoot, clock: clock, known: ["mic"],
       onSessionClosed: { descriptor in
         closed.withLock { $0.append(descriptor) }
       })
 
-    let openReply = try envelope(
+    let opened = try result(
       await server.handle(
         .sessionOpen(
-          sources: ["mic"], slug: "call", start: nil, vocab: nil, trigger: .browserExtension)))
-    #expect(openReply["ok"] as? Bool == true)
-    let id = try requireString(try requireDict(openReply, key: "data"), key: "id")
+          SessionOpenParams(sources: ["mic"], slug: "call", trigger: .browserExtension))))
+    let id = try #require(opened["id"] as? String)
 
-    let addReply = try envelope(await server.handle(.sessionAddSource(id: id, source: "mic")))
-    #expect(addReply["ok"] as? Bool == true)
+    _ = try result(await server.handle(.sessionAddSource(id: id, source: "mic")))
+    _ = try result(await server.handle(.sessionClose(id: id)))
 
-    let closeReply = try envelope(await server.handle(.sessionClose(id: id)))
-    #expect(closeReply["ok"] as? Bool == true)
     let descriptors = closed.withLock { $0 }
     #expect(descriptors.count == 1)
     #expect(descriptors.first?.trigger == .browserExtension)

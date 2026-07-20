@@ -98,6 +98,8 @@ enum DaemonConfigResolution {
       defaultTimeCapSeconds: defaults.defaultTimeCapSeconds,
       ingestWebSocket: resolveIngestWebSocket(earsd),
       controlWebSocket: resolveControlWebSocket(earsd),
+      meetingIngestCloseGraceSeconds: Double(
+        int(nestedTable(earsd, "meetings"), "ingest_close_grace_s", default: 120)),
       triggers: triggers,
       outputRoot: URL(fileURLWithPath: outputRootPath.isEmpty ? "." : outputRootPath)
     )

@@ -69,18 +69,21 @@ struct ControlWebSocketServerRealSocketTests {
     }
 
     actor Recorder {
-      private(set) var requests: [ControlRequest] = []
-      func record(_ request: ControlRequest) -> ControlReply {
-        requests.append(request)
+      private(set) var calls: [ControlCall] = []
+      func record(_ call: ControlCall) -> ControlReply {
+        calls.append(call)
         return ControlReply(
-          ControlResponse<MeetingResolveData>.success(MeetingResolveData(meetingID: "uuid-1")))
+          result: Meeting(
+            id: "uuid-1", title: "meet x", state: .active,
+            started: Instant(secondsSinceEpoch: 1), rev: 1))
       }
     }
     let recorder = Recorder()
     let server = ControlWebSocketServer(
       listener: listener,
       allowedOrigins: ["test-origin"],
-      handler: { request in await recorder.record(request) })
+      identity: ControlServerIdentity(daemon: "earsd test", bootID: "boot-real"),
+      handler: { call in await recorder.record(call) })
     let runner = Task { await server.run() }
 
     let client = try await RawClient(port: port)
@@ -90,20 +93,30 @@ struct ControlWebSocketServerRealSocketTests {
     #expect(statusLine(handshakeResponse)?.contains("101") == true)
 
     try await client.send(
-      TestWebSocketClient.text(#"{"cmd":"meeting.resolve","platform":"meet","external_id":"x"}"#))
+      TestWebSocketClient.text(#"{"id":0,"method":"hello","params":{"protocol":2}}"#))
+    guard let helloFrame = decodeServerFrame(try await client.receive()) else {
+      Issue.record("no hello reply frame")
+      return
+    }
+    let hello = try JSONDecoder().decode(
+      ControlResponseFrame<HelloResult>.self, from: Data(helloFrame.payload))
+    #expect(try hello.get().bootID == "boot-real")
+
+    try await client.send(
+      TestWebSocketClient.text(
+        #"{"id":1,"method":"meeting.start","params":{"platform":"meet","external_id":"x"}}"#))
     let replyBytes = try await client.receive()
     guard let frame = decodeServerFrame(replyBytes) else {
       Issue.record("no decodable reply frame")
       return
     }
     let reply = try JSONDecoder().decode(
-      ControlResponse<MeetingResolveData>.self, from: Data(frame.payload))
-    guard case .success(let data) = reply else {
-      Issue.record("expected meeting.resolve success")
-      return
-    }
-    #expect(data.meetingID == "uuid-1")
-    #expect(await recorder.requests == [.meetingResolve(platform: "meet", externalID: "x")])
+      ControlResponseFrame<Meeting>.self, from: Data(frame.payload))
+    #expect(try reply.get().id == "uuid-1")
+    #expect(
+      await recorder.calls == [
+        .meetingStart(MeetingStartParams(platform: "meet", externalID: "x"))
+      ])
 
     client.close()
     await server.shutdown()

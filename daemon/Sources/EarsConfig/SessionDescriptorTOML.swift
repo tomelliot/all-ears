@@ -33,6 +33,7 @@ public enum SessionDescriptorTOML {
       "trigger_detail": .string(descriptor.triggerDetail ?? ""),
       "vocab": .string(descriptor.vocab ?? ""),
       "pre_roll_seconds": .int(descriptor.preRollSeconds),
+      "speakers": .table(descriptor.speakers.mapValues { .string($0) }),
     ])
   }
 
@@ -78,6 +79,21 @@ public enum SessionDescriptorTOML {
       throw .invalidField("trigger")
     }
 
+    // `[speakers]` is optional (sessions predating it have no key); when
+    // present every value must be a string.
+    var speakers: [String: String] = [:]
+    if let speakersValue = table["speakers"] {
+      guard case .table(let speakersTable) = speakersValue else {
+        throw .invalidField("speakers")
+      }
+      for (label, name) in speakersTable {
+        guard case .string(let nameString) = name else {
+          throw .invalidField("speakers")
+        }
+        speakers[label] = nameString
+      }
+    }
+
     return SessionDescriptor(
       schema: try fields.int("schema"),
       id: try fields.string("id"),
@@ -89,7 +105,8 @@ public enum SessionDescriptorTOML {
       trigger: trigger,
       triggerDetail: fields.optionalString("trigger_detail"),
       vocab: fields.optionalString("vocab"),
-      preRollSeconds: fields.optionalInt("pre_roll_seconds", default: 0)
+      preRollSeconds: fields.optionalInt("pre_roll_seconds", default: 0),
+      speakers: speakers
     )
   }
 

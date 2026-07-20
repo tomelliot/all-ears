@@ -317,12 +317,14 @@ struct SessionRegistryTests {
 
     let opened = try await registry.open(
       sources: [Self.mic], slug: "standup", start: nil, vocab: nil)
-    _ = try await registry.close(id: opened.id)
+    let closed = try await registry.close(id: opened.id)
 
+    // v2 session events carry the full summary, so subscribers can sync
+    // their session set from events alone.
     #expect(
       recorded.withLock { $0 } == [
-        .session(id: opened.id, state: .open),
-        .session(id: opened.id, state: .closed),
+        .session(SessionSummary(opened)),
+        .session(SessionSummary(closed)),
       ])
   }
 
@@ -338,7 +340,7 @@ struct SessionRegistryTests {
     let marked = try await registry.mark(
       sources: [Self.mic], slug: "retro", range: .lastSeconds(60))
 
-    #expect(recorded.withLock { $0 } == [.session(id: marked.id, state: .closed)])
+    #expect(recorded.withLock { $0 } == [.session(SessionSummary(marked))])
   }
 
   @Test("a failed open publishes nothing")

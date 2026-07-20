@@ -39,6 +39,9 @@ public enum EarsdConfigSchema {
         "port": .int(47812),
         "allowed_origins": .array([]),
       ]),
+      "meetings": .table([
+        "ingest_close_grace_s": .int(120)
+      ]),
       "source": .array([
         .table([
           "id": .string("mic"),
@@ -143,6 +146,17 @@ public enum EarsdConfigSchema {
                   "enabled": ConfigSchema.Field(type: .bool),
                   "port": ConfigSchema.Field(type: .int),
                   "allowed_origins": ConfigSchema.Field(type: .array),
+                ]
+              )
+            ),
+            // Meeting lifecycle knobs: how long a browser meeting's last
+            // ingest stream may stay closed before the daemon auto-ends the
+            // meeting (`reason = "ingest-idle"`). See `MeetingRegistry`.
+            "meetings": ConfigSchema.Field(
+              type: .table,
+              children: ConfigSchema(
+                fields: [
+                  "ingest_close_grace_s": ConfigSchema.Field(type: .int)
                 ]
               )
             ),

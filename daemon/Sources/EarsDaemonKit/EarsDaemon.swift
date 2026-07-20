@@ -44,6 +44,10 @@ public struct EarsDaemonConfiguration: Sendable {
   /// whether ``EarsDaemon/start()`` also binds the loopback control-plane
   /// WebSocket (`EarsIPC.ControlWebSocketServer`).
   public var controlWebSocket: ControlWebSocketConfiguration?
+  /// `[earsd.meetings].ingest_close_grace_s`: how long a browser meeting's
+  /// last ingest stream may stay closed before the daemon ends the meeting
+  /// (`reason = "ingest-idle"`). See `MeetingRegistry`'s orphan policy.
+  public var meetingIngestCloseGraceSeconds: Double
   /// `[triggers]`/`[[triggers.rule]]`, resolved. Disabled (no rules) by
   /// default — gates whether ``EarsDaemon/start()`` also starts an
   /// ``AppSignalTriggerObserver``.
@@ -65,6 +69,7 @@ public struct EarsDaemonConfiguration: Sendable {
     defaultTimeCapSeconds: Int = 7_200,
     ingestWebSocket: IngestWebSocketConfiguration? = nil,
     controlWebSocket: ControlWebSocketConfiguration? = nil,
+    meetingIngestCloseGraceSeconds: Double = 120,
     triggers: TriggersConfiguration = TriggersConfiguration(),
     outputRoot: URL = URL(fileURLWithPath: ".")
   ) {
@@ -79,6 +84,7 @@ public struct EarsDaemonConfiguration: Sendable {
     self.defaultTimeCapSeconds = defaultTimeCapSeconds
     self.ingestWebSocket = ingestWebSocket
     self.controlWebSocket = controlWebSocket
+    self.meetingIngestCloseGraceSeconds = meetingIngestCloseGraceSeconds
     self.triggers = triggers
   }
 }
@@ -138,6 +144,10 @@ public actor EarsDaemon {
   private var controlServer: ControlServer?
   private var controlWebSocketServer: ControlWebSocketServer?
   private var controlWebSocketRunTask: Task<Void, Never>?
+  private var meetingRegistry: MeetingRegistry?
+  /// Fresh per daemon start, advertised in every `hello` result — what tells
+  /// a reconnecting client the revision counters reset.
+  private let bootID = UUID().uuidString.lowercased()
   private var powerObserver: PowerObserver?
   private var appSignalTriggerObserver: AppSignalTriggerObserver?
 
@@ -316,10 +326,28 @@ public actor EarsDaemon {
       },
       clock: clock,
       eventSink: { [eventBus] event in await eventBus.publish(event) })
-    // The daemon-owned meeting-identity registry, serving `meeting.resolve`
-    // on both control transports.
+    // The daemon-owned meeting lifecycle registry, serving the `meeting.*`
+    // verbs on both control transports. Meeting end fires the meeting-level
+    // auto-transcribe (gated the same way as the v1 per-session hook).
+    let meetingPipeline: OnClosePipelineRunner? =
+      configuration.triggers.transcribeOnBrowserSessionClose
+      ? OnClosePipelineRunner(outputRoot: configuration.outputRoot, log: log) : nil
     let meetings = MeetingRegistry(
-      dataRoot: configuration.dataRoot, clock: clock, log: log)
+      dataRoot: configuration.dataRoot,
+      clock: clock,
+      bus: eventBus,
+      graceSeconds: configuration.meetingIngestCloseGraceSeconds,
+      onEnded: meetingPipeline.map { pipeline in
+        { meeting, _ in
+          guard meeting.trigger == .browserExtension else { return }
+          Task {
+            await pipeline.runMeetingTranscribe(meetingID: meeting.id, context: "meeting-end")
+          }
+        }
+      },
+      log: log)
+    await meetings.loadFromDisk()
+    meetingRegistry = meetings
 
     // Browser-triggered on-close transcribe: the browser extension has no
     // app-signal rule to hang a rule's `on_close` off, so a session closed
@@ -347,9 +375,9 @@ public actor EarsDaemon {
       dataRoot: configuration.dataRoot,
       startInstant: clock.now(),
       clock: clock,
-      // `segment.publish` → the live feed, through the same bus every other
-      // event producer publishes into.
-      eventSink: { [eventBus] event in await eventBus.publish(event) },
+      // `segment.publish`/`job.publish` → the live feed, and `subscribe`
+      // snapshots read the bus's revision.
+      bus: eventBus,
       meetings: meetings,
       onSessionClosed: onSessionClosed)
 
@@ -357,9 +385,10 @@ public actor EarsDaemon {
     try FileManager.default.createDirectory(
       at: socketDirectory, withIntermediateDirectories: true)
 
+    let identity = ControlServerIdentity(daemon: "earsd 0.1.0", bootID: bootID)
     let listener = try await NetworkSocketListener.bind(toPath: configuration.socketPath)
     let socketServer = ControlSocketServer(
-      listener: listener, log: log, handler: controlServer.makeHandler())
+      listener: listener, identity: identity, log: log, handler: controlServer.makeHandler())
     controlSocketServer = socketServer
     controlServerRunTask = Task { await socketServer.run() }
     // Kept so openIngestSource(label:format:) can register a dynamically-
@@ -372,7 +401,8 @@ public actor EarsDaemon {
     // Started before the event-bus attach below so its subscribers join the
     // same fan-out.
     if let controlWebSocket = configuration.controlWebSocket {
-      await startControlWebSocket(controlWebSocket, handler: controlServer.makeHandler())
+      await startControlWebSocket(
+        controlWebSocket, identity: identity, handler: controlServer.makeHandler())
     }
     let controlWebSocketServer = self.controlWebSocketServer
 
@@ -399,10 +429,10 @@ public actor EarsDaemon {
     // correlation). Events published before this line (during source
     // startup) were dropped by design — no subscriber could have been
     // connected yet anyway.
-    await eventBus.attach { event in
-      await socketServer.publish(event)
-      await controlWebSocketServer?.publish(event)
-      await triggerObserver?.handle(event)
+    await eventBus.attach { frame in
+      await socketServer.publish(frame)
+      await controlWebSocketServer?.publish(frame)
+      await triggerObserver?.handle(frame.event)
     }
 
     let observer = PowerObserver(captureActors: captureActors)
@@ -452,7 +482,8 @@ public actor EarsDaemon {
   /// journal #36/#37).
   private func startControlWebSocket(
     _ controlWebSocket: ControlWebSocketConfiguration,
-    handler: @escaping ControlSocketServer.Handler
+    identity: ControlServerIdentity,
+    handler: @escaping ControlHandler
   ) async {
     let controlListener: NetworkSocketListener
     do {
@@ -465,6 +496,7 @@ public actor EarsDaemon {
     let server = ControlWebSocketServer(
       listener: controlListener,
       allowedOrigins: controlWebSocket.allowedOrigins,
+      identity: identity,
       log: log,
       handler: handler)
     controlWebSocketServer = server
@@ -494,6 +526,7 @@ public actor EarsDaemon {
     controlWebSocketRunTask?.cancel()
     controlWebSocketRunTask = nil
     controlWebSocketServer = nil
+    meetingRegistry = nil
 
     if let ingestWebSocketServer {
       await ingestWebSocketServer.shutdown()
@@ -595,6 +628,9 @@ public actor EarsDaemon {
     nextIngestStreamID += 1
     let streamID = "s\(nextIngestStreamID)"
     ingestStreams[streamID] = label
+    // Feed the meeting registry's orphan-grace tracking: a live stream on a
+    // meeting's source cancels its pending grace expiry.
+    await meetingRegistry?.ingestStreamOpened(source: label)
     return streamID
   }
 
@@ -617,6 +653,9 @@ public actor EarsDaemon {
     if let actor = captureActors[label] {
       await actor.stop()
     }
+    // When this was a browser meeting's last live stream, its ingest-close
+    // grace clock starts now.
+    await meetingRegistry?.ingestStreamClosed(source: label)
   }
 
   /// The ids of every source this daemon currently knows — config-declared

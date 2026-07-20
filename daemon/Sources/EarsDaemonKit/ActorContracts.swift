@@ -17,7 +17,7 @@
 ///   file-I/O enum this actor *uses* for persistence).
 /// - One ``ControlServer`` owning control-socket command dispatch: it plugs
 ///   into `EarsIPC.ControlSocketServer`'s request-handler seam and routes each
-///   of the `ControlRequest` commands to the right actor method. It is
+///   of the `ControlCall` methods to the right actor method. It is
 ///   deliberately thin wiring — the real work lives in the other two actors.
 ///
 /// ## Sessions are metadata, not a separate recording

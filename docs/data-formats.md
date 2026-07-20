@@ -99,7 +99,6 @@ A reader reconstructs available audio for any time range from `chunk` events, us
 
 A session is metadata over the ring buffer — a named time range across one or more sources — not a separate recording.
 
-> **Planned:** [control protocol v2](./product/specs/control-protocol.md) layers a Meeting entity above sessions (`meetings/<uuid>/meeting.toml` schema 2 + an append-only `events.jsonl`, transcripts gaining a `meeting:` frontmatter field). The formats below are current until it lands.
 
 ```toml
 schema = 1
@@ -109,14 +108,29 @@ sources = ["mic", "app:us.zoom.xos"]
 start = "2026-07-17T10:30:00Z"
 end   = "2026-07-17T11:02:00Z"   # empty while open
 state = "closed"                  # open | closed
-trigger = "app-signal"            # app-signal | manual
+trigger = "app-signal"            # app-signal | manual | browser-extension
 trigger_detail = "us.zoom.xos"
 vocab = "vocab/2026-07-17T10-30-00Z_standup.txt"  # optional
 pre_roll_seconds = 0              # seconds of already-buffered ring audio a
                                    # `transcribe --session` read widens this
                                    # session's range backward by; never
                                    # shifts `start` itself. 0 = no widening.
+
+[speakers]                        # optional name map (see speaker attribution);
+"browser:meet:jane-a1b2" = "Jane Doe"  # written by the daemon at meeting.end
+                                   # from the meeting's roster
 ```
+
+## Meetings (`meetings/<uuid>/`)
+
+The daemon-owned [Meeting](./product/specs/control-protocol.md#meeting) entity, layered above
+sessions. `meeting.toml` (schema 2) carries the fields of the wire's meeting object — identity,
+title, state, transcription intervals, roster, sources, trigger — written atomically on every
+mutation and reloaded at daemon start. `events.jsonl` is the append-only per-meeting timeline
+(`started`, `interval_opened`/`interval_closed`, `attendee_joined`/`attendee_left`, `renamed`,
+`ended` with `reason = "client" | "ingest-idle"`), written for disk consumers, never used for
+protocol sync. On `meeting.end` the daemon materializes one closed session per interval
+(slug = the meeting UUID) with the roster written into each session's `[speakers]` map.
 
 ## Transcript format
 
@@ -127,6 +141,8 @@ Human-first Markdown with YAML frontmatter. This is the canonical human artifact
 schema: 1
 kind: transcript
 session: 2026-07-17T10-30-00Z_standup
+# meeting: 0d5e…            # present on `transcribe --meeting` output — the
+                            # interval union of one daemon-owned meeting
 sources: [mic, "app:us.zoom.xos"]
 range: { start: 2026-07-17T10:30:00Z, end: 2026-07-17T11:02:00Z }
 model: { name: parakeet, backend: fluidaudio, version: "0.x" }

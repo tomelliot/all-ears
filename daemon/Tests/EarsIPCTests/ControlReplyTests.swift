@@ -4,47 +4,48 @@ import Testing
 
 @testable import EarsIPC
 
-@Suite("ControlReply")
+@Suite("ControlReply (v2)")
 struct ControlReplyTests {
-  private func envelope(_ reply: ControlReply) throws -> [String: Any] {
-    let data = try reply.encoded(using: JSONEncoder())
+  private func frame(_ reply: ControlReply, id: RequestID = .int(7)) throws -> [String: Any] {
+    let data = try reply.encoded(id: id, using: JSONEncoder())
     return try #require(
       JSONSerialization.jsonObject(with: data) as? [String: Any])
   }
 
-  @Test("wraps a success response into an ok/data envelope")
-  func successEnvelope() throws {
+  @Test("wraps a typed result into an id-correlated result frame")
+  func resultFrame() throws {
     let status = StatusData(uptimeSeconds: 3600, sources: [])
-    let reply = ControlReply(ControlResponse.success(status))
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == true)
-    let data = try #require(json["data"] as? [String: Any])
-    #expect(data["uptime_s"] as? Int == 3600)
+    let json = try frame(ControlReply(result: status))
+    #expect(json["id"] as? Int == 7)
+    let result = try #require(json["result"] as? [String: Any])
+    #expect(result["uptime_s"] as? Int == 3600)
     #expect(json["error"] == nil)
   }
 
-  @Test("wraps a failure response into an ok:false/error envelope")
-  func failureEnvelope() throws {
-    let reply = ControlReply(ControlResponse<StatusData>.failure("no such source"))
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == false)
-    #expect(json["error"] as? String == "no such source")
-    #expect(json["data"] == nil)
+  @Test("wraps a WireError into a coded error frame")
+  func errorFrame() throws {
+    let json = try frame(
+      ControlReply(error: WireError(code: .sourceNotFound, message: "no such source")))
+    #expect(json["id"] as? Int == 7)
+    let error = try #require(json["error"] as? [String: Any])
+    #expect(error["code"] as? String == "source_not_found")
+    #expect(error["message"] as? String == "no such source")
+    #expect(json["result"] == nil)
   }
 
-  @Test("the failure convenience uses an EmptyData-typed envelope")
+  @Test("the failure convenience builds the same coded frame")
   func failureConvenience() throws {
-    let reply = ControlReply.failure("bad request")
-    let json = try envelope(reply)
-    #expect(json["ok"] as? Bool == false)
-    #expect(json["error"] as? String == "bad request")
+    let json = try frame(.failure(.invalidRequest, "bad request"), id: .string("x"))
+    #expect(json["id"] as? String == "x")
+    let error = try #require(json["error"] as? [String: Any])
+    #expect(error["code"] as? String == "invalid_request")
   }
 
-  @Test("a success reply decodes back into its typed ControlResponse")
-  func roundTripsThroughTypedResponse() throws {
+  @Test("a result frame decodes back into its typed ControlResponseFrame")
+  func roundTripsThroughTypedFrame() throws {
     let status = StatusData(uptimeSeconds: 42, sources: [])
-    let data = try ControlReply(ControlResponse.success(status)).encoded(using: JSONEncoder())
-    let decoded = try JSONDecoder().decode(ControlResponse<StatusData>.self, from: data)
-    #expect(decoded == .success(status))
+    let data = try ControlReply(result: status).encoded(id: .int(3), using: JSONEncoder())
+    let decoded = try JSONDecoder().decode(ControlResponseFrame<StatusData>.self, from: data)
+    #expect(decoded == .result(id: .int(3), status))
   }
 }

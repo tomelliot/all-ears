@@ -30,6 +30,12 @@ public struct SessionDescriptor: Sendable, Hashable, Codable {
   /// default) means no widening -- every session opened before this field
   /// existed decodes to `0`, matching prior behavior exactly.
   public var preRollSeconds: Int
+  /// The `[speakers]` name map (`docs/data-formats.md`'s speaker
+  /// attribution): source id or diarization label → display name. Written by
+  /// the daemon at `meeting.end` from the meeting's roster (attendee `source`
+  /// → `display_name`) so real names flow into transcripts with no manual
+  /// step; empty for sessions with no known names.
+  public var speakers: [String: String]
 
   public init(
     schema: Int,
@@ -42,7 +48,8 @@ public struct SessionDescriptor: Sendable, Hashable, Codable {
     trigger: TriggerKind,
     triggerDetail: String? = nil,
     vocab: String? = nil,
-    preRollSeconds: Int = 0
+    preRollSeconds: Int = 0,
+    speakers: [String: String] = [:]
   ) {
     self.schema = schema
     self.id = id
@@ -55,6 +62,7 @@ public struct SessionDescriptor: Sendable, Hashable, Codable {
     self.triggerDetail = triggerDetail
     self.vocab = vocab
     self.preRollSeconds = preRollSeconds
+    self.speakers = speakers
   }
 
   /// The session's time range once closed, or `nil` while still open.
