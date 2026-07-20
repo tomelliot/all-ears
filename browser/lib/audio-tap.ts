@@ -4,6 +4,7 @@ import {
   setEncodedAudioListener,
   setTrackSink,
   type EncodedAudioFrameLike,
+  type EncodedAudioListener,
   type TrackSink,
 } from "./rtc-hook";
 import type { PlatformAdapter } from "./identity/adapter";
@@ -49,6 +50,13 @@ const fallbackIds = new WeakMap<MediaStreamTrack, ParticipantId>();
 let speakerCounter = 0;
 let cfg: CaptureConfig;
 
+// Low-frequency safety net: sweep liveTracks() for any track this epoch owns
+// but has no pipeline for, and (re)adopt it. Covers a new-attendee track whose
+// dispatchTrack landed between epoch handoff replays, and any pipeline that
+// died without the track ending (belt-and-braces alongside decoder restart).
+const RECONCILE_INTERVAL_MS = 3000;
+let reconcileTimer: ReturnType<typeof setInterval> | undefined;
+
 /**
  * Take over capture for `config.epoch`. Tears down the previous epoch's
  * pipelines (no doubling), points the hook's sink here, and replays the live
@@ -69,6 +77,10 @@ export function initCapture(config: CaptureConfig): void {
   for (const [track, rec] of liveTracks()) {
     sink(track, rec.stream, rec.transceiver);
   }
+
+  // Arm the reconciler for this epoch (prevTeardown cleared any prior timer).
+  if (reconcileTimer !== undefined) clearInterval(reconcileTimer);
+  reconcileTimer = setInterval(reconcile, RECONCILE_INTERVAL_MS);
 
   postToIsolated({ kind: "status", text: `capture epoch ${config.epoch} active (${config.platform})` });
   console.log(`[ears] capture active — epoch ${config.epoch}, platform ${config.platform}`);
@@ -166,7 +178,19 @@ function stopPipeline(track: MediaStreamTrack): void {
 }
 
 function teardownAll(): void {
+  if (reconcileTimer !== undefined) {
+    clearInterval(reconcileTimer);
+    reconcileTimer = undefined;
+  }
   for (const track of [...pipelines.keys()]) stopPipeline(track);
+}
+
+/** Adopt any epoch-owned live track that lost (or never got) a pipeline. */
+function reconcile(): void {
+  if (!isCurrentEpoch(cfg.epoch)) return;
+  for (const [track, rec] of liveTracks()) {
+    if (!pipelines.has(track)) sink(track, rec.stream, rec.transceiver);
+  }
 }
 
 /** Adapter identity, else a stable speaker-<n> so audio never blocks. */
@@ -532,10 +556,41 @@ type AudioDecoderCtor = new (init: {
   error: (err: Error) => void;
 }) => AudioDecoderLike;
 
-class MeetDecodeSource implements FrameSource {
+// A single transient bad frame puts the whole AudioDecoder into a permanent
+// error state (WebCodecs gives no per-frame recovery, and the error callback
+// carries no chunk reference). Killing the participant's capture over one such
+// frame is wrong: live evidence shows the *same* track decodes cleanly on a
+// fresh decoder immediately afterwards (a decoder that died mid-call went on
+// to decode ~9.8k subsequent frames with zero errors once reconstructed). So
+// MeetDecodeSource restarts its decoder in place — the encoded-audio tee keeps
+// feeding this track for its whole life, so a rebuilt decoder resumes within
+// ~1 frame, with no participant-left/joined churn and no daemon-source close.
+// A decoder that keeps dying is genuinely broken: past DECODER_MAX_RESTARTS
+// within a sliding DECODER_RESTART_WINDOW_MS, we stop restarting and fall
+// through to the pre-existing fatal path (stops the pipeline once).
+const DECODER_RESTART_WINDOW_MS = 30_000;
+const DECODER_MAX_RESTARTS = 5;
+
+/** Injection seam for MeetDecodeSource — production reads globals + rtc-hook;
+ * tests supply fakes and a controllable clock. All optional. */
+export interface MeetDecodeDeps {
+  decoderCtor?: AudioDecoderCtor;
+  chunkCtor?: EncodedAudioChunkCtor;
+  /** Subscribe to (listener) / unsubscribe from (null) this track's encoded-audio tee. */
+  subscribe?: (track: MediaStreamTrack, listener: EncodedAudioListener | null) => void;
+  /** ms clock for the restart sliding window. */
+  now?: () => number;
+}
+
+export class MeetDecodeSource implements FrameSource {
   private stopped = false;
   private decoder?: AudioDecoderLike;
+  private decoderCtor?: AudioDecoderCtor;
   private chunkCtor?: EncodedAudioChunkCtor;
+  private readonly subscribe: (track: MediaStreamTrack, listener: EncodedAudioListener | null) => void;
+  private readonly now: () => number;
+  /** ms timestamps of recent in-place restarts (sliding-window budget). */
+  private restarts: number[] = [];
   // Debug-only forensics — see DEBUG_AUDIO above. AudioDecoder's error
   // callback gets a generic DOMException with no reference to which chunk
   // failed, so keep a small rolling window of what we recently fed it to
@@ -546,48 +601,82 @@ class MeetDecodeSource implements FrameSource {
     private readonly track: MediaStreamTrack,
     private readonly onFrame: (frame: AudioDataLike) => void,
     private readonly onFatalError: (reason: string) => void,
-  ) {}
+    private readonly deps: MeetDecodeDeps = {},
+  ) {
+    this.subscribe = deps.subscribe ?? setEncodedAudioListener;
+    this.now = deps.now ?? (() => Date.now());
+  }
 
   start(): void {
-    const DecoderCtor = (globalThis as unknown as { AudioDecoder?: AudioDecoderCtor }).AudioDecoder;
-    const ChunkCtor = (globalThis as unknown as { EncodedAudioChunk?: EncodedAudioChunkCtor }).EncodedAudioChunk;
+    const DecoderCtor = this.deps.decoderCtor ?? (globalThis as unknown as { AudioDecoder?: AudioDecoderCtor }).AudioDecoder;
+    const ChunkCtor = this.deps.chunkCtor ?? (globalThis as unknown as { EncodedAudioChunk?: EncodedAudioChunkCtor }).EncodedAudioChunk;
     if (!DecoderCtor || !ChunkCtor) {
       // Not expected to trigger (AudioDecoder opus support confirmed on-build),
       // but fall back cleanly: skip this participant, don't crash the hook.
       this.onFatalError("AudioDecoder/EncodedAudioChunk unavailable — cannot decode Meet audio");
       return;
     }
+    this.decoderCtor = DecoderCtor;
     this.chunkCtor = ChunkCtor;
-    try {
-      this.decoder = new DecoderCtor({
-        output: (frame) => this.onFrame(frame),
-        error: (err) => {
-          if (DEBUG_AUDIO_NOW()) {
-            console.error(
-              `[ears/debug] ${this.track.id} decoder error — last ${this.recentFrames.length} frames fed:`,
-              this.recentFrames,
-            );
-          }
-          this.onFatalError(`AudioDecoder error: ${err.message ?? String(err)}`);
-        },
-      });
-      this.decoder.configure({ codec: "opus", sampleRate: 48000, numberOfChannels: 1 });
-    } catch (err) {
-      this.onFatalError(`failed to construct AudioDecoder: ${String(err)}`);
-      return;
-    }
-    setEncodedAudioListener(this.track, (frame) => this.onEncodedFrame(frame));
+    if (!this.buildDecoder()) return; // construction failed — fatal already reported
+    this.subscribe(this.track, (frame) => this.onEncodedFrame(frame));
   }
 
   stop(): void {
     if (this.stopped) return;
     this.stopped = true;
-    setEncodedAudioListener(this.track, null);
+    this.subscribe(this.track, null);
+    this.closeDecoder();
+  }
+
+  /** Construct + configure a fresh decoder. Returns false (after reporting a
+   * fatal error) if construction itself fails — that's not recoverable. */
+  private buildDecoder(): boolean {
+    try {
+      this.decoder = new this.decoderCtor!({
+        output: (frame) => this.onFrame(frame),
+        error: (err) => this.onDecoderError(`AudioDecoder error: ${err.message ?? String(err)}`),
+      });
+      this.decoder.configure({ codec: "opus", sampleRate: 48000, numberOfChannels: 1 });
+      return true;
+    } catch (err) {
+      this.onFatalError(`failed to construct AudioDecoder: ${String(err)}`);
+      return false;
+    }
+  }
+
+  private closeDecoder(): void {
     try {
       this.decoder?.close();
     } catch {
-      // already closed
+      // already closed (an errored decoder self-closes)
     }
+    this.decoder = undefined;
+  }
+
+  /** Decoder-level failure (error callback or decode() throw). Restart in place
+   * within budget; otherwise fall through to the fatal path exactly once. */
+  private onDecoderError(reason: string): void {
+    if (this.stopped) return;
+    if (DEBUG_AUDIO_NOW()) {
+      console.error(
+        `[ears/debug] ${this.track.id} decoder error — last ${this.recentFrames.length} frames fed:`,
+        this.recentFrames,
+      );
+    }
+    const now = this.now();
+    this.restarts = this.restarts.filter((t) => now - t <= DECODER_RESTART_WINDOW_MS);
+    if (this.restarts.length >= DECODER_MAX_RESTARTS) {
+      this.onFatalError(
+        `${reason} — ${this.restarts.length} decoder restarts within ${DECODER_RESTART_WINDOW_MS / 1000}s, giving up`,
+      );
+      return;
+    }
+    this.restarts.push(now);
+    this.closeDecoder();
+    console.warn(`[ears] ${this.track.id} decoder restart ${this.restarts.length}/${DECODER_MAX_RESTARTS} after: ${reason}`);
+    // Same encoded-audio listener stays attached; onEncodedFrame reads the fresh decoder.
+    this.buildDecoder();
   }
 
   private onEncodedFrame(frame: EncodedAudioFrameLike): void {
@@ -600,13 +689,7 @@ class MeetDecodeSource implements FrameSource {
       // Opus has no inter-frame prediction — every chunk is a keyframe.
       this.decoder.decode(new this.chunkCtor({ type: "key", timestamp: frame.timestamp, data: frame.data }));
     } catch (err) {
-      if (DEBUG_AUDIO_NOW()) {
-        console.error(
-          `[ears/debug] ${this.track.id} decode() threw on frame byteLength=${frame.data.byteLength} timestamp=${frame.timestamp} — last ${this.recentFrames.length} frames:`,
-          this.recentFrames,
-        );
-      }
-      this.onFatalError(`decode() threw: ${String(err)}`);
+      this.onDecoderError(`decode() threw: ${String(err)}`);
     }
   }
 }

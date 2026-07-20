@@ -81,4 +81,56 @@ describe("SpeakingCorrelator", () => {
     const match = c.recordDeviceOnset("device-999", 1015);
     expect(match).toBeNull();
   });
+
+  it("matches a same-track onset cluster (multiple onsets, one track) unambiguously", () => {
+    // The hook emits rapid onset clusters for one spoken turn (3+ within
+    // ~300ms). Judged by distinct tracks, these are one unambiguous speaker.
+    // Debounce off so the raw multi-onset case reaches tryMatch.
+    const c = new SpeakingCorrelator(200, 3000, 0);
+    c.recordAudioOnset("track-a", 1000);
+    c.recordAudioOnset("track-a", 1080);
+    c.recordAudioOnset("track-a", 1160);
+    const match = c.recordDeviceOnset("device-377", 1120);
+    expect(match).toEqual({ trackKey: "track-a", deviceId: "device-377", confirmations: 1 });
+  });
+
+  it("still refuses a genuinely ambiguous window (onsets from two distinct tracks)", () => {
+    const c = new SpeakingCorrelator(200, 3000, 0);
+    c.recordAudioOnset("track-a", 1000);
+    c.recordAudioOnset("track-b", 1040); // different track, same window
+    const match = c.recordDeviceOnset("device-377", 1020);
+    expect(match).toBeNull();
+  });
+
+  it("consumes the whole matched cluster so a later device onset can't reuse a leftover", () => {
+    const c = new SpeakingCorrelator(200, 3000, 0);
+    c.recordAudioOnset("track-a", 1000);
+    c.recordAudioOnset("track-a", 1050);
+    expect(c.recordDeviceOnset("device-377", 1020)).toEqual({
+      trackKey: "track-a",
+      deviceId: "device-377",
+      confirmations: 1,
+    });
+    // Both onsets were consumed; a second device onset in the same window finds nothing.
+    expect(c.recordDeviceOnset("device-999", 1040)).toBeNull();
+  });
+
+  it("debounces a same-track onset cluster to a single onset within the debounce window", () => {
+    const c = new SpeakingCorrelator(200); // default 1s debounce
+    c.recordAudioOnset("track-a", 1000);
+    c.recordAudioOnset("track-a", 1100); // <1s after the accepted onset — ignored
+    c.recordAudioOnset("track-a", 1200); // still <1s after the accepted onset — ignored
+    // Only the first onset (t=1000) survives; a device onset near the cluster matches once.
+    const match = c.recordDeviceOnset("device-377", 1150);
+    expect(match).toEqual({ trackKey: "track-a", deviceId: "device-377", confirmations: 1 });
+  });
+
+  it("accepts a genuinely new turn from the same track once the debounce window passes", () => {
+    const c = new SpeakingCorrelator(200); // default 1s debounce
+    c.recordAudioOnset("track-a", 1000);
+    c.recordDeviceOnset("device-377", 1010); // turn 1
+    c.recordAudioOnset("track-a", 2500); // 1.5s later — a real new turn, not debounced
+    const match = c.recordDeviceOnset("device-377", 2510);
+    expect(match).toEqual({ trackKey: "track-a", deviceId: "device-377", confirmations: 2 });
+  });
 });

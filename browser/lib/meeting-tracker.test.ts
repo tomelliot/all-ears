@@ -134,6 +134,41 @@ describe("MeetingTracker (v2 signal forwarder)", () => {
     ]);
   });
 
+  it("buffers participant/stream signals that arrive before meeting-started and flushes them once it lands", async () => {
+    // The linkage race: the tab's participant-joined / ingest stream-opened
+    // events beat the Meet meeting-id resolution, so meeting-started arrives
+    // last. These must not be dropped (which stranded the meeting with no
+    // attendees and no browser:* source).
+    const control = new FakeControl();
+    const { tracker } = makeTracker(control);
+
+    tracker.participantJoined("p1", "meet", "jane", "Jane Doe");
+    tracker.streamOpened("p1", "meet", "jane");
+    expect(control.ofVerb("attendee")).toHaveLength(0); // no record yet — buffered
+
+    tracker.meetingStarted("p1", "meet", "abc");
+    await flush();
+
+    expect(control.ofVerb("start")).toEqual([{ verb: "start", platform: "meet", externalMeetingId: "abc" }]);
+    expect(control.ofVerb("attendee")).toEqual([
+      { verb: "attendee", meeting: "m-1", attendee: { id: "jane", display_name: "Jane Doe" } },
+      { verb: "attendee", meeting: "m-1", attendee: { id: "jane", source: "browser:meet:jane" } },
+    ]);
+  });
+
+  it("drops buffered pre-start signals if the port disconnects before declaring", async () => {
+    const control = new FakeControl();
+    const { tracker } = makeTracker(control);
+
+    tracker.participantJoined("p1", "meet", "jane", "Jane Doe");
+    tracker.portDisconnected("p1");
+
+    // A later meeting on the same port id must not resurrect the dropped signal.
+    tracker.meetingStarted("p1", "meet", "abc");
+    await flush();
+    expect(control.ofVerb("attendee")).toHaveLength(0);
+  });
+
   it("participant-left upserts a left timestamp; the last leaver ends the meeting", async () => {
     const control = new FakeControl();
     const { tracker } = makeTracker(control);

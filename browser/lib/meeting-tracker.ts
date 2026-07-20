@@ -50,6 +50,23 @@ export interface MeetingControl {
   meetingAttendee(meeting: string, attendee: AttendeeUpsert): Promise<MeetingWire>;
 }
 
+/**
+ * A participant/stream signal that arrived on a port before its meeting.start
+ * was declared (the linkage race — the DOM's participant-joined / ingest
+ * stream-opened events can beat the Meet meeting-id resolution). Buffered
+ * per-port and replayed onto the record once meetingStarted lands, instead of
+ * being silently dropped (which stranded the meeting with no attendees and no
+ * browser:* source, so the daemon never classified it as a browser meeting).
+ */
+type PendingPortEvent =
+  | { kind: "joined"; platform: Platform; participantId: ParticipantId; displayName?: string }
+  | { kind: "stream"; platform: Platform; participantId: ParticipantId };
+
+// Guard against unbounded growth if a port never declares a meeting (e.g. a
+// non-meeting tab that still opens a pcm port). Far above any real pre-declare
+// burst; oldest events drop first.
+const MAX_PENDING_PER_PORT = 256;
+
 interface MeetingRecord {
   portId: string;
   platform: Platform;
@@ -69,6 +86,9 @@ export class MeetingTracker {
   private readonly meetings = new Map<string, MeetingRecord>();
   /** Live transcribe jobs, from `job` telemetry events. */
   private readonly activeJobs = new Set<string>();
+  /** portId → signals seen before that port's meeting was declared. Drained
+   * by meetingStarted, dropped by portDisconnected. */
+  private readonly pendingByPort = new Map<string, PendingPortEvent[]>();
   private lastState: MeetingState = "idle";
 
   constructor(
@@ -112,6 +132,7 @@ export class MeetingTracker {
     };
     this.meetings.set(externalMeetingId, record);
     this.declare(record);
+    this.drainPending(portId, record);
     this.emitState();
   }
 
@@ -130,12 +151,11 @@ export class MeetingTracker {
     displayName?: string,
   ): void {
     const record = this.findRecord(portId, platform);
-    if (!record) return;
-    record.participants.add(participantId);
-    this.upsertAttendee(record, {
-      id: participantId,
-      ...(displayName ? { display_name: displayName } : {}),
-    });
+    if (!record) {
+      this.enqueuePending(portId, { kind: "joined", platform, participantId, displayName });
+      return;
+    }
+    this.applyJoined(record, participantId, displayName);
   }
 
   /** An ingest stream for this participant is confirmed open on earsd — link
@@ -143,12 +163,46 @@ export class MeetingTracker {
    * transcript's speaker-name map). */
   streamOpened(portId: string, platform: Platform, participantId: ParticipantId): void {
     const record = this.findRecord(portId, platform);
-    if (!record) return;
+    if (!record) {
+      this.enqueuePending(portId, { kind: "stream", platform, participantId });
+      return;
+    }
+    this.applyStream(record, platform, participantId);
+  }
+
+  private applyJoined(record: MeetingRecord, participantId: ParticipantId, displayName?: string): void {
+    record.participants.add(participantId);
+    this.upsertAttendee(record, {
+      id: participantId,
+      ...(displayName ? { display_name: displayName } : {}),
+    });
+  }
+
+  private applyStream(record: MeetingRecord, platform: Platform, participantId: ParticipantId): void {
     record.participants.add(participantId);
     this.upsertAttendee(record, {
       id: participantId,
       source: sourceLabel(platform, participantId),
     });
+  }
+
+  private enqueuePending(portId: string, event: PendingPortEvent): void {
+    const queue = this.pendingByPort.get(portId) ?? [];
+    queue.push(event);
+    while (queue.length > MAX_PENDING_PER_PORT) queue.shift();
+    this.pendingByPort.set(portId, queue);
+  }
+
+  /** Replay signals buffered before this port's meeting was declared. */
+  private drainPending(portId: string, record: MeetingRecord): void {
+    const queue = this.pendingByPort.get(portId);
+    if (!queue) return;
+    this.pendingByPort.delete(portId);
+    for (const event of queue) {
+      if (event.platform !== record.platform) continue; // different platform on the same port — not this meeting
+      if (event.kind === "joined") this.applyJoined(record, event.participantId, event.displayName);
+      else this.applyStream(record, event.platform, event.participantId);
+    }
   }
 
   /** A participant left; when the last one goes, the call is over. */
@@ -161,8 +215,10 @@ export class MeetingTracker {
     }
   }
 
-  /** The tab's port went away (closed / navigated) — end its meetings. */
+  /** The tab's port went away (closed / navigated) — end its meetings and
+   * drop any signals still buffered against a meeting that never declared. */
   portDisconnected(portId: string): void {
+    this.pendingByPort.delete(portId);
     for (const record of this.meetings.values()) {
       if (record.portId === portId && !record.ended) this.endMeeting(record);
     }
