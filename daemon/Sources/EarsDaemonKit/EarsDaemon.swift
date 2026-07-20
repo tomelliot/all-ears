@@ -304,13 +304,6 @@ public actor EarsDaemon {
   /// only throws for the socket listener failing to bind — a genuinely
   /// daemon-fatal condition, unlike one source's permission denial.
   public func start() async throws {
-    for (id, actor) in captureActors.sorted(by: { $0.key < $1.key }) {
-      do {
-        try await actor.start()
-      } catch {
-        log("source '\(id.rawValue)' failed to start and is disabled: \(error)")
-      }
-    }
 
     // `knownSourceIDs` is a *live* lookup back into this actor, not a
     // snapshot of `captureActors`: a `browser:<label>` source built by a
@@ -393,6 +386,19 @@ public actor EarsDaemon {
       listener: listener, identity: identity, log: log, handler: controlServer.makeHandler())
     controlSocketServer = socketServer
     controlServerRunTask = Task { await socketServer.run() }
+    // Start capture sources *after* the control socket is bound and listening
+    // — a source backend can hang in `start()` (e.g. `MicCaptureBackend`
+    // blocking on a Core Audio permission prompt or a missing device), and
+    // the control plane must stay reachable while it does. Each source's
+    // `CaptureActor.start()` is tried independently; a throwing source is
+    // logged and left in `.error` state, and every other source still starts.
+    for (id, actor) in captureActors.sorted(by: { $0.key < $1.key }) {
+      do {
+        try await actor.start()
+      } catch {
+        log("source '\(id.rawValue)' failed to start and is disabled: \(error)")
+      }
+    }
     // Kept so openIngestSource(label:format:) can register a dynamically-
     // created source into this SAME actor's captureActors — otherwise it's
     // a value-type copy neither sees the other's later changes to.
