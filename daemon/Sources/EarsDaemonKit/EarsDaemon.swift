@@ -483,9 +483,9 @@ public actor EarsDaemon {
       listener: ingestListener,
       allowedOrigins: ingestWebSocket.allowedOrigins,
       log: log,
-      onOpen: { [weak self] label, format in
+      onOpen: { [weak self] label, format, meeting in
         guard let self else { throw IngestError.notABrowserSource(label) }
-        return try await self.openIngestSource(label: label, format: format)
+        return try await self.openIngestSource(label: label, format: format, meeting: meeting)
       },
       onPush: { [weak self] streamID, samples, sampleRate in
         await self?.pushIngestAudio(streamID: streamID, samples: samples, sampleRate: sampleRate)
@@ -605,7 +605,9 @@ public actor EarsDaemon {
   /// dynamic source created afterwards is not paused/resumed on sleep/wake
   /// — a documented follow-up (Phase 6 scoped it out as separable), not
   /// silently assumed fixed.
-  public func openIngestSource(label: SourceID, format: AudioFormatSpec) async throws -> String {
+  public func openIngestSource(
+    label: SourceID, format: AudioFormatSpec, meeting: MeetingIdentity? = nil
+  ) async throws -> String {
     guard label.sourceClass == .browser else {
       throw IngestError.notABrowserSource(label)
     }
@@ -651,8 +653,11 @@ public actor EarsDaemon {
     let streamID = "s\(nextIngestStreamID)"
     ingestStreams[streamID] = label
     // Feed the meeting registry's orphan-grace tracking: a live stream on a
-    // meeting's source cancels its pending grace expiry.
-    await meetingRegistry?.ingestStreamOpened(source: label)
+    // meeting's source cancels its pending grace expiry. The membership tag
+    // (when the extension sent one) links the source into its meeting
+    // daemon-side, so the grace policy holds even if the client's attendee
+    // upserts never arrive.
+    await meetingRegistry?.ingestStreamOpened(source: label, meeting: meeting)
     return streamID
   }
 

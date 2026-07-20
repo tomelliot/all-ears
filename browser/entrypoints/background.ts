@@ -153,7 +153,12 @@ export default defineBackground(() => {
           tracker.participantActive(portId, msg.participantId, msg.platform);
           participantPorts.set(msg.participantId, portId);
           const pcm = base64ToBytes(msg.b64);
-          socket.sendPcm(msg.participantId, msg.platform, pcm);
+          socket.sendPcm(
+            msg.participantId,
+            msg.platform,
+            pcm,
+            meetings.externalIdFor(portId, msg.platform),
+          );
           const n = (counts.get(msg.participantId) ?? 0) + 1;
           counts.set(msg.participantId, n);
           if (n % 50 === 0) console.log(`[ears] forwarded ${n} frames for ${msg.participantId}`);

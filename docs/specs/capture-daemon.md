@@ -101,11 +101,13 @@ The same command set is served on two transports, dispatched through one handler
 Browser audio does **not** flow over the control transports — it uses a dedicated loopback WebSocket (`ws://127.0.0.1:<port>/ingest`, `[earsd.ingest_ws]`, off by default), with the same fail-closed Origin allowlist. It is **ingest-only**: `ingest.open`/`ingest.close` as text frames, PCM as binary frames, and every other command (including `subscribe`) rejected — an allowed origin still cannot drive the daemon from here.
 
 ```jsonc
-// text --> declare a stream
-{"cmd":"ingest.open","source":"browser:meet:jane-a1b2","format":{"sample_rate":16000,"channels":1,"encoding":"pcm_s16le"}}
+// text --> declare a stream (the optional `meeting` tag names the membership)
+{"cmd":"ingest.open","source":"browser:meet:jane-a1b2","format":{"sample_rate":16000,"channels":1,"encoding":"pcm_s16le"},"meeting":{"platform":"meet","external_id":"abc-defg-hij"}}
 // text <-- {"ok":true,"data":{"stream_id":"s7"}}
 // text --> {"cmd":"ingest.close","stream_id":"s7"}
 ```
+
+The optional `meeting` field carries the meeting identity (`meeting.start`'s idempotency key) the source belongs to. The daemon links the source into that live meeting's `sources` itself — stashing the link until the `meeting.start` lands, if the open raced ahead of it — so the ingest-idle grace policy holds even when the extension's own `meeting.attendee` source upserts never arrive (an MV3 service worker respawned mid-call has no meeting state to upsert from). The client's attendee upserts remain the enrichment path (attributing a source to a named attendee); the tag is the membership path. Untagged opens behave exactly as before.
 
 Audio is one binary frame per PCM chunk, multiplexed by `stream_id` (no sequence number — WebSocket rides TCP):
 

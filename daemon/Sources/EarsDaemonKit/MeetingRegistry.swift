@@ -93,6 +93,10 @@ public actor MeetingRegistry {
   private var byIdentity: [MeetingIdentity: String] = [:]
   /// Live ingest streams per source, fed by `EarsDaemon`.
   private var liveIngest: [SourceID: Int] = [:]
+  /// Membership tags from `ingest.open` that arrived before their identity's
+  /// `meeting.start` — claimed by the meeting that declares the identity,
+  /// dropped when the source's last live stream closes first.
+  private var pendingIngestLinks: [SourceID: MeetingIdentity] = [:]
   /// Grace-timer invalidation: a scheduled expiry only fires if the
   /// meeting's generation still matches (a re-opened stream bumps it).
   private var graceGeneration: [String: Int] = [:]
@@ -158,7 +162,7 @@ public actor MeetingRegistry {
       var existing = meetings[existingID],
       existing.state != .ended
     {
-      let merged = mergeSources(params.sources, into: &existing)
+      let merged = mergeSources(params.sources + claimPendingLinks(for: identity), into: &existing)
       if merged {
         try persist(existing)
         await publish(&existing)
@@ -170,6 +174,14 @@ public actor MeetingRegistry {
     let now = clock.now()
     let identity = params.identity
     let trigger = params.trigger ?? .manual
+    // Tagged ingest streams that opened before this start claim their
+    // membership now (see `link(source:to:)`).
+    var declared = params.sources
+    if let identity {
+      for source in claimPendingLinks(for: identity) where !declared.contains(source) {
+        declared.append(source)
+      }
+    }
     var meeting = Meeting(
       id: makeID(),
       identity: identity,
@@ -177,7 +189,7 @@ public actor MeetingRegistry {
       state: .active,
       started: now,
       intervals: [MeetingInterval(start: now)],
-      sources: await initialSources(declared: params.sources, trigger: trigger),
+      sources: await initialSources(declared: declared, trigger: trigger),
       trigger: trigger)
     try persist(meeting)
     appendEvent(meeting.id, event: "started", at: now)
@@ -342,8 +354,19 @@ public actor MeetingRegistry {
 
   /// A live ingest stream opened for `source` — cancels any pending grace
   /// expiry for meetings that include it.
-  public func ingestStreamOpened(source: SourceID) {
+  ///
+  /// A non-nil `meeting` is the client's membership tag: the daemon joins the
+  /// source into that identity's live meeting itself (stashing the link until
+  /// `meeting.start` arrives, if the open raced ahead of it). This is what
+  /// keeps the ingest-idle grace policy sound when the client's own
+  /// `meeting.attendee` source upserts never arrive — an MV3 service worker
+  /// respawned mid-call has no meeting state to upsert from, but the tab's
+  /// PCM keeps flowing with the tag attached.
+  public func ingestStreamOpened(source: SourceID, meeting identity: MeetingIdentity? = nil) async {
     liveIngest[source, default: 0] += 1
+    if let identity {
+      await link(source: source, to: identity)
+    }
     for meeting in meetings.values
     where meeting.state != .ended && meeting.sources.contains(source) {
       // Bump the generation: any in-flight grace timer becomes a no-op.
@@ -356,6 +379,11 @@ public actor MeetingRegistry {
   public func ingestStreamClosed(source: SourceID) {
     let remaining = max(0, (liveIngest[source] ?? 0) - 1)
     liveIngest[source] = remaining == 0 ? nil : remaining
+    if remaining == 0 {
+      // A tag whose stream died before its meeting.start ever arrived links
+      // nothing — a later meeting must not adopt a source that isn't flowing.
+      pendingIngestLinks[source] = nil
+    }
     for meeting in meetings.values
     where meeting.state != .ended && meeting.sources.contains(source) {
       if meeting.isBrowserMeeting && !hasLiveIngest(meeting) {
@@ -366,6 +394,36 @@ public actor MeetingRegistry {
 
   private func hasLiveIngest(_ meeting: Meeting) -> Bool {
     meeting.sources.contains { (liveIngest[$0] ?? 0) > 0 }
+  }
+
+  /// Daemon-side membership: joins `source` into the live meeting declared
+  /// under `identity`, or stashes the link for `start` to claim when the
+  /// `ingest.open` raced ahead of the `meeting.start`.
+  private func link(source: SourceID, to identity: MeetingIdentity) async {
+    guard let id = byIdentity[identity], var meeting = meetings[id], meeting.state != .ended
+    else {
+      pendingIngestLinks[source] = identity
+      return
+    }
+    guard mergeSources([source], into: &meeting) else { return }
+    do {
+      try persist(meeting)
+    } catch {
+      log(
+        "meeting \(meeting.id): persisting ingest-linked source \(source.rawValue) failed: \(error)"
+      )
+    }
+    await publish(&meeting)
+    meetings[meeting.id] = meeting
+  }
+
+  /// Claims (and clears) every pending ingest link stashed for `identity`,
+  /// sorted for deterministic source order.
+  private func claimPendingLinks(for identity: MeetingIdentity) -> [SourceID] {
+    let claimed = pendingIngestLinks.filter { $0.value == identity }.keys
+      .sorted { $0.rawValue < $1.rawValue }
+    for source in claimed { pendingIngestLinks[source] = nil }
+    return claimed
   }
 
   private func scheduleGraceExpiry(meetingID: String) {

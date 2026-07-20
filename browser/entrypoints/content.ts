@@ -49,24 +49,57 @@ export default defineContentScript({
       if (c) publishToggle(c.newValue);
     });
 
+    // Lifecycle facts this document knows, mirrored from the hook's messages:
+    // the live meeting and current participants. This is the durable copy of
+    // what the MV3 service worker holds only in memory — the worker can be
+    // evicted mid-call and respawn empty, so the relay replays these to every
+    // fresh port (see ReconnectingPort's onReconnect).
+    const state: RelayState = { participants: new Map(), liveMeeting: null };
+
     // Dedicated PCM/lifecycle port to the background.
-    const port = new ReconnectingPort(() => browser.runtime.connect({ name: "pcm" }));
-    // participantId → platform, learned from participant-joined (which precedes
-    // the participant's first PCM), so PCM frames can carry their platform.
-    const platforms = new Map<string, Platform>();
+    const port = new ReconnectingPort(
+      () => browser.runtime.connect({ name: "pcm" }),
+      (post) => {
+        if (state.liveMeeting) post({ type: "meeting-started", ...state.liveMeeting });
+        for (const [participantId, p] of state.participants) {
+          post({
+            type: "joined",
+            participantId,
+            platform: p.platform,
+            ...(p.displayName ? { displayName: p.displayName } : {}),
+          });
+        }
+        console.log(
+          `[ears/relay] replayed to respawned worker: ` +
+            `meeting=${state.liveMeeting?.externalMeetingId ?? "none"}, ` +
+            `${state.participants.size} participant(s)`,
+        );
+      },
+    );
 
     window.addEventListener("message", (event: MessageEvent) => {
       if (event.source !== window) return; // only same-window
       if (!isMainEnvelope(event.data)) return;
-      relay(event.data.msg, port, platforms);
+      relay(event.data.msg, port, state);
     });
   },
 });
 
-function relay(msg: MainMessage, port: ReconnectingPort, platforms: Map<string, Platform>): void {
+interface RelayState {
+  // participantId → identity, learned from participant-joined (which precedes
+  // the participant's first PCM), so PCM frames can carry their platform and
+  // reconnect replays can re-teach the roster.
+  participants: Map<string, { platform: Platform; displayName?: string }>;
+  liveMeeting: { platform: Platform; externalMeetingId: string } | null;
+}
+
+function relay(msg: MainMessage, port: ReconnectingPort, state: RelayState): void {
   switch (msg.kind) {
     case "participant-joined":
-      platforms.set(msg.participantId, msg.platform);
+      state.participants.set(msg.participantId, {
+        platform: msg.platform,
+        ...(msg.displayName ? { displayName: msg.displayName } : {}),
+      });
       // Forward identity (display name included) so the background can
       // upsert the daemon meeting's attendee roster.
       port.post({
@@ -78,7 +111,7 @@ function relay(msg: MainMessage, port: ReconnectingPort, platforms: Map<string, 
       console.log(`[ears/relay] joined ${msg.participantId} gen${msg.generation} (${msg.platform})`);
       break;
     case "participant-left":
-      platforms.delete(msg.participantId);
+      state.participants.delete(msg.participantId);
       port.post({ type: "left", participantId: msg.participantId });
       console.log(`[ears/relay] left ${msg.participantId} gen${msg.generation}`);
       break;
@@ -86,6 +119,7 @@ function relay(msg: MainMessage, port: ReconnectingPort, platforms: Map<string, 
       console.log(`[ears/relay] status: ${msg.text}`);
       break;
     case "meeting-started":
+      state.liveMeeting = { platform: msg.platform, externalMeetingId: msg.externalMeetingId };
       port.post({
         type: "meeting-started",
         platform: msg.platform,
@@ -94,6 +128,7 @@ function relay(msg: MainMessage, port: ReconnectingPort, platforms: Map<string, 
       console.log(`[ears/relay] meeting started: ${msg.platform}/${msg.externalMeetingId}`);
       break;
     case "meeting-ended":
+      state.liveMeeting = null;
       port.post({
         type: "meeting-ended",
         platform: msg.platform,
@@ -102,7 +137,7 @@ function relay(msg: MainMessage, port: ReconnectingPort, platforms: Map<string, 
       console.log(`[ears/relay] meeting ended: ${msg.platform}/${msg.externalMeetingId}`);
       break;
     case "pcm": {
-      const platform = platforms.get(msg.participantId);
+      const platform = state.participants.get(msg.participantId)?.platform;
       if (!platform) return; // no join seen yet; drop until identity is known
       const bytes = new Uint8Array(msg.samples.buffer, msg.samples.byteOffset, msg.samples.byteLength);
       port.post({ type: "pcm", participantId: msg.participantId, platform, b64: bytesToBase64(bytes) });

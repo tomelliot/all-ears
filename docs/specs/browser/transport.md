@@ -30,8 +30,12 @@ It does **not** capture, resample, or inspect audio (it receives finished 16 kHz
 Control is text frames, reusing `earsd`'s `ControlRequest`/`ControlResponse` types:
 
 ```jsonc
-// text --> declare a per-participant stream (first PCM for a new participant)
-{"cmd":"ingest.open","source":"browser:meet:jane-a1b2","format":{"sample_rate":16000,"channels":1,"encoding":"pcm_s16le"}}
+// text --> declare a per-participant stream (first PCM for a new participant).
+// `meeting` (optional) is the membership tag: the meeting identity this source
+// belongs to, when the background's tracker knows it at open time. The daemon
+// uses it to link the source into the meeting server-side, keeping the
+// ingest-idle grace sound across service-worker respawns.
+{"cmd":"ingest.open","source":"browser:meet:jane-a1b2","format":{"sample_rate":16000,"channels":1,"encoding":"pcm_s16le"},"meeting":{"platform":"meet","external_id":"abc-defg-hij"}}
 // text <-- {"ok":true,"data":{"stream_id":"s7"}}
 
 // text --> end the stream (participant left / track ended)

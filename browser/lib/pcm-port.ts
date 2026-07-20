@@ -29,8 +29,23 @@ export interface PortLike {
 export class ReconnectingPort {
   private port: PortLike | null = null;
   private dead = false;
+  private everConnected = false;
 
-  constructor(private readonly connect: () => PortLike) {}
+  /**
+   * `onReconnect` fires when a *fresh* port replaces a severed one (never on
+   * the first connection) — before the message that triggered the reconnect
+   * is posted. A respawned service worker starts with empty in-memory state,
+   * so this is where the relay replays the lifecycle facts the new worker
+   * missed (live meeting, current participants); without it the worker can
+   * forward PCM but never knows which meeting it belongs to, and has nothing
+   * to end when the tab goes away. Replayed messages use the provided `post`
+   * (raw, no re-entrant reconnect) and are delivered in order ahead of the
+   * triggering message.
+   */
+  constructor(
+    private readonly connect: () => PortLike,
+    private readonly onReconnect?: (post: (msg: PortMessage) => void) => void,
+  ) {}
 
   /** Send, transparently reconnecting once if the port went away. */
   post(msg: PortMessage): boolean {
@@ -62,6 +77,17 @@ export class ReconnectingPort {
         if (this.port === port) this.port = null;
       });
       this.port = port;
+      const isRespawn = this.everConnected;
+      this.everConnected = true;
+      if (isRespawn && this.onReconnect) {
+        this.onReconnect((msg) => {
+          try {
+            port.postMessage(msg);
+          } catch {
+            // Port died mid-replay; the next post() reconnects and replays again.
+          }
+        });
+      }
       return port;
     } catch {
       this.dead = true;

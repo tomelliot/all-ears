@@ -116,6 +116,13 @@ export class MeetingTracker {
     return this.state === "paused";
   }
 
+  /** The live meeting's external id for this tab's port — the membership tag
+   * the transport stamps on ingest.open, so the daemon can link the source
+   * into the meeting itself (grace-policy safety net for lost worker state). */
+  externalIdFor(portId: string, platform: Platform): string | undefined {
+    return this.findRecord(portId, platform)?.externalMeetingId;
+  }
+
   /** meeting-started from a tab: declare it to the daemon. */
   meetingStarted(portId: string, platform: Platform, externalMeetingId: string): void {
     const existing = this.meetings.get(externalMeetingId);

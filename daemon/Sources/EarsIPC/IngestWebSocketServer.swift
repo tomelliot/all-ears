@@ -35,9 +35,12 @@ import Foundation
 /// tests). Mirrors ``EarsDaemonKit.ControlServer``'s handler-closure seam.
 public actor IngestWebSocketServer {
   /// `ingest.open`: declare a stream for `source` at `format`, returning its
-  /// `stream_id`. Throws to report a domain failure (encoded as an
-  /// `ok:false` reply) without closing the connection.
-  public typealias OpenHandler = @Sendable (SourceID, AudioFormatSpec) async throws -> String
+  /// `stream_id`. The optional ``MeetingIdentity`` is the client's membership
+  /// tag — which meeting this source belongs to. Throws to report a domain
+  /// failure (encoded as an `ok:false` reply) without closing the connection.
+  public typealias OpenHandler =
+    @Sendable (SourceID, AudioFormatSpec, MeetingIdentity?) async throws
+    -> String
   /// One binary PCM frame's decoded samples for an open `stream_id`.
   public typealias PushHandler = @Sendable (String, [Float], Int) async -> Void
   /// `ingest.close`, or implicit close on connection teardown for any
@@ -213,9 +216,9 @@ public actor IngestWebSocketServer {
       return
     }
     switch request {
-    case .open(let source, let format):
+    case .open(let source, let format, let meeting):
       do {
-        let streamID = try await openHandler(source, format)
+        let streamID = try await openHandler(source, format, meeting)
         openStreams[streamID] = OpenStream(format: format)
         try? await socket.send(
           WebSocketFrameWriter.text(

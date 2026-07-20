@@ -82,7 +82,7 @@ struct IngestWebSocketServerRealSocketTests {
     let server = IngestWebSocketServer(
       listener: listener,
       allowedOrigins: ["test-origin"],
-      onOpen: { source, _ in await sink.open(source) },
+      onOpen: { source, _, _ in await sink.open(source) },
       onPush: { _, _, _ in },
       onClose: { _ in })
     let runner = Task { await server.run() }
@@ -94,7 +94,7 @@ struct IngestWebSocketServerRealSocketTests {
 
     let format = AudioFormatSpec(sampleRate: 16000, channels: 1, encoding: "pcm_s16le")
     let openRequest = IngestRequest.open(
-      source: "browser:meet:real-socket-test", format: format)
+      source: "browser:meet:real-socket-test", format: format, meeting: nil)
     let requestText = String(data: try JSONEncoder().encode(openRequest), encoding: .utf8)!
     try await client.send(TestWebSocketClient.text(requestText))
 

@@ -100,6 +100,23 @@ describe("MeetingTracker (v2 signal forwarder)", () => {
     expect(tracker.meetingActive).toBe(true);
   });
 
+  it("externalIdFor answers for the declaring port and goes silent once the meeting ends", async () => {
+    const control = new FakeControl();
+    const { tracker } = makeTracker(control);
+
+    expect(tracker.externalIdFor("p1", "meet")).toBeUndefined();
+
+    tracker.meetingStarted("p1", "meet", "abc");
+    await flush();
+    expect(tracker.externalIdFor("p1", "meet")).toBe("abc");
+    expect(tracker.externalIdFor("p2", "meet")).toBeUndefined(); // another tab's port
+    expect(tracker.externalIdFor("p1", "zoom")).toBeUndefined(); // platform mismatch
+
+    tracker.meetingEnded("abc");
+    await flush();
+    expect(tracker.externalIdFor("p1", "meet")).toBeUndefined();
+  });
+
   it("a duplicate meeting-started is not re-declared", async () => {
     const control = new FakeControl();
     const { tracker } = makeTracker(control);

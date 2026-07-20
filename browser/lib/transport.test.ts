@@ -126,6 +126,21 @@ describe("EarsSocket", () => {
     expect(decodeFrame(binarySent(ws)[1]!).streamId).toBe("s1");
   });
 
+  it("ingest.open carries the meeting membership tag when the caller knows it", () => {
+    const socket = new EarsSocket(47811);
+    const ws = connectAndOpen(socket);
+
+    socket.sendPcm("jane-a1b2", "meet", new Uint8Array([1, 2]), "kQ0DRVtDaekB");
+    expect(textSent(ws)).toEqual([
+      {
+        cmd: "ingest.open",
+        source: sourceLabel("meet", "jane-a1b2"),
+        format: INGEST_FORMAT,
+        meeting: { platform: "meet", external_id: "kQ0DRVtDaekB" },
+      },
+    ]);
+  });
+
   it("a failed ingest.open marks the participant failed and drops future frames without retry", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const socket = new EarsSocket(47811);

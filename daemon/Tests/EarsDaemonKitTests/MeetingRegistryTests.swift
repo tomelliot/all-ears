@@ -431,6 +431,91 @@ struct MeetingRegistryTests {
 
     #expect(try await registry.get(id: meeting.id).state == .active)
   }
+
+  // MARK: - daemon-side ingest linking (the `meeting` tag on ingest.open)
+
+  @Test("a tagged stream joins the live meeting's sources, so the grace can end it")
+  func taggedStreamLinksIntoLiveMeeting() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let gate = SleepGate()
+    let registry = makeRegistry(
+      dataRoot: dataRoot, clock: clock, graceSeconds: 120,
+      sleep: { seconds in await gate.wait(seconds) })
+
+    // The incident shape: the meeting declared with no browser sources at all
+    // (the client's attendee source upserts never arrived).
+    let meeting = try await registry.start(
+      MeetingStartParams(platform: "meet", externalID: "abc", trigger: .browserExtension))
+    #expect(meeting.sources == [])
+
+    let identity = MeetingIdentity(platform: "meet", externalID: "abc")
+    await registry.ingestStreamOpened(source: "browser:meet:jane", meeting: identity)
+
+    let linked = try await registry.get(id: meeting.id)
+    #expect(linked.sources == ["browser:meet:jane"])
+    let onDisk = try MeetingStore.read(meetingID: meeting.id, dataRoot: dataRoot)
+    #expect(onDisk.sources == ["browser:meet:jane"])
+
+    // With membership linked daemon-side, the ingest-idle grace now works.
+    await registry.ingestStreamClosed(source: "browser:meet:jane")
+    await gate.releaseAll()
+    await waitUntil { try await registry.get(id: meeting.id).state == .ended }
+    let timeline = MeetingEventLog.readAll(dataRoot: dataRoot, meetingID: meeting.id)
+    #expect(timeline.last?.reason == "ingest-idle")
+  }
+
+  @Test("a tagged stream opened before meeting.start is claimed at start")
+  func taggedStreamBeforeStartIsClaimed() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let registry = makeRegistry(dataRoot: dataRoot, clock: clock)
+
+    let identity = MeetingIdentity(platform: "meet", externalID: "abc")
+    await registry.ingestStreamOpened(source: "browser:meet:jane", meeting: identity)
+
+    let meeting = try await registry.start(
+      MeetingStartParams(platform: "meet", externalID: "abc", trigger: .browserExtension))
+    #expect(meeting.sources == ["browser:meet:jane"])
+  }
+
+  @Test("an idempotent re-declare also claims pending tagged streams")
+  func redeclareClaimsPendingLinks() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let registry = makeRegistry(dataRoot: dataRoot, clock: clock)
+
+    let started = try await registry.start(
+      MeetingStartParams(platform: "meet", externalID: "abc", trigger: .browserExtension))
+    // Tagged open under a *different* identity: stashed, not linked here.
+    await registry.ingestStreamOpened(
+      source: "browser:meet:other", meeting: MeetingIdentity(platform: "meet", externalID: "xyz"))
+    #expect(try await registry.get(id: started.id).sources == [])
+
+    // A respawned worker re-declares; a stream tagged with this identity that
+    // opened while no record existed is claimed by the re-declare.
+    await registry.ingestStreamOpened(
+      source: "browser:meet:jane", meeting: MeetingIdentity(platform: "meet", externalID: "abc"))
+    let redeclared = try await registry.start(
+      MeetingStartParams(platform: "meet", externalID: "abc", trigger: .browserExtension))
+    #expect(redeclared.id == started.id)
+    #expect(redeclared.sources == ["browser:meet:jane"])
+  }
+
+  @Test("a tagged stream that closes before its meeting.start links nothing")
+  func pendingLinkDroppedOnClose() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let registry = makeRegistry(dataRoot: dataRoot, clock: clock)
+
+    let identity = MeetingIdentity(platform: "meet", externalID: "abc")
+    await registry.ingestStreamOpened(source: "browser:meet:jane", meeting: identity)
+    await registry.ingestStreamClosed(source: "browser:meet:jane")
+
+    let meeting = try await registry.start(
+      MeetingStartParams(platform: "meet", externalID: "abc", trigger: .browserExtension))
+    #expect(meeting.sources == [])
+  }
 }
 
 /// A controllable stand-in for the registry's sleep seam: waiters block until

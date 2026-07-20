@@ -27,6 +27,10 @@ type PendingRequest = { kind: "open"; participantId: ParticipantId } | { kind: "
 
 interface ParticipantState {
   platform: Platform;
+  /** External meeting id the participant belongs to, when the tracker knows
+   * it — stamped on ingest.open so the daemon links the source into the
+   * meeting itself (membership survives a respawned service worker). */
+  meetingExternalId?: string;
   streamId?: string; // set once ingest.open succeeds
   opening: boolean;
   failed: boolean;
@@ -125,12 +129,17 @@ export class EarsSocket {
 
   // ── PCM in ────────────────────────────────────────────────────────────────
 
-  sendPcm(participantId: ParticipantId, platform: Platform, pcm: Uint8Array): void {
+  sendPcm(
+    participantId: ParticipantId,
+    platform: Platform,
+    pcm: Uint8Array,
+    meetingExternalId?: string,
+  ): void {
     if (this.status !== "connected" || !this.ws) return; // no buffering while down
 
     let st = this.participants.get(participantId);
     if (!st) {
-      st = { platform, opening: false, failed: false, queue: [], dropped: 0 };
+      st = { platform, meetingExternalId, opening: false, failed: false, queue: [], dropped: 0 };
       this.participants.set(participantId, st);
     }
     if (st.failed) return;
@@ -155,6 +164,9 @@ export class EarsSocket {
       cmd: "ingest.open",
       source: sourceLabel(st.platform, participantId),
       format: INGEST_FORMAT,
+      ...(st.meetingExternalId
+        ? { meeting: { platform: st.platform, external_id: st.meetingExternalId } }
+        : {}),
     });
   }
 

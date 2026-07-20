@@ -78,6 +78,63 @@ describe("ReconnectingPort", () => {
     expect(attempts).toBe(1); // permanent: no retry storm from a dead context
   });
 
+  it("onReconnect stays silent on the first connection", () => {
+    let reconnects = 0;
+    const port = new ReconnectingPort(
+      () => new FakePort(),
+      () => reconnects++,
+    );
+    port.post(MSG);
+    port.post(MSG);
+    expect(reconnects).toBe(0);
+  });
+
+  it("onReconnect replays into a respawned port ahead of the triggering message", () => {
+    const REPLAY: PortMessage = {
+      type: "meeting-started",
+      platform: "meet",
+      externalMeetingId: "abc",
+    };
+    const port = new ReconnectingPort(
+      () => new FakePort(),
+      (post) => post(REPLAY),
+    );
+    port.post(MSG);
+    expect(FakePort.instances[0]!.sent).toEqual([MSG]); // no replay on first connect
+
+    FakePort.instances[0]!.disconnect();
+    port.post(MSG);
+    // The fresh worker hears the lifecycle facts before the message that woke it.
+    expect(FakePort.instances[1]!.sent).toEqual([REPLAY, MSG]);
+  });
+
+  it("a port dying mid-replay doesn't throw; the next post retries from scratch", () => {
+    const REPLAY: PortMessage = {
+      type: "meeting-started",
+      platform: "meet",
+      externalMeetingId: "abc",
+    };
+    let breakOnConnect = false;
+    const port = new ReconnectingPort(
+      () => {
+        const p = new FakePort();
+        if (breakOnConnect) p.broken = true;
+        return p;
+      },
+      (post) => post(REPLAY),
+    );
+    port.post(MSG);
+    FakePort.instances[0]!.disconnect();
+    breakOnConnect = true;
+
+    expect(port.post(MSG)).toBe(false); // replay + post both swallowed, no throw
+
+    breakOnConnect = false;
+    expect(port.post(MSG)).toBe(true);
+    const revived = FakePort.instances.at(-1)!;
+    expect(revived.sent).toEqual([REPLAY, MSG]);
+  });
+
   it("drops the frame (returns false) when the immediate retry also fails", () => {
     let n = 0;
     const port = new ReconnectingPort(() => {
