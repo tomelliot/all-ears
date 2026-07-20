@@ -79,6 +79,12 @@ public struct SubscribeParams: Sendable, Hashable, Codable {
     self.sources = sources
   }
 
+  // Hand-written Codable on both sides suppresses the synthesized
+  // CodingKeys, so it is declared explicitly.
+  private enum CodingKeys: String, CodingKey {
+    case events, sources
+  }
+
   public init(from decoder: any Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     events = try container.decodeIfPresent([EventKind].self, forKey: .events) ?? []

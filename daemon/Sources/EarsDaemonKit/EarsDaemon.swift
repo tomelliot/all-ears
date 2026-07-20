@@ -329,22 +329,24 @@ public actor EarsDaemon {
     // The daemon-owned meeting lifecycle registry, serving the `meeting.*`
     // verbs on both control transports. Meeting end fires the meeting-level
     // auto-transcribe (gated the same way as the v1 per-session hook).
-    let meetingPipeline: OnClosePipelineRunner? =
-      configuration.triggers.transcribeOnBrowserSessionClose
-      ? OnClosePipelineRunner(outputRoot: configuration.outputRoot, log: log) : nil
+    let onMeetingEnded: MeetingRegistry.EndedHook?
+    if configuration.triggers.transcribeOnBrowserSessionClose {
+      let pipeline = OnClosePipelineRunner(outputRoot: configuration.outputRoot, log: log)
+      onMeetingEnded = { meeting, _ in
+        guard meeting.trigger == .browserExtension else { return }
+        Task {
+          await pipeline.runMeetingTranscribe(meetingID: meeting.id, context: "meeting-end")
+        }
+      }
+    } else {
+      onMeetingEnded = nil
+    }
     let meetings = MeetingRegistry(
       dataRoot: configuration.dataRoot,
       clock: clock,
       bus: eventBus,
       graceSeconds: configuration.meetingIngestCloseGraceSeconds,
-      onEnded: meetingPipeline.map { pipeline in
-        { meeting, _ in
-          guard meeting.trigger == .browserExtension else { return }
-          Task {
-            await pipeline.runMeetingTranscribe(meetingID: meeting.id, context: "meeting-end")
-          }
-        }
-      },
+      onEnded: onMeetingEnded,
       log: log)
     await meetings.loadFromDisk()
     meetingRegistry = meetings

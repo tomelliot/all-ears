@@ -92,8 +92,9 @@ public actor EventBus {
   /// (a `Meeting`'s `rev` field): `make` receives the assigned revision and
   /// returns the event to deliver. Assignment and enqueue are atomic within
   /// this actor, so revisions reach subscribers in order and gap-free.
+  /// `@Sendable` because callers invoke this across actor isolation.
   @discardableResult
-  public func publishState(_ make: (Int) -> EarsEvent) -> Int {
+  public func publishState(_ make: @Sendable (Int) -> EarsEvent) -> Int {
     rev += 1
     frames?.yield(EventFrame(event: make(rev), rev: rev))
     return rev
