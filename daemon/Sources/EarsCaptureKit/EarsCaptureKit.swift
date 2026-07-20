@@ -1,6 +1,6 @@
 /// Core Audio / `AVAudioEngine` capture shim: adapts the microphone to
-/// `EarsCore`'s `CaptureBackend` protocol seam, per `docs/roadmap.md`'s
-/// Phase 1 "Capture MVP -- mic only" design.
+/// `EarsCore`'s `CaptureBackend` protocol seam, per `docs/architecture.md`'s
+/// module structure.
 ///
 /// The capture pipeline lives in ``MicCaptureBackend`` (tap + ``AudioSampleRing``
 /// + ``GenerationGate`` + route-change recovery + stall watchdog) and

@@ -1,6 +1,6 @@
 /// Explicit failure modes for an ``LLMBackend`` call.
 ///
-/// `docs/product/specs/llm-stages.md`: "Failures are loud and non-zero" --
+/// `docs/specs/llm-stages.md`: "Failures are loud and non-zero" --
 /// a backend throws one of these rather than degrading to an empty
 /// completion, so a caller can log and fall back to the original text
 /// deliberately (via ``CleanupValidator``) instead of silently shipping

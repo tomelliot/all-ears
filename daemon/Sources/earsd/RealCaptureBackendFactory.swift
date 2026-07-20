@@ -31,7 +31,7 @@ let syntheticCaptureBackendEnvironmentKey = "ALLEARS_CAPTURE_BACKEND"
 /// ``EarsDaemon``: dispatches on `descriptor.sourceClass` to a real
 /// `EarsCaptureKit.MicCaptureBackend` (`.mic`) or
 /// `EarsCaptureKit.SystemAudioCaptureBackend` (`.system`/`.app`, the Core
-/// Audio process-tap backend, per `docs/product/specs/capture-daemon.md`).
+/// Audio process-tap backend, per `docs/specs/capture-daemon.md`).
 /// `DaemonConfigResolution` never resolves any other class into a
 /// config-declared `SourceDescriptor` (a `browser:*` source is instead built
 /// dynamically by `EarsDaemon.openIngestSource(label:format:)`, and

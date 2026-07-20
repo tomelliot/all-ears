@@ -42,7 +42,7 @@ public struct TranscriptFrontmatter: Sendable, Hashable {
   /// The `[[summarize.preset]]` name this summary was generated from (e.g.
   /// `brief`); `nil` for `kind: transcript`/`kind: clean`, which have no
   /// preset. Rendered between `kind` and `derived_from` when present, per
-  /// `docs/product/specs/llm-stages.md`'s "frontmatter kind: summary,
+  /// `docs/specs/llm-stages.md`'s "frontmatter kind: summary,
   /// preset, and derived_from".
   public var preset: String?
 

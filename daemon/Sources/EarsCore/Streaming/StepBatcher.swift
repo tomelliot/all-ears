@@ -2,7 +2,7 @@
 /// incoming audio buffers and releases fixed-size model steps, decoupling
 /// chunk-arrival cadence (30 s ring-buffer chunks, bursty ingest pushes) from
 /// the model's per-step compute budget — the `StepBatcher` role named in
-/// `docs/product/specs/transcribe.md`'s append-only delta contract.
+/// `docs/specs/transcribe.md`'s append-only delta contract.
 ///
 /// Pure accumulation logic, no I/O and no clock — tier-0 tested per
 /// `docs/engineering-practices.md`. The *caller* decides when to stop and

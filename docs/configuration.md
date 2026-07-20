@@ -4,12 +4,12 @@
 
 Layered, highest wins:
 
-1. **Built-in defaults** — every setting has a sensible default; the suite runs with no config file.
+1. **Built-in defaults** — every setting has one; the suite runs with no config file.
 2. **Config file** — TOML at a standard path.
-3. **Environment variables** — prefix `EARS_`, nested keys joined by `__`.
+3. **Environment variables** — prefix `EARS_`, nested keys joined by `__` (e.g. `EARS_LOG__LEVEL`).
 4. **CLI flags** — per-invocation overrides.
 
-Example resolution for the data root: default `~/Library/Application Support/ears` → `data_root` in TOML → `EARS_DATA_ROOT` → `--data-root`.
+Example for the data root: default `~/Library/Application Support/ears` → `data_root` in TOML → `EARS_DATA_ROOT` → `--data-root`.
 
 ## File location
 
@@ -20,7 +20,7 @@ Resolved in order:
 3. `$XDG_CONFIG_HOME/ears/config.toml` if set.
 4. `~/.config/ears/config.toml`.
 
-All tools read the same config file. Tool-specific settings live under a `[tools.<name>]` table.
+All tools read the same file. Tool-specific settings live in their own tables.
 
 ## Reference
 
@@ -28,7 +28,7 @@ All tools read the same config file. Tool-specific settings live under a `[tools
 schema = 1
 
 # --- Shared paths ---
-data_root   = "~/Library/Application Support/ears"  # ring buffer, sessions, vocab, runtime
+data_root   = "~/Library/Application Support/ears"  # ring buffer, sessions, meetings, vocab, runtime
 output_root = "~/Documents/Transcripts"             # transcripts, summaries
 socket_path = ""   # empty => <data_root>/runtime/earsd.sock
 
@@ -45,7 +45,7 @@ rotate_max_files = 5
 # --- Capture daemon ---
 [earsd]
 default_time_cap_seconds = 7200   # 2h ring-buffer window per source
-hard_total_cap_bytes     = 0      # 0 => unlimited backstop; else evict to stay under
+hard_total_cap_bytes     = 0      # 0 => unlimited; else evict oldest across sources to stay under
 chunk_seconds            = 30
 codec                    = "aac"  # aac | opus
 bitrate                  = 64000
@@ -55,18 +55,22 @@ store_native             = true   # keep the listenable copy alongside the ASR f
 channels                 = 1
 
 [earsd.vad]
-backend      = "silero"   # pluggable; not yet honored -- Phase 1 always uses
-                           # the pure energy-threshold EnergyVAD regardless of
-                           # this value. A Silero-class model is deferred to a
-                           # later phase (see EnergyVAD's doc comment).
-speech_pad_ms = 300       # pad around detected speech spans
-min_silence_ms = 700      # gap before declaring silence
+backend        = "energy"  # currently ignored: an energy-threshold VAD is always used
+speech_pad_ms  = 300       # pad around detected speech spans
+min_silence_ms = 700       # gap before declaring silence
 
+# Audio ingestion from the browser extension (binary PCM). Off by default.
 [earsd.ingest_ws]
-enabled         = false   # off by default; opt-in
-port            = 47811   # loopback TCP port; matches the browser extension's default
+enabled         = false
+port            = 47811   # loopback only
 allowed_origins = []      # e.g. ["chrome-extension://<id>", "moz-extension://<uuid>"];
-                           # empty rejects every connection (fail closed)
+                          # empty rejects every connection (fail closed)
+
+# Control plane for the browser extension (sessions, meetings, status). Off by default.
+[earsd.control_ws]
+enabled         = false
+port            = 47812   # loopback only
+allowed_origins = []      # same fail-closed allowlist as ingest_ws
 
 # Sources enabled at startup. Each may override capture params.
 [[earsd.source]]
@@ -77,7 +81,7 @@ device_uid = ""           # empty => default input
 [[earsd.source]]
 id    = "system"
 class = "system"
-enabled = false           # opt-in: needs system-audio permission
+enabled = false           # opt-in: needs the system-audio-recording permission
 
 [[earsd.source]]
 id    = "app:us.zoom.xos"
@@ -88,34 +92,24 @@ time_cap_seconds = 14400  # keep meetings longer
 # --- Auto-triggers ---
 [triggers]
 enabled = true
+transcribe_on_browser_session_close = false  # run the pipeline when a browser meeting session closes
 
 [[triggers.rule]]
 name = "meetings"
-on   = "app-audio-active"           # fires on genuine audio activity (the matched
-                                     # app's own app:<bundle-id> source VAD going
-                                     # speech), not merely the app launching
-apps = ["us.zoom.xos", "com.microsoft.teams2", "com.google.Chrome"]  # exact bundle ids only
+on   = "app-audio-active"           # fires on genuine audio activity (the matched app's
+                                    # own source VAD going speech), not app launch
+apps = ["us.zoom.xos", "com.microsoft.teams2"]      # exact bundle ids
 open_session = true
 sources = ["mic", "app:us.zoom.xos"]
 on_close = ["transcribe", "cleanup", "summarize"]   # pipeline to run when the session closes
-pre_roll_seconds = 15               # widen transcribe's read range backward by
-                                     # this many seconds of already-buffered audio
-
-# --- Transcription ---
-[transcribe]
-model        = "parakeet"
-backend      = "fluidaudio"   # native ANE/Metal; or "subprocess"
-compute      = "ane"          # ane | gpu | cpu
-diarize      = true
-diarize_backend = "pyannote"
-skip_silence = true           # use the VAD index to skip silence spans
+pre_roll_seconds = 15               # widen transcribe's read range backward by this many
+                                    # seconds of already-buffered audio
 
 # --- LLM stages ---
 [llm]
-backend = "llm-cli"           # llm-cli | (future) anthropic-sdk | command
-model   = "claude-sonnet-5"   # passed to `llm -m`
-# For backend = "command", a shell template taking prompt on stdin, completion on stdout:
-# command = "llm -m claude-sonnet-5"
+backend = "llm-cli"           # llm-cli | command — both run a subprocess:
+model   = "claude-sonnet-5"   #   llm-cli runs `llm -m <model>`; command runs the line below
+# command = "my-llm-wrapper --fast"   # prompt on stdin, completion on stdout
 
 [cleanup]
 prompt_file = ""              # empty => built-in cleanup prompt
@@ -133,9 +127,11 @@ prompt_file = "prompts/action-items.md"
 global = "vocab/global.txt"   # relative to data_root
 ```
 
+Transcription itself has no config table yet: `transcribe` always uses Parakeet via FluidAudio on the Apple Neural Engine, with VAD silence-skipping on. Model, backend, and diarization settings will get a `[transcribe]` table when there is more than one choice to make.
+
 ## Conventions
 
-- **Paths** support `~` expansion and are resolved relative to `data_root` when not absolute (except `data_root`/`output_root` themselves).
-- **Zero-config:** with no file present, the daemon captures `mic` with the defaults above; transcription uses Parakeet on the ANE; LLM stages use the `llm` CLI with its default model.
+- **Paths** support `~` expansion and resolve relative to `data_root` when not absolute (except `data_root`/`output_root` themselves).
+- **Zero-config:** with no file present, the daemon captures `mic` with the defaults above and the LLM stages use the `llm` CLI.
 - **Validation:** each tool validates its config at startup and exits non-zero with a precise message (key path + reason) on any unknown key or invalid value. No silent fallback.
-- **Discovery:** every tool can print the resolved, merged config as TOML and report which file was loaded, for debugging the layering. The single-purpose tools (`earsd`, `transcribe`, `cleanup`, `summarize`) spell it `--print-config` / `--config-path`; `ears`, whose root is a pure subcommand dispatcher, spells it `ears config show` / `ears config path`.
+- **Discovery:** every tool prints the resolved, merged config and reports which file was loaded. The single-purpose tools spell it `--print-config` / `--config-path`; `ears` spells it `ears config show` / `ears config path`.

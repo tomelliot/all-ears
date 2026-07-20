@@ -7,7 +7,7 @@ const devHosts = process.env.WXT_DEV_LOCALHOST
   ? ["http://localhost/*", "http://127.0.0.1/*"]
   : [];
 
-// Manifest surface per docs/specs/extension.md §WXT project layout.
+// Manifest surface per docs/specs/browser/extension.md §WXT project layout.
 export default defineConfig({
   manifest: ({ browser }) => ({
     name: "All Ears",

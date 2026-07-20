@@ -172,7 +172,7 @@ enum DaemonConfigResolution {
 
   /// `[earsd.ingest_ws]` → ``IngestWebSocketConfiguration``, or `nil` when
   /// `enabled` isn't `true` (the default — opt-in per
-  /// `docs/product/browser/prompts/earsd-websocket-ingest.md`).
+  /// `docs/specs/capture-daemon.md` ("Audio ingestion")).
   private static func resolveIngestWebSocket(
     _ earsd: [String: ConfigValue]
   ) -> IngestWebSocketConfiguration? {

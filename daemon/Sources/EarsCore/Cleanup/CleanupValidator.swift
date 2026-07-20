@@ -32,7 +32,7 @@ public enum CleanupRejectionReason: Sendable, Hashable, CustomStringConvertible 
   }
 }
 
-/// The cleanup accept/fallback guardrail from `docs/product/specs/
+/// The cleanup accept/fallback guardrail from `docs/specs/
 /// llm-stages.md`'s "Refinement guardrails": "if the cleaned output diverges
 /// from the source beyond a bound (length ratio, entity drift), reject it
 /// and keep the original segment rather than shipping a hallucination."

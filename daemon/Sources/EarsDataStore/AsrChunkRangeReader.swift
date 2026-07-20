@@ -5,7 +5,7 @@ import Foundation
 /// ``IndexedChunk``s (typically ``ReconstructedRange/chunks``, from
 /// ``RangeReconstructor``) to the `asr/` chunk file(s) that cover it, and
 /// stitches exactly that span's `Float32` samples out of them into one
-/// ``AudioBuffer`` -- `docs/product/specs/transcribe.md`'s "resolve which
+/// ``AudioBuffer`` -- `docs/specs/transcribe.md`'s "resolve which
 /// on-disk chunk file(s) in `asr/` cover that range" step, made concrete.
 ///
 /// Handles a range spanning multiple chunk files (frames from each

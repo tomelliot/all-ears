@@ -3,7 +3,7 @@ import EarsCLISupport
 import Foundation
 
 /// Reads a transcript, applies the LLM with the known-word list and context, and
-/// writes a cleaned transcript. See `docs/product/specs/llm-stages.md`.
+/// writes a cleaned transcript. See `docs/specs/llm-stages.md`.
 ///
 /// Every invocation still runs `EarsCLI.run(tool:version:arguments:)` first,
 /// unchanged -- the day-one config/logging contract every tool satisfies.

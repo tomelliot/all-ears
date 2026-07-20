@@ -1,10 +1,10 @@
 # Capture daemon soak-test runbook
 
-Manual procedure for checking [the roadmap](../product/roadmap.md)'s Phase 1
-exit criterion: "daemon runs for days at a flat memory baseline; buffer stays
-bounded; gaps recorded across restarts, sleep/wake, and device unplug." This
-is a real-world, multi-day claim about a running process on real hardware —
-no automated test can establish it, and none here claims to.
+Manual procedure for checking the capture daemon's core reliability claim:
+"daemon runs for days at a flat memory baseline; buffer stays bounded; gaps
+recorded across restarts, sleep/wake, and device unplug." This is a
+real-world, multi-day claim about a running process on real hardware — no
+automated test can establish it, and none here claims to.
 
 ## What already exists, and what this fills in
 
@@ -24,7 +24,7 @@ code should claim this is automated — it isn't.
 
 1. Build a release binary from `daemon/`: `swift build -c release`. The
    binary lands at `daemon/.build/release/earsd`.
-2. Write a config with exactly one enabled source (Phase 1 is mic-only), a
+2. Write a config with exactly one enabled source (mic keeps the run simple), a
    real `data_root` with room to spare, and a `--log-file` so `earsd`'s own
    structured log survives the whole run:
 
@@ -73,8 +73,8 @@ attach afterward.)
 then flattens and stays flat — no sustained upward trend across the run. A
 slow, steady climb across hours/days is exactly the "buffer scales with time
 on disk instead of being bounded" failure this criterion exists to catch —
-treat that as a failed run, not noise, and file it before considering Phase 1
-done.
+treat that as a failed run, not noise, and file it before calling capture
+reliable.
 
 ### 2. The on-disk ring buffer stays bounded
 
@@ -141,5 +141,5 @@ For each run, keep:
 
 - Does not replace `SoakProxyTests`, which keeps running in CI on every
   commit as the regression guard on the eviction/bounded-file *logic*.
-- Does not cover multi-source scenarios — Phase 1 is mic-only, so this
-  procedure only exercises the single `mic` source.
+- Does not cover multi-source scenarios — this procedure only exercises the
+  single `mic` source.

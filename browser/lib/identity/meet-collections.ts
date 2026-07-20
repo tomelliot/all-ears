@@ -3,8 +3,8 @@
 // undocumented, unversioned format — every read defaults to "might be
 // garbage": any parse failure (wrong tag, truncated buffer, missing path,
 // non-gzip payload) returns null, never throws. See
-// docs/product/browser/specs/extension.md's MUST-NOT #6 exception and
-// docs/product/browser/prompts/meet-identify-via-collections.md before
+// docs/specs/browser/extension.md's MUST-NOT #6 exception and
+// docs/specs/browser/extension.md (the collections exception) before
 // decoding anything beyond the two fields below — that's the whole point of
 // the exception being narrow.
 //

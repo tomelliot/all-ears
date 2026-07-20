@@ -3,7 +3,7 @@ import EarsDataStore
 import EarsLLMKit
 import Foundation
 
-/// `cleanup`'s actual pipeline, per `docs/product/specs/llm-stages.md`'s
+/// `cleanup`'s actual pipeline, per `docs/specs/llm-stages.md`'s
 /// "cleanup" section: read a `.transcript.md` (+ JSON sidecar if present),
 /// run each segment through the LLM guardrail chain (skip high-confidence
 /// utterances, build a minimal-change prompt, validate the candidate against
@@ -26,11 +26,10 @@ import Foundation
 /// a defensible scope bound for now, not silently assumed — a future task
 /// can add chunking if a real transcript ever needs it.
 ///
-/// **Scope decision — no speaker name map:** `docs/product/specs/llm-stages.md`'s
+/// **Scope decision — no speaker name map:** `docs/specs/llm-stages.md`'s
 /// optional "apply a speaker name map if present in the session" step is
-/// diarization-dependent (Phase 5, not yet built — see
-/// `docs/product/prompts/phase-4-multi-source-sessions.md`'s explicit "out
-/// of scope: Diarization"), so it is not applied here.
+/// diarization-dependent (not yet built — see
+/// `docs/specs/model-interface.md`), so it is not applied here.
 enum CleanupPipeline {
   struct Dependencies: Sendable {
     var clock: any NowProviding

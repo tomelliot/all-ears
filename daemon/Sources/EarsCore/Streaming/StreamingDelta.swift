@@ -1,5 +1,5 @@
 /// The append-only delta contract for streaming transcription output, per
-/// `docs/product/specs/transcribe.md`'s "Append-only delta contract": output
+/// `docs/specs/transcribe.md`'s "Append-only delta contract": output
 /// safe for a **no-backspace sink** (a terminal, the socket's live feed, a
 /// file being appended).
 ///

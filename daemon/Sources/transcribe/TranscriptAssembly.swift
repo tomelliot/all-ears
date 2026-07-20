@@ -22,7 +22,7 @@ struct SourceTranscription {
 /// ``SourceTranscription`` values this takes.
 enum TranscriptAssembly {
   /// Speaker label for a source with no diarization stage (not implemented
-  /// yet -- see `docs/product/specs/model-interface.md`'s `Diarizer`
+  /// yet -- see `docs/specs/model-interface.md`'s `Diarizer`
   /// protocol, out of scope for this pass): `mic` maps to `You` per
   /// `docs/data-formats.md`'s speaker-attribution rule; any other source
   /// (a future `app:`/`system`/`browser:` capture) is labelled with its own

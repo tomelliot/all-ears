@@ -33,9 +33,8 @@ public enum TriggerRuleEvent: Sendable, Hashable {
   case processCountChanged(bundleID: String, count: Int)
   /// `bundleID`'s own `app:<bundle-id>` source's VAD just transitioned to
   /// `.speech` — the "genuine audio activity" signal `on =
-  /// "app-audio-active"` means, per
-  /// `docs/product/prompts/phase-4-multi-source-sessions.md`: not merely
-  /// that the app launched.
+  /// "app-audio-active"` means, per `docs/specs/capture-daemon.md`'s
+  /// trigger contract: not merely that the app launched.
   case audioActive(bundleID: String)
 }
 

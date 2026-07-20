@@ -5,7 +5,7 @@ import EarsLLMKit
 import Foundation
 
 /// `summarize`'s CLI inputs beyond the shared day-one flags, per
-/// `docs/product/specs/llm-stages.md`'s
+/// `docs/specs/llm-stages.md`'s
 /// `summarize <transcript.md> [more...] [--preset ...] [--all-presets] [--out] [--model]`.
 struct SummarizeCLIInputs: Sendable {
   var transcriptPaths: [String]

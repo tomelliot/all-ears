@@ -19,7 +19,7 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/LebJe/TOMLKit", exact: "0.6.0"),
     .package(url: "https://github.com/apple/swift-argument-parser", exact: "1.8.2"),
-    // Native Parakeet/ASR backend (`docs/product/specs/model-interface.md`'s
+    // Native Parakeet/ASR backend (`docs/specs/model-interface.md`'s
     // "Backend 1 -- native"): Core ML/ANE inference via FluidAudio.
     .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.15.5"),
   ],
@@ -84,7 +84,7 @@ let package = Package(
     ),
 
     // Dual-rate chunk encoding, atomic writes, and index/session persistence
-    // for captured audio, per `docs/roadmap.md`'s Phase 1 design.
+    // for captured audio, per `docs/architecture.md`.
     .target(
       name: "EarsDataStore",
       dependencies: [
@@ -93,7 +93,7 @@ let package = Package(
       ]
     ),
 
-    // The concrete LLM backend shim (`docs/product/specs/llm-stages.md`'s
+    // The concrete LLM backend shim (`docs/specs/llm-stages.md`'s
     // `command` backend): spawns a configured subprocess (e.g. `llm -m
     // <model>`), per-call, behind the `EarsCore.LLMBackend` protocol. Kept
     // out of `EarsCore` since it does real process I/O; `cleanup`/
@@ -134,7 +134,7 @@ let package = Package(
       ]
     ),
 
-    // The native ASR backend shim (`docs/product/specs/model-interface.md`'s
+    // The native ASR backend shim (`docs/specs/model-interface.md`'s
     // "Backend 1 -- native"): NVIDIA Parakeet TDT via FluidAudio's Core ML/ANE
     // pipeline, behind the `Transcriber` protocol. Kept as thin as possible
     // per the tier-2 rule in `docs/engineering-practices.md` -- only this

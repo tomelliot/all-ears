@@ -3,8 +3,8 @@ import Foundation
 
 /// The loopback WebSocket ingest endpoint (`ws://127.0.0.1:<port>/ingest`,
 /// `[earsd.ingest_ws]`) the browser extension streams per-participant PCM
-/// through — see `browser/docs/specs/transport.md` and
-/// `docs/product/browser/prompts/earsd-websocket-ingest.md`.
+/// through — see `docs/specs/browser/transport.md` and
+/// `docs/specs/capture-daemon.md` ("Audio ingestion").
 ///
 /// ## Why this is hand-rolled instead of `Network.framework`'s `NWProtocolWebSocket`
 ///

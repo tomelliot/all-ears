@@ -18,7 +18,7 @@ func resolveModelVersion(fromIdentifier identifier: String?) -> AsrModelVersion 
 }
 
 /// Pure mapping from the backend-agnostic `ComputePreference` (see
-/// `docs/product/specs/model-interface.md`) to Core ML's own
+/// `docs/specs/model-interface.md`) to Core ML's own
 /// `MLComputeUnits` selector, factored out for the same reason as
 /// ``resolveModelVersion(fromIdentifier:)``.
 func resolveComputeUnits(for preference: ComputePreference) -> MLComputeUnits {

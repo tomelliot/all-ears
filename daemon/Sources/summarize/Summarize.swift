@@ -3,7 +3,7 @@ import EarsCLISupport
 import Foundation
 
 /// Reads one or more transcripts and writes summaries from configured prompts.
-/// See `docs/product/specs/llm-stages.md`.
+/// See `docs/specs/llm-stages.md`.
 ///
 /// Every invocation still runs `EarsCLI.run(tool:version:arguments:)` first,
 /// unchanged -- the day-one config/logging contract every tool satisfies.

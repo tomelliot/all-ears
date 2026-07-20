@@ -5,7 +5,7 @@ import Foundation
 /// Best-effort publisher of finalised segments onto the daemon's live feed
 /// via the `segment.publish` control-socket command.
 ///
-/// Best-effort is the contract (`docs/product/specs/transcribe.md`: the
+/// Best-effort is the contract (`docs/specs/transcribe.md`: the
 /// socket is "notification only; the durable transcript is the on-disk
 /// file"): every failure mode — no socket path resolved, daemon not
 /// running, daemon restarted mid-run, command rejected — is logged (once

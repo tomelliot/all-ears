@@ -2,7 +2,7 @@ import Darwin
 import EarsCore
 import Foundation
 
-/// The `command` ``LLMBackend`` from `docs/product/specs/llm-stages.md`'s "Shared
+/// The `command` ``LLMBackend`` from `docs/specs/llm-stages.md`'s "Shared
 /// LLM backend": any shell command line taking the prompt on stdin and returning
 /// the completion on stdout. This is what `docs/configuration.md`'s
 /// `[llm] backend = "llm-cli"` resolves to in practice — the default `llm -m
@@ -26,7 +26,7 @@ import Foundation
 ///   output).
 /// - `timeout` bounds the whole call; on expiry the process is terminated and
 ///   ``LLMBackendError/timedOut`` is thrown — never left to hang forever per
-///   `docs/product/specs/llm-stages.md`'s "failures are loud and non-zero".
+///   `docs/specs/llm-stages.md`'s "failures are loud and non-zero".
 public struct CommandLLMBackend: LLMBackend {
   public let info: LLMBackendInfo
   public var command: String

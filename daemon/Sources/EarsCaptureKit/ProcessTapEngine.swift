@@ -2,7 +2,7 @@ import CoreAudio
 import Foundation
 
 /// How a ``ProcessTapEngine`` scopes its tap, per
-/// `docs/product/specs/capture-daemon.md`'s "Audio capture (native APIs)":
+/// `docs/specs/capture-daemon.md`'s "Audio capture (native APIs)":
 /// the whole system (`system`), or a specific set of live processes
 /// (`app:<bundle-id>`, resolved to PIDs upstream of this type).
 public enum TapMode: Sendable, Hashable {
@@ -70,7 +70,7 @@ public protocol ProcessTapEngine: AnyObject {
 /// The production ``ProcessTapEngine``: one real process tap + its private,
 /// tap-only, no-sub-device aggregate device — the resources
 /// `AudioHardwareCreateProcessTap`/`AudioHardwareCreateAggregateDevice`
-/// allocate, per `docs/product/specs/capture-daemon.md`'s recipe, and the
+/// allocate, per `docs/specs/capture-daemon.md`'s recipe, and the
 /// teardown that releases them.
 public final class RealProcessTapEngine: ProcessTapEngine {
   public let tapID: AudioObjectID
@@ -130,7 +130,7 @@ public protocol ProcessTapEngineProvider: Sendable {
 }
 
 /// The production ``ProcessTapEngineProvider``: the full
-/// `docs/product/specs/capture-daemon.md` recipe — `CATapDescription` →
+/// `docs/specs/capture-daemon.md` recipe — `CATapDescription` →
 /// `AudioHardwareCreateProcessTap` → a private, tap-only, no-sub-device
 /// aggregate device via `AudioHardwareCreateAggregateDevice` → read the
 /// real format from `kAudioTapPropertyFormat`.

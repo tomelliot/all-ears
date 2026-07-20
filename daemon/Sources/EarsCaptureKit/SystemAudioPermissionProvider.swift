@@ -2,7 +2,7 @@ import EarsCore
 import Synchronization
 
 /// A ``PermissionProviding`` for the system-audio tap grant, backed by the
-/// create-and-destroy probe `docs/product/specs/capture-daemon.md`'s
+/// create-and-destroy probe `docs/specs/capture-daemon.md`'s
 /// "Permissions and TCC probing" section calls for: there is no query API
 /// for this grant, so it is detected by building a throwaway global tap,
 /// sampling a short window of its real IO, and checking whether every
