@@ -18,7 +18,7 @@ struct EventBusTests {
 
   /// Waits until the drain task has delivered `count` frames.
   private func waitForFrames(
-    _ recorded: Mutex<[EventFrame]>, count: Int
+    _ recorded: borrowing Mutex<[EventFrame]>, count: Int
   ) async {
     for _ in 0..<1_000 {
       if recorded.withLock({ $0.count }) >= count { return }

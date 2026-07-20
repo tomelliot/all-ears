@@ -41,6 +41,7 @@ struct SessionDescriptorTOMLTests {
           "trigger_detail": .string("us.zoom.xos"),
           "vocab": .string("vocab/2026-07-17T10-30-00Z_standup.txt"),
           "pre_roll_seconds": .int(0),
+          "speakers": .table([:]),
         ])
     )
   }

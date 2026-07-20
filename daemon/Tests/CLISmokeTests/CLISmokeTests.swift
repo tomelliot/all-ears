@@ -564,8 +564,8 @@ struct CLISmokeTests {
     #expect(run.result.stdout.contains("\"uptime_s\""))
     #expect(!run.result.stdout.contains("ears[debug]"))
     #expect(run.result.stderr.contains("ears[debug]: resolved control socket path:"))
-    #expect(run.result.stderr.contains("ears[debug]: sending request: {\"cmd\":\"status\"}"))
-    #expect(run.result.stderr.contains("ears[debug]: received reply:"))
+    #expect(run.result.stderr.contains("ears[debug]: sending request: status"))
+    #expect(run.result.stderr.contains("ears[debug]: received result:"))
   }
 
   @Test("ears session list returns an empty list from a fresh live earsd")
