@@ -10,7 +10,8 @@ struct EventFilterTests {
   private let vadZoom = EventFrame(
     event: .vad(source: "app:us.zoom.xos", state: .silence, t: Instant(secondsSinceEpoch: 2)))
   private let segmentFrame = EventFrame(
-    event: .segment(SegmentPublishParams(session: "s1", speaker: "You", start: 0, end: 1, text: "hi")))
+    event: .segment(
+      SegmentPublishParams(session: "s1", speaker: "You", start: 0, end: 1, text: "hi")))
   private let jobFrame = EventFrame(
     event: .job(JobPublishParams(job: "j1", kind: "transcribe", state: .running)))
   private let sourceFrame = EventFrame(event: .source(id: "mic", state: .paused), rev: 1)

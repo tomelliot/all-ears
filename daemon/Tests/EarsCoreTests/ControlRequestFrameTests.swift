@@ -147,7 +147,8 @@ struct ControlRequestFrameTests {
       """
     #expect(
       try decode(relative)
-        == .call(id: .int(11), call: .mark(sources: ["mic"], slug: "chat", range: .lastSeconds(1800)))
+        == .call(
+          id: .int(11), call: .mark(sources: ["mic"], slug: "chat", range: .lastSeconds(1800)))
     )
 
     let absolute = """
@@ -219,7 +220,8 @@ struct ControlRequestFrameTests {
     arguments: [
       ControlCall.status,
       .subscribe(SubscribeParams(events: [.vad], sources: ["mic"])),
-      .meetingStart(MeetingStartParams(platform: "meet", externalID: "abc", trigger: .browserExtension)),
+      .meetingStart(
+        MeetingStartParams(platform: "meet", externalID: "abc", trigger: .browserExtension)),
       .meetingPause(meeting: "m1"),
       .meetingAttendee(MeetingAttendeeParams(meeting: "m1", id: "a", displayName: "Jane")),
       .sessionOpen(SessionOpenParams(sources: ["mic"], slug: "standup")),

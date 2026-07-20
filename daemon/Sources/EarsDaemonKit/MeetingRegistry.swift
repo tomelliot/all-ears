@@ -295,7 +295,8 @@ public actor MeetingRegistry {
 
     try persist(meeting)
     if isNew {
-      appendEvent(meeting.id, event: "attendee_joined", at: attendee.joined ?? now,
+      appendEvent(
+        meeting.id, event: "attendee_joined", at: attendee.joined ?? now,
         attendee: attendee.id)
     }
     if !hadLeft, let left = attendee.left {

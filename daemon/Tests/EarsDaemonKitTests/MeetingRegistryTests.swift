@@ -35,7 +35,12 @@ struct MeetingRegistryTests {
     return MeetingRegistry(
       dataRoot: dataRoot,
       clock: clock,
-      makeID: { ids.withLock { $0 += 1; return "meeting-\($0)" } },
+      makeID: {
+        ids.withLock { next in
+          next += 1
+          return "meeting-\(next)"
+        }
+      },
       bus: bus,
       graceSeconds: graceSeconds,
       sleep: sleep ?? { _ in },

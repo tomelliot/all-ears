@@ -121,7 +121,8 @@ enum OutputFormatting {
     case .source(let id, let state):
       return "[source] \(id.rawValue) \(state.rawValue)\(revSuffix)"
     case .job(let job):
-      let target = job.meeting.map { " meeting=\($0)" } ?? job.session.map { " session=\($0)" } ?? ""
+      let target =
+        job.meeting.map { " meeting=\($0)" } ?? job.session.map { " session=\($0)" } ?? ""
       return "[job] \(job.job) \(job.kind)\(target) \(job.state.rawValue)"
     }
   }
