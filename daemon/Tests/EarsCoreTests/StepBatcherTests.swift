@@ -3,7 +3,7 @@ import Testing
 @testable import EarsCore
 
 /// Tier-0 coverage of ``StepBatcher``, the fixed-cadence batcher from
-/// `docs/product/specs/transcribe.md`'s append-only delta contract: input
+/// `docs/specs/transcribe.md`'s append-only delta contract: input
 /// cadence (chunk arrival) is decoupled from model step size.
 @Suite("StepBatcher")
 struct StepBatcherTests {

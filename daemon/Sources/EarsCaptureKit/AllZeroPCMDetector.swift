@@ -1,5 +1,5 @@
 /// Pure detection of an all-zero (silent) PCM stream — the heuristic
-/// `docs/product/specs/capture-daemon.md`'s "Permissions and TCC probing"
+/// `docs/specs/capture-daemon.md`'s "Permissions and TCC probing"
 /// section calls for, since there is no query API for the system-audio tap's
 /// TCC grant: a denied tap still "succeeds" at the API level but delivers a
 /// stream of all-zero samples.

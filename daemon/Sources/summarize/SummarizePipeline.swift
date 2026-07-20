@@ -3,7 +3,7 @@ import EarsDataStore
 import EarsLLMKit
 import Foundation
 
-/// `summarize`'s actual pipeline, per `docs/product/specs/llm-stages.md`'s
+/// `summarize`'s actual pipeline, per `docs/specs/llm-stages.md`'s
 /// "summarize" section: read one or more transcripts (preferring a sibling
 /// `.clean.md` over a `.transcript.md` when both exist), run each selected
 /// preset's prompt over their combined text, and write `<...>.summary.md`
@@ -136,7 +136,7 @@ enum SummarizePipeline {
     return 0
   }
 
-  /// "cleaned preferred if both exist" (`docs/product/specs/llm-stages.md`):
+  /// "cleaned preferred if both exist" (`docs/specs/llm-stages.md`):
   /// a `<...>.transcript.md` path is redirected to its sibling
   /// `<...>.clean.md` when that file exists; any other name (already
   /// `.clean.md`, or a non-standard name) is used as given.

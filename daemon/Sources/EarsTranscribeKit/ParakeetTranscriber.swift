@@ -18,7 +18,7 @@ public enum ParakeetTranscriberError: Error, Sendable, Equatable {
   case stepTooLong(frameCount: Int, maxFrameCount: Int)
 }
 
-/// The native ASR backend (`docs/product/specs/model-interface.md`'s
+/// The native ASR backend (`docs/specs/model-interface.md`'s
 /// "Backend 1 -- native"): NVIDIA Parakeet TDT via FluidAudio's Core ML/ANE
 /// pipeline. Scoped deliberately narrow:
 ///
@@ -43,7 +43,7 @@ public enum ParakeetTranscriberError: Error, Sendable, Equatable {
 /// ## The sync-protocol / async-SDK mismatch
 ///
 /// `Transcriber.load`/`transcribe` are synchronous, throwing methods (fixed
-/// by `docs/product/specs/model-interface.md` -- not redesigned here), but
+/// by `docs/specs/model-interface.md` -- not redesigned here), but
 /// FluidAudio's real API is fully asynchronous: `AsrModels.downloadAndLoad`
 /// awaits a network download, and `AsrManager` is an actor whose methods all
 /// `await`. This shim bridges sync -> async with a blocking semaphore
@@ -152,7 +152,7 @@ extension ParakeetTranscriber: StreamingTranscriber {
   static var maxStepFrameCount: Int { ASRConstants.maxModelSamples }
 
   /// Incrementally decode the next block of frames, threading continuity
-  /// through `state` — the real TDT streaming decode `docs/product/specs/
+  /// through `state` — the real TDT streaming decode `docs/specs/
   /// model-interface.md` promises for `--follow`.
   ///
   /// Continuity is FluidAudio's own chunk-streaming mechanism: a

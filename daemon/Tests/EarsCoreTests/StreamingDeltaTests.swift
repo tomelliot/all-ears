@@ -3,7 +3,7 @@ import Testing
 @testable import EarsCore
 
 /// Tier-0 coverage of ``StreamingDelta``, the append-only delta contract from
-/// `docs/product/specs/transcribe.md`: monotonic cursor, trailing-incomplete-
+/// `docs/specs/transcribe.md`: monotonic cursor, trailing-incomplete-
 /// unit hold-back (including the spec's named "trailing U+FFFD" and "partial
 /// token completed by the next step" cases), and the end-of-stream flush rule.
 @Suite("StreamingDelta")

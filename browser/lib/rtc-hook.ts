@@ -146,7 +146,7 @@ export function installHook(): void {
 // ── Meet collections datachannel: device-id/speaking-flag signal ───────────
 //
 // Narrow, reviewed exception to specs/extension.md's MUST-NOT #6 (journal
-// #49-#51; see docs/product/browser/prompts/meet-identify-via-collections.md)
+// #49-#51; see docs/specs/browser/extension.md (the collections exception))
 // — decodes exactly the two fields documented there via meet-collections.ts's
 // defensive parser, nothing else. Unlike installChannelTracer below (debug-
 // only, investigation-scoped), this runs in production whenever the hook
@@ -314,7 +314,7 @@ function previewPayload(data: unknown): string {
  * during live verification of the collections identity-upgrade feature,
  * where it found that journal #49's originally-documented speaking-flag path
  * was missing a nesting level (see meet-collections.ts's header comment and
- * docs/product/browser/specs/extension.md) — kept in the extension so the
+ * docs/specs/browser/extension.md) — kept in the extension so the
  * next schema drift doesn't need an ad-hoc page-injected decoder again.
  * Never used by production parsing; a decode failure here is just a log line.
  */

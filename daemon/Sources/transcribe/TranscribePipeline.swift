@@ -38,7 +38,7 @@ enum TranscribePipeline {
     var writeStderr: @Sendable (String) -> Void
 
     /// The real backend: ``ParakeetTranscriber``, FluidAudio-backed Parakeet
-    /// on the ANE/Metal (`docs/product/specs/model-interface.md`'s "Backend
+    /// on the ANE/Metal (`docs/specs/model-interface.md`'s "Backend
     /// 1 -- native"), loaded once per run in ``TranscribePipeline/run``
     /// below with `loadOptions` resolved from `[transcribe].model`/`compute`
     /// config (``TranscribeRuntime``).

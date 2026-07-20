@@ -4,7 +4,7 @@
 public struct LLMBackendInfo: Sendable, Hashable, Codable {
   /// The backend kind, e.g. `"llm-cli"` (the default `command` backend) or
   /// `"anthropic-sdk"` (a future native backend). See
-  /// `docs/product/specs/llm-stages.md`.
+  /// `docs/specs/llm-stages.md`.
   public var name: String
   /// The model name passed to the backend (e.g. `llm -m <model>`), when known.
   public var model: String?

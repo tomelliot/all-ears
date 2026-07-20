@@ -1,7 +1,7 @@
 import EarsCore
 
 /// Resolves `transcribe`'s range flags (`--last`, `--from`/`--to`,
-/// `--session`, per `docs/product/specs/transcribe.md`'s CLI) into a wall-clock
+/// `--session`, per `docs/specs/transcribe.md`'s CLI) into a wall-clock
 /// ``TimeRange`` -- and, for `--session`, the session's own recorded sources,
 /// vocab, and real session id.
 ///

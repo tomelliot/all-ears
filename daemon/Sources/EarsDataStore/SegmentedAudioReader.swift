@@ -2,7 +2,7 @@ import EarsCore
 import Foundation
 
 /// The `(sourceID, timeRange) -> [AudioSlice]` entry point
-/// `docs/product/specs/transcribe.md` describes: reads a source's
+/// `docs/specs/transcribe.md` describes: reads a source's
 /// `index.jsonl`, reconstructs the requested range's chunks/VAD spans
 /// (``RangeReconstructor``), segments at natural pauses while skipping pure
 /// silence (``NaturalPauseSegmenter``), and reads each resulting window's

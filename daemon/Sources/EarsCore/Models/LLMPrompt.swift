@@ -1,5 +1,5 @@
 /// A completion request already split into a stable prefix and a dynamic
-/// suffix, per `docs/product/specs/llm-stages.md`'s cache-reuse guardrail:
+/// suffix, per `docs/specs/llm-stages.md`'s cache-reuse guardrail:
 /// "split a stable prompt prefix from the dynamic input (system prompt +
 /// vocabulary + instructions as the prefix; the transcript as the suffix) so
 /// a caching backend can reuse the KV-cache/prompt cache across chunks and

@@ -8,8 +8,8 @@ import EarsCore
 ///
 /// Enforcing this for real means comparing on-disk bytes *across every
 /// source* and evicting from whichever is most over budget -- genuine
-/// cross-source coordination. Phase 1 is mic-only (`docs/roadmap.md`), so
-/// there is exactly one source and nothing to coordinate across; building
+/// cross-source coordination. With a single enabled source there is
+/// nothing to coordinate across; building
 /// real cross-source accounting now would be unused, untestable-against-
 /// reality code (there's no second source to prove it works against).
 ///

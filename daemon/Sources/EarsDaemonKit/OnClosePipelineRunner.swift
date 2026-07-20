@@ -56,7 +56,7 @@ public struct OnClosePipelineRunner: Sendable {
 
   /// Builds each stage's argv. `transcribe` resolves the session directly;
   /// `cleanup`/`summarize` are handed the file path the *previous* stage is
-  /// expected to have written, per `docs/product/specs/llm-stages.md`'s
+  /// expected to have written, per `docs/specs/llm-stages.md`'s
   /// composition example (`transcribe --session "$SID" && cleanup
   /// "$OUT/....transcript.md" && summarize "$OUT/....clean.md"`).
   ///

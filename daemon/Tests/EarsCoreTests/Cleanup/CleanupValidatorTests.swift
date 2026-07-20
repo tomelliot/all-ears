@@ -10,7 +10,7 @@ struct CleanupValidatorTests {
   // demonstrably rejects a hallucinated cleanup on a fixture." The candidate
   // here invents an entire clause -- a lost contract and layoffs -- with no
   // basis in the original segment, which is exactly the failure mode the
-  // accept/fallback guardrail exists to catch (docs/product/specs/
+  // accept/fallback guardrail exists to catch (docs/specs/
   // llm-stages.md: "if the cleaned output diverges from the source beyond a
   // bound (length ratio, entity drift), reject it and keep the original").
   @Test("rejects a hallucinated cleanup and falls back to the original")

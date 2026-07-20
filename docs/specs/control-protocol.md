@@ -1,7 +1,7 @@
 # Spec: control protocol v2
 
 **Status: designed, not yet implemented.** This spec defines the target control contract between
-`earsd` and every frontend. When it lands it supersedes the "Control socket protocol" section of
+`earsd` and every frontend. When it lands it supersedes the "Control protocol" section of
 [`capture-daemon.md`](capture-daemon.md), which describes the v1 wire as currently implemented.
 The ingest WebSocket (`/ingest`, binary PCM) is **out of scope** and unchanged.
 
@@ -140,7 +140,7 @@ Semantics:
 - **Attendees are a roster with join/leave times**, upserted by whoever knows them (the
   extension's DOM layer today). `source` links an attendee to their per-participant audio source,
   which downstream feeds the transcript's speaker-name map (`[speakers]` in
-  [data-formats](../../data-formats.md#speaker-attribution)).
+  [data-formats](../data-formats.md#speaker-attribution)).
 - **On `meeting.end`,** the daemon closes the open interval, **materializes one closed
   `SessionDescriptor` per interval** (slug = meeting UUID, trigger preserved), and **writes the
   roster into each materialized session's `[speakers]` map** (attendee `source` →
@@ -159,7 +159,7 @@ contract; `cleanup` and `summarize` are untouched.
 
 ### Sessions and sources
 
-Unchanged from v1 ([capture-daemon.md](capture-daemon.md), [data-formats](../../data-formats.md)).
+Unchanged from v1 ([capture-daemon.md](capture-daemon.md), [data-formats](../data-formats.md)).
 Sessions remain the transcription work unit and the CLI's manual marking primitive
 (`session.open/close`, `mark`). Sources remain the capture unit with runtime states
 `capturing|paused|disabled|error`.

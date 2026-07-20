@@ -3,7 +3,7 @@ import EarsDataStore
 import EarsTranscribeKit
 import Foundation
 
-/// `transcribe --follow`'s pipeline, per `docs/product/specs/transcribe.md`'s
+/// `transcribe --follow`'s pipeline, per `docs/specs/transcribe.md`'s
 /// "Streaming mode": attach to a live source, tail its `index.jsonl` for
 /// newly-written `chunk`/`vad` events (byte-offset tail, no re-polling of the
 /// whole file — ``IndexTailReader``), decode incrementally through a real

@@ -1,31 +1,18 @@
 # Distribution & packaging
 
-Signing and notarization are planned from day one, not bolted on before release. Ad-hoc signing without notarization is a repeated dead end in the survey — every tool that shipped it also shipped Gatekeeper workarounds (`xattr -cr` instructions to users) and macOS-26 first-launch stalls. We avoid that debt by building the pipeline early, even while the binaries are pre-release.
+## Today
 
-## Signing & notarization
+There are no packaged builds: clone the repo and `swift build -c release` in `daemon/` (see the [README](../README.md)). CI (`.github/workflows/ci.yml`) lint-checks formatting, builds, and runs the test suite on every commit; there is no release or notarization job yet.
 
-- **Developer ID Application signing + notarization** for every distributed binary (`earsd`, `ears`, `transcribe`, `cleanup`, `summarize`) and any bundled model/helper.
-- **Hardened Runtime** enabled, with the minimal entitlements each tool needs (microphone; audio capture for the tap; no more).
-- Notarize and **staple** the ticket in CI as part of the release job, so first launch never stalls on a Gatekeeper network check.
-- No instructions that ask users to strip quarantine attributes — if that would be needed, the build is wrong.
+`earsd` is designed to run as a per-user launchd `LaunchAgent` (`RunAtLoad` + `KeepAlive`). The daemon can generate the agent plist content (`LaunchAgentPlist` in `EarsCore`), but writing it to disk and registering it — via `SMAppService` or `launchctl` — is still a manual step. Until then, run `earsd` directly (see the [soak runbook](./operations/capture-soak-runbook.md) for a working setup).
 
-## The daemon as a launch agent
+Permissions are requested on first use: microphone, and for `system`/`app:` sources the system-audio-recording grant. There is no query API for the tap grant, so the daemon probes real state (create-and-destroy a throwaway tap, detect the all-zero PCM a denied tap returns) and names the exact Settings pane — macOS 15's "System Audio Recording Only" — on denial.
 
-- `earsd` ships as a launchd **`LaunchAgent`** (per-user, not a system daemon): `RunAtLoad` + `KeepAlive`.
-- Installation registers the agent via **`SMAppService`**, and the tool **reconciles the configured launch-at-login state against `SMAppService.status`**, surfacing mismatches rather than trusting the preference (a documented failure mode in the survey).
-- Uninstall cleanly unregisters the agent and stops capture; it does not silently leave a running background process.
+## The bar for distributed builds
 
-## Permissions at install/first-run
+When builds ship, they ship properly — no ad-hoc signing, no telling users to strip quarantine attributes:
 
-- Microphone and system-audio-capture (tap) grants are requested on first use, with actionable messaging that names the exact Settings pane — including macOS 15's **"System Audio Recording Only"** sub-pane — per the [capture-daemon spec](./specs/capture-daemon.md#permissions-and-tcc-probing).
-- Because there is no query API for the tap TCC grant, the installer/first-run flow uses the create-and-destroy-a-tap probe to determine real state rather than assuming.
-
-## Model assets
-
-- FluidAudio/Parakeet Core ML weights are downloaded to the app container (`XDG_CACHE_HOME` set into the sandbox), with **resume on interruption** and **auto-recovery** of a corrupt compiled model by re-download.
-- Subprocess-backend weights are **pinned to exact Hugging Face commits**, with include-pattern lists kept in sync with the loader.
-
-## Build & release hygiene
-
-- `.swift-format` + a pre-commit hook enforce style; CI runs the full test suite and the model-accuracy benchmarks (WER/DER/RTFx) on every commit — see [engineering practices](./engineering-practices.md).
-- Release artifacts are reproducible from a tagged commit; version and model versions are recorded in each tool's startup log and in transcript frontmatter.
+- **Developer ID signing + notarization** for every distributed binary, Hardened Runtime enabled, minimal entitlements, ticket stapled in CI so first launch never stalls on a Gatekeeper check.
+- **Launch-agent registration via `SMAppService`**, with the configured launch-at-login state reconciled against `SMAppService.status` rather than trusted. Uninstall unregisters the agent and stops capture.
+- **Model assets** (FluidAudio/Parakeet Core ML weights) downloaded with resume-on-interruption and auto-recovery of a corrupt compiled model by re-download.
+- Release artifacts reproducible from a tagged commit; tool and model versions recorded in startup logs and transcript frontmatter.

@@ -25,8 +25,8 @@ public struct SessionDescriptor: Sendable, Hashable, Codable {
   /// historical record of when the session actually opened; pre-roll is a
   /// read-time widening layered on top, since a session is "metadata over
   /// the ring buffer, not a separate recording" (see
-  /// `docs/product/prompts/phase-4-multi-source-sessions.md`'s pre-roll
-  /// decision, and `TranscribeRangeResolution`, which applies it). `0` (the
+  /// `docs/data-formats.md`'s session format, and
+  /// `TranscribeRangeResolution`, which applies it). `0` (the
   /// default) means no widening -- every session opened before this field
   /// existed decodes to `0`, matching prior behavior exactly.
   public var preRollSeconds: Int

@@ -4,7 +4,7 @@ import Testing
 
 /// Covers ``NaturalPauseSegmenter``: turning ``RangeReconstructor``'s VAD
 /// spans for a requested range into the sequence of speech-bearing windows
-/// `docs/product/specs/transcribe.md` describes -- "segment at natural
+/// `docs/specs/transcribe.md` describes -- "segment at natural
 /// pauses, not fixed cuts", plus silence-skipping (no window at all for a
 /// stretch with no VAD-flagged speech) and a short pre-roll before each
 /// utterance onset.

@@ -10,7 +10,7 @@ import struct EarsCore.AudioBuffer
 /// Errors surfaced by ``SystemAudioCaptureBackend``.
 public enum SystemAudioCaptureError: Error, Sendable, CustomStringConvertible {
   /// The tap's first grace window of audio was all-zero — the signature of
-  /// a TCC-denied system-audio tap (`docs/product/specs/capture-daemon.md`'s
+  /// a TCC-denied system-audio tap (`docs/specs/capture-daemon.md`'s
   /// "Permissions and TCC probing": no query API exists, so this is
   /// detected by observing the stream itself).
   case permissionDenied
@@ -42,7 +42,7 @@ public enum SystemAudioCaptureError: Error, Sendable, CustomStringConvertible {
 /// callback.
 ///
 /// **In-process by design, stall watchdog non-negotiable.** Per
-/// `docs/product/specs/capture-daemon.md`'s "Isolation option for the
+/// `docs/specs/capture-daemon.md`'s "Isolation option for the
 /// riskiest syscalls": the process tap is the most crash-prone surface in
 /// the whole capture path, and an external-process (`audiotee`-style)
 /// isolation boundary is an explicitly deferred hardening option — not

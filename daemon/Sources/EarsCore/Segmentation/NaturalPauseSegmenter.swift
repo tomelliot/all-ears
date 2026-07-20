@@ -1,6 +1,6 @@
 /// Turns a range's VAD spans (as reconstructed by ``RangeReconstructor``)
 /// into the sequence of ``SegmentWindow``s a transcriber should be handed,
-/// per `docs/product/specs/transcribe.md`'s behaviour #3: "Segment at
+/// per `docs/specs/transcribe.md`'s behaviour #3: "Segment at
 /// natural pauses, not fixed cuts... include a short pre-roll before each
 /// utterance onset."
 ///

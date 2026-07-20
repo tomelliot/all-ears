@@ -1,12 +1,12 @@
 /// The base LLM backend seam: a text-completion service invoked prompt-in,
-/// completion-out. Modeled on `docs/product/specs/llm-stages.md`'s shared
+/// completion-out. Modeled on `docs/specs/llm-stages.md`'s shared
 /// LLM backend: the default backend runs the **`llm` CLI** as a `command`
 /// subprocess (prompt on stdin, completion on stdout); a future
 /// `anthropic-sdk` backend can conform natively. `cleanup` and `summarize`
 /// depend on this protocol, never on a concrete backend.
 ///
 /// Mirrors the `Transcriber` family's "small base protocol, not a
-/// god-object switch" shape (`docs/product/specs/model-interface.md`),
+/// god-object switch" shape (`docs/specs/model-interface.md`),
 /// simplified because every LLM backend has exactly one shape -- text in,
 /// text out -- so there is no capability variance to layer optional
 /// protocols over yet.

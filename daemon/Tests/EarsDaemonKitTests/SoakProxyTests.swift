@@ -7,7 +7,8 @@ import Testing
 
 @testable import EarsDaemonKit
 
-/// CI-shaped proxy for `docs/roadmap.md`'s Phase 1 exit criterion: "daemon
+/// CI-shaped proxy for the capture-reliability criterion (see
+/// `docs/operations/capture-soak-runbook.md`): "daemon
 /// runs for days at a flat memory baseline; buffer stays bounded; gaps
 /// recorded across restarts, sleep/wake, and device unplug." Literal
 /// multi-day soak testing cannot run in CI, so this suite instead drives a

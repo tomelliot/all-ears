@@ -5,7 +5,7 @@ import EarsLLMKit
 import Foundation
 
 /// `cleanup`'s CLI inputs beyond the shared day-one flags (`--config`,
-/// `--log-level`, ...), per `docs/product/specs/llm-stages.md`'s
+/// `--log-level`, ...), per `docs/specs/llm-stages.md`'s
 /// `cleanup <transcript.md> [--out] [--prompt] [--vocab] [--model] [--no-vocab]`.
 struct CleanupCLIInputs: Sendable {
   var transcriptPath: String

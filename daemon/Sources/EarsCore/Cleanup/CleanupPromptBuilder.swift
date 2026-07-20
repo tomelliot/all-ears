@@ -1,7 +1,7 @@
 /// Builds the ``LLMPrompt`` `cleanup` sends to an ``LLMBackend`` for one
 /// segment/chunk of transcript text.
 ///
-/// Two guardrails from `docs/product/specs/llm-stages.md` live here:
+/// Two guardrails from `docs/specs/llm-stages.md` live here:
 ///
 /// - **Minimal-change prompt:** "instruct for the smallest edit that fixes
 ///   errors; keep filler words unless removal is explicitly configured."
@@ -19,7 +19,7 @@
 /// The vocabulary (merged global + session known-word list, per
 /// `docs/data-formats.md`) is injected as an explicit correction backstop --
 /// the same list a ``BiasingTranscriber`` uses at transcription time, reused
-/// here per `docs/product/specs/model-interface.md`'s "known-word biasing
+/// here per `docs/specs/model-interface.md`'s "known-word biasing
 /// summary".
 public struct CleanupPromptBuilder: Sendable {
   public var systemPrompt: String

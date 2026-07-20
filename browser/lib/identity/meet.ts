@@ -23,7 +23,7 @@ import { SpeakingCorrelator, type CorrelatorMatch } from "./meet-correlator";
 // that only becomes confident after observing speaking activity (the
 // collections datachannel gives a device id tied to "someone is speaking now",
 // not to a specific MediaStreamTrack — see
-// docs/product/browser/prompts/meet-identify-via-collections.md's Task 2/3).
+// docs/specs/browser/extension.md (the collections exception)'s Task 2/3).
 // So this doesn't change identify()'s behavior at all. Instead:
 //
 //   1. rtc-hook.ts's installMeetCollectionsTracer parses the "collections"

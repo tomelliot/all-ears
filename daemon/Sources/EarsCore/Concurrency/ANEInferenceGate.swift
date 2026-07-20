@@ -1,6 +1,6 @@
 /// Single-flight serialization for Apple Neural Engine / Core ML inference.
 ///
-/// Per `docs/product/specs/model-interface.md`'s native FluidAudio backend
+/// Per `docs/specs/model-interface.md`'s native FluidAudio backend
 /// section: concurrent Core ML inference on the ANE crashes with **SIGBUS**
 /// on macOS 14. Every ANE-bound inference call (model load, decode step, VAD
 /// pass, ...) must be funneled through one shared gate so at most one call is

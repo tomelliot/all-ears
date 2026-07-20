@@ -1,4 +1,4 @@
-/// The skip-high-confidence-utterances guardrail from `docs/product/specs/
+/// The skip-high-confidence-utterances guardrail from `docs/specs/
 /// llm-stages.md`: "don't send already-clean, high-ASR-confidence text to
 /// the LLM at all -- saves cost and avoids needless drift."
 ///

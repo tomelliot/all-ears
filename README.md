@@ -96,11 +96,11 @@ A single always-on daemon (`earsd`) owns every audio source and writes it into a
 | `cleanup` | Corrects a transcript with an LLM, guided by your vocabulary. |
 | `summarize` | Produces summaries from a transcript using configurable prompts. |
 
-Each is a separate binary sharing only the on-disk formats and the control socket. No tool depends on another running. See [`docs/technical-overview.md`](docs/technical-overview.md) for the full architecture, data formats, and configuration reference.
+Each is a separate binary sharing only the on-disk formats and the control socket. No tool depends on another running. See [`docs/overview.md`](docs/overview.md) for the full architecture, data formats, and configuration reference.
 
 ## Status
 
-Active development. Retroactive capture and transcription (mic, system audio, per-app, and browser-routed sources) are in daily use. Diarization and the LLM cleanup/summary stages are landing phase by phase; see the [roadmap](docs/product/roadmap.md). There is no signed, notarized build yet: build from source.
+Active development. Retroactive capture and transcription (mic, system audio, per-app, and browser-routed sources) are in daily use. The LLM cleanup/summary stages are in use; diarization is not built yet — see [current status](docs/overview.md#status). There is no signed, notarized build yet: build from source.
 
 ## Project layout
 
