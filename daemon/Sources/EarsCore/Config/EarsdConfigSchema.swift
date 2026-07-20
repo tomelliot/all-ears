@@ -40,7 +40,8 @@ public enum EarsdConfigSchema {
         "allowed_origins": .array([]),
       ]),
       "meetings": .table([
-        "ingest_close_grace_s": .int(120)
+        "ingest_close_grace_s": .int(120),
+        "local_sources": .array([.string("mic")]),
       ]),
       "source": .array([
         .table([
@@ -151,12 +152,18 @@ public enum EarsdConfigSchema {
             ),
             // Meeting lifecycle knobs: how long a browser meeting's last
             // ingest stream may stay closed before the daemon auto-ends the
-            // meeting (`reason = "ingest-idle"`). See `MeetingRegistry`.
+            // meeting (`reason = "ingest-idle"`), and which locally-captured
+            // sources (your own mic, system audio) the daemon folds into every
+            // browser meeting so your side is transcribed alongside the
+            // extension's per-participant streams. See `MeetingRegistry`.
+            // `local_sources` is a plain string array (elementSchema-nil
+            // convention, like `ingest_ws.allowed_origins`).
             "meetings": ConfigSchema.Field(
               type: .table,
               children: ConfigSchema(
                 fields: [
-                  "ingest_close_grace_s": ConfigSchema.Field(type: .int)
+                  "ingest_close_grace_s": ConfigSchema.Field(type: .int),
+                  "local_sources": ConfigSchema.Field(type: .array),
                 ]
               )
             ),

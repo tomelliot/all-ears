@@ -141,6 +141,7 @@ export interface ElementLike {
   getAttribute(name: string): string | null;
   parentElement: ElementLike | null;
   querySelector?(selectors: string): ElementLike | null;
+  querySelectorAll?(selectors: string): Iterable<ElementLike>;
   textContent?: string | null;
 }
 
@@ -182,10 +183,18 @@ export function findParticipantTile(el: ElementLike): ElementLike | null {
 /**
  * Read the tile's display name: its own data-self-name, a descendant's
  * data-self-name (attribute value, else that element's text), a descendant
- * `span.notranslate` (the name-overlay element observed live — journal #41;
- * tag-qualified because Meet also marks material-icon ligatures `notranslate`
- * on `<i>` elements), then the tile's aria-label. undefined when none — name
- * is optional, id is what matters.
+ * `span.notranslate` (the name-overlay element observed live — journal #41),
+ * then the tile's aria-label. undefined when none — name is optional, id is
+ * what matters.
+ *
+ * The `notranslate` class is not unique to the name overlay: Meet also renders
+ * material icon ligatures under it. On the current build (confirmed live) the
+ * same participant id is carried by several tiles, and a non-name tile's
+ * `span.notranslate` *wraps* a material `<i>` whose ligature text bubbles up as
+ * the icon name — e.g. "devices", "mic". The real name overlay is instead a
+ * text-only leaf `<span class="notranslate">`. Tag-qualifying isn't enough, so
+ * we walk every match and skip any icon-ligature span (see
+ * ``isIconLigatureSpan``), taking the first real name.
  */
 export function extractDisplayName(tile: ElementLike): string | undefined {
   const own = clean(tile.getAttribute("data-self-name"));
@@ -197,9 +206,28 @@ export function extractDisplayName(tile: ElementLike): string | undefined {
     const fromText = clean(nameEl.textContent);
     if (fromText) return fromText;
   }
-  const notranslate = clean(tile.querySelector?.("span.notranslate")?.textContent);
-  if (notranslate) return notranslate;
+  const spans = tile.querySelectorAll?.("span.notranslate") ?? [];
+  for (const span of spans) {
+    if (isIconLigatureSpan(span)) continue;
+    const text = clean(span.textContent);
+    if (text) return text;
+  }
   return clean(tile.getAttribute("aria-label"));
+}
+
+/**
+ * Whether a `span.notranslate` is a material icon ligature rather than a name
+ * overlay. The name overlay is a text-only leaf; an icon overlay contains a
+ * material `<i>` element whose ligature text (e.g. "devices") bubbles up as the
+ * span's textContent — so the presence of a descendant `<i>` is the reliable
+ * signal (confirmed live: the icon span's own class is `notranslate <obfusc>`,
+ * carrying no material marker). The icon-font class check is a secondary guard
+ * for builds that put the ligature directly on the span.
+ */
+function isIconLigatureSpan(el: ElementLike): boolean {
+  if (el.querySelector?.("i")) return true;
+  const cls = el.getAttribute("class") ?? "";
+  return /material-(?:icons|symbols)|google-symbols|google-material-icons/i.test(cls);
 }
 
 function clean(value: string | null | undefined): string | undefined {

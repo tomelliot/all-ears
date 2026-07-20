@@ -29,7 +29,9 @@ struct MeetingRegistryTests {
     bus: EventBus? = nil,
     graceSeconds: Double = 120,
     sleep: (@Sendable (Double) async -> Void)? = nil,
-    onEnded: MeetingRegistry.EndedHook? = nil
+    onEnded: MeetingRegistry.EndedHook? = nil,
+    localBrowserSources: [SourceID] = [],
+    knownSourceIDs: @escaping @Sendable () async -> Set<SourceID> = { [] }
   ) -> MeetingRegistry {
     let ids = Mutex(0)
     return MeetingRegistry(
@@ -44,7 +46,9 @@ struct MeetingRegistryTests {
       bus: bus,
       graceSeconds: graceSeconds,
       sleep: sleep ?? { _ in },
-      onEnded: onEnded)
+      onEnded: onEnded,
+      localBrowserSources: localBrowserSources,
+      knownSourceIDs: knownSourceIDs)
   }
 
   // MARK: - start
@@ -68,6 +72,59 @@ struct MeetingRegistryTests {
     #expect(onDisk.intervals.first?.end == nil)
     let timeline = MeetingEventLog.readAll(dataRoot: dataRoot, meetingID: meeting.id)
     #expect(timeline.map(\.event) == ["started", "interval_opened"])
+  }
+
+  @Test("a browser meeting folds in the configured local sources it can capture")
+  func startInjectsLocalBrowserSources() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let registry = makeRegistry(
+      dataRoot: dataRoot, clock: clock,
+      localBrowserSources: ["mic"],
+      knownSourceIDs: { ["mic", "system"] })
+
+    let meeting = try await registry.start(
+      MeetingStartParams(
+        platform: "meet", externalID: "abc", sources: ["browser:meet:jane"],
+        trigger: .browserExtension))
+
+    // Declared sources keep their order; the capturable local source appends.
+    #expect(meeting.sources == ["browser:meet:jane", "mic"])
+    let onDisk = try MeetingStore.read(meetingID: meeting.id, dataRoot: dataRoot)
+    #expect(onDisk.sources == ["browser:meet:jane", "mic"])
+  }
+
+  @Test("a local source the daemon isn't capturing is not attached")
+  func startSkipsUnknownLocalSource() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let registry = makeRegistry(
+      dataRoot: dataRoot, clock: clock,
+      localBrowserSources: ["mic"],
+      knownSourceIDs: { [] })  // mic isn't being captured
+
+    let meeting = try await registry.start(
+      MeetingStartParams(
+        platform: "meet", externalID: "abc", trigger: .browserExtension))
+
+    #expect(meeting.sources == [])
+  }
+
+  @Test("local sources are folded into browser meetings only, not manual ones")
+  func startInjectsForBrowserTriggerOnly() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let registry = makeRegistry(
+      dataRoot: dataRoot, clock: clock,
+      localBrowserSources: ["mic"],
+      knownSourceIDs: { ["mic"] })
+
+    let manual = try await registry.start(
+      MeetingStartParams(title: "standup", sources: ["app:zoom"]))
+
+    // A manual/CLI meeting names its own sources; mic is not force-added.
+    #expect(manual.trigger == .manual)
+    #expect(manual.sources == ["app:zoom"])
   }
 
   @Test("start is idempotent on identity: re-declaring returns the same live meeting")

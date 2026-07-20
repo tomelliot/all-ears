@@ -72,6 +72,17 @@ public actor MeetingRegistry {
   private let sleep: @Sendable (Double) async -> Void
   private let sessionSchema: Int
   private let onEnded: EndedHook?
+  /// `[earsd.meetings].local_sources`: locally-captured source ids folded into
+  /// every *browser-triggered* meeting at start, so the host's own audio is
+  /// transcribed alongside the extension's per-participant streams. Filtered
+  /// through ``knownSourceIDs`` at inject time so an id the daemon isn't
+  /// capturing is skipped rather than failing `transcribe --meeting`.
+  private let localBrowserSources: [SourceID]
+  /// Live lookup of the daemon's current source ids — the guard that keeps a
+  /// configured local source from being attached to a meeting when it doesn't
+  /// exist. `{ [] }` (the default) injects nothing, matching a registry built
+  /// with no local sources.
+  private let knownSourceIDs: @Sendable () async -> Set<SourceID>
 
   /// Live (active/paused) and recently-ended meetings, keyed by id. Ended
   /// meetings from *before* this boot stay on disk only.
@@ -97,6 +108,8 @@ public actor MeetingRegistry {
     },
     sessionSchema: Int = ActorContracts.sessionSchemaVersion,
     onEnded: EndedHook? = nil,
+    localBrowserSources: [SourceID] = [],
+    knownSourceIDs: @escaping @Sendable () async -> Set<SourceID> = { [] },
     log: @escaping @Sendable (String) -> Void = { _ in }
   ) {
     self.dataRoot = dataRoot
@@ -107,6 +120,8 @@ public actor MeetingRegistry {
     self.sleep = sleep
     self.sessionSchema = sessionSchema
     self.onEnded = onEnded
+    self.localBrowserSources = localBrowserSources
+    self.knownSourceIDs = knownSourceIDs
     self.log = log
   }
 
@@ -154,6 +169,7 @@ public actor MeetingRegistry {
 
     let now = clock.now()
     let identity = params.identity
+    let trigger = params.trigger ?? .manual
     var meeting = Meeting(
       id: makeID(),
       identity: identity,
@@ -161,8 +177,8 @@ public actor MeetingRegistry {
       state: .active,
       started: now,
       intervals: [MeetingInterval(start: now)],
-      sources: params.sources,
-      trigger: params.trigger ?? .manual)
+      sources: await initialSources(declared: params.sources, trigger: trigger),
+      trigger: trigger)
     try persist(meeting)
     appendEvent(meeting.id, event: "started", at: now)
     appendEvent(meeting.id, event: "interval_opened", at: now)
@@ -403,6 +419,26 @@ public actor MeetingRegistry {
     }
     meeting.intervals[index].end = now
     return true
+  }
+
+  /// A new meeting's starting source list: the client-declared sources, plus
+  /// (for browser-triggered meetings only) the configured ``localBrowserSources``
+  /// that the daemon is actually capturing right now — the host's own mic
+  /// joins the meeting so `transcribe --meeting` covers both sides. Non-browser
+  /// (manual/CLI) meetings are left exactly as declared; a CLI caller names
+  /// its own sources. Declared sources keep their order and precede the
+  /// injected ones; duplicates are dropped.
+  private func initialSources(declared: [SourceID], trigger: TriggerKind) async -> [SourceID] {
+    guard trigger == .browserExtension, !localBrowserSources.isEmpty else {
+      return declared
+    }
+    let known = await knownSourceIDs()
+    var sources = declared
+    for source in localBrowserSources
+    where known.contains(source) && !sources.contains(source) {
+      sources.append(source)
+    }
+    return sources
   }
 
   private func mergeSources(_ sources: [SourceID], into meeting: inout Meeting) -> Bool {

@@ -37,6 +37,8 @@ function parseFakeSelector(selector: string): SelectorPattern {
   if (attrMatch) return { attr: attrMatch[1]! };
   const tagClassMatch = selector.match(/^([a-zA-Z]+)\.([\w-]+)$/);
   if (tagClassMatch) return { tag: tagClassMatch[1]!.toUpperCase(), cls: tagClassMatch[2]! };
+  const tagOnlyMatch = selector.match(/^([a-zA-Z]+)$/);
+  if (tagOnlyMatch) return { tag: tagOnlyMatch[1]!.toUpperCase() };
   throw new Error(`unsupported fake selector: ${selector}`);
 }
 
@@ -60,6 +62,7 @@ class FakeEl implements MediaElementLike {
   }
 
   getAttribute(name: string): string | null {
+    if (name === "class") return this.classes.size ? [...this.classes].join(" ") : null;
     return this.attrs.get(name) ?? null;
   }
 
@@ -81,6 +84,19 @@ class FakeEl implements MediaElementLike {
       return null;
     };
     return walk(this);
+  }
+
+  querySelectorAll(selectors: string): FakeEl[] {
+    const patterns = selectors.split(",").map((s) => parseFakeSelector(s.trim()));
+    const out: FakeEl[] = [];
+    const walk = (el: FakeEl): void => {
+      for (const child of el.children) {
+        if (patterns.some((p) => child.matches(p))) out.push(child);
+        walk(child);
+      }
+    };
+    walk(this);
+    return out;
   }
 }
 
@@ -174,6 +190,37 @@ describe("extractDisplayName", () => {
       ],
     });
     expect(extractDisplayName(tile)).toBe("Grace Hopper");
+  });
+
+  it("skips an icon-wrapping span.notranslate and takes the real name", () => {
+    // Confirmed live: a non-name tile's span.notranslate wraps a material <i>
+    // whose ligature text ("devices") bubbles up as the span's textContent; the
+    // span's own class carries no material marker. Order-agnostic: the icon span
+    // precedes the name span here.
+    const iconSpan = new FakeEl({
+      tag: "span",
+      classes: ["notranslate", "VfPpkd-kBDsod"],
+      text: "devices",
+      children: [new FakeEl({ tag: "i", classes: ["google-material-icons"], text: "devices" })],
+    });
+    const tile = new FakeEl({
+      children: [iconSpan, new FakeEl({ tag: "span", classes: ["notranslate"], text: "Grace Hopper" })],
+    });
+    expect(extractDisplayName(tile)).toBe("Grace Hopper");
+  });
+
+  it("returns undefined when the only span.notranslate wraps an icon ligature", () => {
+    const tile = new FakeEl({
+      children: [
+        new FakeEl({
+          tag: "span",
+          classes: ["notranslate"],
+          text: "mic",
+          children: [new FakeEl({ tag: "i", classes: ["google-material-icons"], text: "mic" })],
+        }),
+      ],
+    });
+    expect(extractDisplayName(tile)).toBeUndefined();
   });
 
   it("prefers data-self-name over span.notranslate when both are present", () => {

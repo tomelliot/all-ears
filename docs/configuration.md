@@ -64,6 +64,10 @@ min_silence_ms = 700       # gap before declaring silence
 # daemon ends the meeting on its own (events.jsonl reason "ingest-idle").
 # Manual meetings are never auto-ended.
 ingest_close_grace_s = 120
+# Locally-captured sources folded into every browser meeting, so your own side
+# is transcribed alongside the extension's per-participant streams. Each id is
+# included only if the daemon is actually capturing it. Set to [] to disable.
+local_sources = ["mic"]
 
 # Audio ingestion from the browser extension (binary PCM). Off by default.
 [earsd.ingest_ws]

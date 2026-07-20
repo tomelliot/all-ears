@@ -48,6 +48,13 @@ public struct EarsDaemonConfiguration: Sendable {
   /// last ingest stream may stay closed before the daemon ends the meeting
   /// (`reason = "ingest-idle"`). See `MeetingRegistry`'s orphan policy.
   public var meetingIngestCloseGraceSeconds: Double
+  /// `[earsd.meetings].local_sources`: locally-captured source ids (your own
+  /// mic, system audio) the daemon folds into every browser-triggered meeting
+  /// at `meeting.start`, so your side is transcribed alongside the extension's
+  /// per-participant streams. Filtered to sources that actually exist, so an
+  /// id here that the daemon isn't capturing is silently skipped rather than
+  /// breaking `transcribe --meeting`. Default `["mic"]`; `[]` disables.
+  public var browserMeetingLocalSources: [SourceID]
   /// `[triggers]`/`[[triggers.rule]]`, resolved. Disabled (no rules) by
   /// default — gates whether ``EarsDaemon/start()`` also starts an
   /// ``AppSignalTriggerObserver``.
@@ -70,6 +77,7 @@ public struct EarsDaemonConfiguration: Sendable {
     ingestWebSocket: IngestWebSocketConfiguration? = nil,
     controlWebSocket: ControlWebSocketConfiguration? = nil,
     meetingIngestCloseGraceSeconds: Double = 120,
+    browserMeetingLocalSources: [SourceID] = ["mic"],
     triggers: TriggersConfiguration = TriggersConfiguration(),
     outputRoot: URL = URL(fileURLWithPath: ".")
   ) {
@@ -85,6 +93,7 @@ public struct EarsDaemonConfiguration: Sendable {
     self.ingestWebSocket = ingestWebSocket
     self.controlWebSocket = controlWebSocket
     self.meetingIngestCloseGraceSeconds = meetingIngestCloseGraceSeconds
+    self.browserMeetingLocalSources = browserMeetingLocalSources
     self.triggers = triggers
   }
 }
@@ -340,6 +349,11 @@ public actor EarsDaemon {
       bus: eventBus,
       graceSeconds: configuration.meetingIngestCloseGraceSeconds,
       onEnded: onMeetingEnded,
+      localBrowserSources: configuration.browserMeetingLocalSources,
+      knownSourceIDs: { [weak self] in
+        guard let self else { return [] }
+        return await self.currentSourceIDs()
+      },
       log: log)
     await meetings.loadFromDisk()
     meetingRegistry = meetings

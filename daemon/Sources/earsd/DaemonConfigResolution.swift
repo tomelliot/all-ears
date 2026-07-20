@@ -87,6 +87,15 @@ enum DaemonConfigResolution {
     let (triggers, skippedTriggerRules) = resolveTriggers(root)
     let outputRootPath = string(root, "output_root", default: "")
 
+    // `[earsd.meetings].local_sources`: absent defaults to `["mic"]`; an
+    // explicit (possibly empty) list is taken verbatim, so `local_sources = []`
+    // disables host-audio injection rather than re-defaulting to mic.
+    let meetingsTable = nestedTable(earsd, "meetings")
+    let browserMeetingLocalSources: [SourceID] =
+      meetingsTable["local_sources"] == nil
+      ? ["mic"]
+      : stringArray(meetingsTable, "local_sources").map { SourceID($0) }
+
     let configuration = EarsDaemonConfiguration(
       sources: descriptors,
       dataRoot: URL(fileURLWithPath: dataRoot.isEmpty ? "." : dataRoot),
@@ -99,7 +108,8 @@ enum DaemonConfigResolution {
       ingestWebSocket: resolveIngestWebSocket(earsd),
       controlWebSocket: resolveControlWebSocket(earsd),
       meetingIngestCloseGraceSeconds: Double(
-        int(nestedTable(earsd, "meetings"), "ingest_close_grace_s", default: 120)),
+        int(meetingsTable, "ingest_close_grace_s", default: 120)),
+      browserMeetingLocalSources: browserMeetingLocalSources,
       triggers: triggers,
       outputRoot: URL(fileURLWithPath: outputRootPath.isEmpty ? "." : outputRootPath)
     )
