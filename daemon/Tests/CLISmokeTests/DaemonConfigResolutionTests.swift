@@ -328,16 +328,16 @@ struct DaemonConfigResolutionTests {
     #expect(defaulted.allowedOrigins.isEmpty)
   }
 
-  @Test("transcribe_on_browser_session_close defaults to false and resolves when set")
+  @Test("transcribe_on_browser_session_close defaults to true and resolves when disabled")
   func transcribeOnBrowserSessionCloseResolution() {
     let defaulted = DaemonConfigResolution.resolve(config: config(), now: now)
-    #expect(defaulted.configuration.triggers.transcribeOnBrowserSessionClose == false)
+    #expect(defaulted.configuration.triggers.transcribeOnBrowserSessionClose == true)
 
-    let enabled = DaemonConfigResolution.resolve(
+    let disabled = DaemonConfigResolution.resolve(
       config: config(
-        triggers: .table(["transcribe_on_browser_session_close": .bool(true)])),
+        triggers: .table(["transcribe_on_browser_session_close": .bool(false)])),
       now: now
     )
-    #expect(enabled.configuration.triggers.transcribeOnBrowserSessionClose == true)
+    #expect(disabled.configuration.triggers.transcribeOnBrowserSessionClose == false)
   }
 }

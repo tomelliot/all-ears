@@ -59,13 +59,14 @@ public struct TriggersConfiguration: Sendable, Hashable {
   /// closed with `trigger == .browserExtension` runs the `transcribe` stage
   /// via the shared ``OnClosePipelineRunner`` — the browser-side analogue of
   /// a rule's `on_close`, which only fires on app-signal rule matches.
-  /// Default `false` (no behavior change unless opted in).
+  /// Default `true`: a browser meeting transcribes when it ends unless the
+  /// user opts out with `transcribe_on_browser_session_close = false`.
   public var transcribeOnBrowserSessionClose: Bool
 
   public init(
     enabled: Bool = false,
     rules: [TriggerRuleConfiguration] = [],
-    transcribeOnBrowserSessionClose: Bool = false
+    transcribeOnBrowserSessionClose: Bool = true
   ) {
     self.enabled = enabled
     self.rules = rules

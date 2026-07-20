@@ -52,7 +52,7 @@ public enum EarsdConfigSchema {
     ]),
     "triggers": .table([
       "enabled": .bool(false),
-      "transcribe_on_browser_session_close": .bool(false),
+      "transcribe_on_browser_session_close": .bool(true),
       "rule": .array([]),
     ]),
   ])

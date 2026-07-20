@@ -53,7 +53,7 @@ struct EarsdConfigSchemaTests {
     ])
     let triggersTable: ConfigValue = .table([
       "enabled": .bool(false),
-      "transcribe_on_browser_session_close": .bool(false),
+      "transcribe_on_browser_session_close": .bool(true),
       "rule": .array([]),
     ])
     let expected: ConfigValue = .table(["earsd": earsdTable, "triggers": triggersTable])

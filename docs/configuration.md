@@ -98,7 +98,7 @@ time_cap_seconds = 14400  # keep meetings longer
 # --- Auto-triggers ---
 [triggers]
 enabled = true
-transcribe_on_browser_session_close = false  # run the pipeline when a browser meeting session closes
+transcribe_on_browser_session_close = true  # transcribe when a browser meeting ends (default: true; set false to disable)
 
 [[triggers.rule]]
 name = "meetings"

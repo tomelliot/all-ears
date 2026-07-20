@@ -115,7 +115,7 @@ enum DaemonConfigResolution {
     let triggersTable = nestedTable(root, "triggers")
     let enabled = bool(triggersTable, "enabled", default: false)
     let transcribeOnBrowserClose = bool(
-      triggersTable, "transcribe_on_browser_session_close", default: false)
+      triggersTable, "transcribe_on_browser_session_close", default: true)
 
     var rules: [TriggerRuleConfiguration] = []
     var skipped: [SkippedTriggerRule] = []
