@@ -47,6 +47,32 @@ public enum EvictionExecutor {
     return toEvict
   }
 
+  /// Evicts a source's aged-out chunks reading the live set straight from disk
+  /// (``DiskChunkScan``) instead of from tracked/reconstructed chunks — the
+  /// path the daemon's eviction sweep takes for a source with no live
+  /// `CaptureActor` to route through. Otherwise identical to ``evict(chunks:…)``:
+  /// same time-cap math, same file deletion, same `evict` events appended.
+  ///
+  /// - Parameter storeNative: The source's `meta.toml` `store_native`, selecting
+  ///   the subdirectory whose filenames name the chunks (see ``DiskChunkScan``).
+  @discardableResult
+  public static func evictFromDisk(
+    sourceDirectory: URL,
+    storeNative: Bool,
+    now: Instant,
+    timeCapSeconds: Double,
+    indexAppender: IndexAppender
+  ) async throws -> [IndexedChunk] {
+    let chunks = DiskChunkScan.liveChunks(
+      sourceDirectory: sourceDirectory, storeNative: storeNative)
+    return try await evict(
+      chunks: chunks,
+      now: now,
+      timeCapSeconds: timeCapSeconds,
+      sourceDirectory: sourceDirectory,
+      indexAppender: indexAppender)
+  }
+
   private static func deleteChunkFiles(for chunk: IndexedChunk, sourceDirectory: URL) throws {
     let filename = URL(fileURLWithPath: chunk.file).lastPathComponent
     for subdirectory in [ChunkSubdirectory.chunks, .asr] {

@@ -88,16 +88,22 @@ public enum CaptureActorError: Error, Sendable, Hashable {
 /// implementing task downcasts and reads `stats`); a plain `CaptureBackend`
 /// reports capture health from index/disk state alone.
 ///
-/// ## Eviction seam (per-source now, cross-source later)
+/// ## Eviction seam (daemon-driven, not audio-driven)
 ///
-/// On each newly-indexed chunk, ``CaptureActor`` runs `EvictionExecutor.evict`
-/// for **this source only** — deleting chunks aged past the source's
-/// `time_cap_seconds` and appending `evict` events. Cross-source coordination
-/// (`earsd`'s `hard_total_cap_bytes` backstop, which evicts oldest *across*
-/// sources) stays a documented no-op seam: `EarsDataStore.HardTotalCapEnforcement`
-/// is where Phase 4 adds real cross-source accounting, and it changes no call
-/// site here. Phase 1 is mic-only, so there is exactly one source and nothing
-/// to coordinate across.
+/// Time-cap eviction runs on demand via ``evictNow()``, which the daemon's
+/// periodic ``EvictionSweeper`` calls for **this source only** — deleting chunks
+/// aged past the source's `time_cap_seconds` and appending `evict` events
+/// through this source's shared ``IndexAppender``. The actor no longer evicts as
+/// a side effect of a chunk rolling over: enforcement is a wall-clock bound, so
+/// the daemon drives it on a timer across *every* source (including ones that
+/// have stopped capturing — an ended meeting, a disabled source — which never
+/// roll another chunk). Sources with no live actor are evicted straight from
+/// disk by the sweeper; this seam covers the ones that do.
+///
+/// Cross-source coordination (`earsd`'s `hard_total_cap_bytes` backstop, which
+/// evicts oldest *across* sources) stays a documented no-op seam:
+/// `EarsDataStore.HardTotalCapEnforcement` is where a later phase adds real
+/// cross-source byte accounting; it changes no call site here.
 public actor CaptureActor {
   /// This actor's source id — `nonisolated` so `ControlServer` can key its
   /// source→actor lookup without hopping onto the actor.
@@ -526,12 +532,13 @@ public actor CaptureActor {
 
   /// If the encoder's chunk start advanced past `previousChunkStart`, a chunk
   /// was finalized covering `[previousChunkStart, currentChunkStart)`. Track it
-  /// (for `status` bounds and eviction) and run the per-source eviction pass.
+  /// so `status` bounds and the next ``evictNow()`` see it. Eviction itself is
+  /// not run here — it's the daemon's timer-driven ``EvictionSweeper``'s job, so
+  /// it doesn't depend on a fresh chunk arriving (see the type doc's seam note).
   private func trackRollover(previousChunkStart: Instant) async {
     let currentStart = await encoder.currentChunkStart
     guard currentStart != previousChunkStart else { return }
     knownChunks.append(makeIndexedChunk(start: previousChunkStart, end: currentStart))
-    await runEviction()
   }
 
   /// Rebuilds the ``IndexedChunk`` the encoder just wrote from the chunk's
@@ -547,20 +554,29 @@ public actor CaptureActor {
     return IndexedChunk(range: TimeRange(start: start, end: end), file: file, frames: frames)
   }
 
-  /// Seeds `knownChunks` from the existing `index.jsonl` at ``start()``, so the
-  /// eviction pass covers chunks written by earlier daemon runs — not just this
-  /// process's — then runs one pass to evict whatever is already aged out.
+  /// Seeds `knownChunks` from the existing `index.jsonl` at ``start()``, so a
+  /// later ``evictNow()`` covers chunks written by earlier daemon runs — not
+  /// just this process's — and `status` bounds are accurate from the first
+  /// reply.
   ///
   /// Reads the whole index (via ``IndexAppender/readContents()``) rather than
   /// the tail: the live chunk set can only be recovered by pairing every
   /// `chunk` event with its `evict`, which needs the full log. This runs once
   /// per source per daemon start, after the control socket is already bound
   /// (see ``EarsDaemon/start()``), so its cost doesn't hold the control plane.
-  /// A read or parse failure is swallowed — capture still starts, and eviction
-  /// resumes incrementally as new chunks roll over.
+  /// A read or parse failure is swallowed — capture still starts, and the
+  /// daemon's sweep still evicts this source straight from disk regardless.
   private func seedKnownChunksFromIndex() async {
     guard let contents = try? await indexAppender.readContents(), !contents.isEmpty else { return }
     knownChunks = RingBufferReconstruction.liveChunks(from: IndexLog.parse(contents).events)
+  }
+
+  /// Runs this source's time-cap eviction pass now, on demand — the seam the
+  /// daemon's ``EvictionSweeper`` drives on its timer, so enforcement is
+  /// wall-clock-based rather than tied to a new chunk rolling over. Reuses this
+  /// source's shared ``IndexAppender`` (the single writer per source) and
+  /// updates `knownChunks`, keeping `status` bounds fresh as chunks are deleted.
+  public func evictNow() async {
     await runEviction()
   }
 

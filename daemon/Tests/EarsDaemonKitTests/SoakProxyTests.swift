@@ -87,10 +87,10 @@ struct SoakProxyTests {
   /// have ended in real time, *before* `start()` — equivalent to asking
   /// "what does the ring buffer look like right now, after this many cycles
   /// of real elapsed time have passed," without spending any real wall-clock
-  /// time getting there. Every eviction pass during the drain therefore sees
-  /// the same final `now`, so chunks older than `timeCapSeconds` are evicted
-  /// as soon as they roll — exactly the steady-state a long-running daemon
-  /// converges to.
+  /// time getting there. A single eviction sweep at that final `now` (see
+  /// `runSoak`) then evicts every chunk older than `timeCapSeconds` at once —
+  /// exactly the steady-state a long-running daemon converges to under the
+  /// daemon's periodic ``EvictionSweeper``.
   private func runSoak(cycles: Int) async throws -> SoakResult {
     let dataRoot = try makeDataRoot()
     let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
@@ -131,6 +131,11 @@ struct SoakProxyTests {
     try await actor.start()
     await actor.drainForTesting()
     await actor.stop()
+    // Eviction is the daemon's periodic sweep's job now, not a rollover side
+    // effect — so drive one sweep pass (its per-source seam) at the converged
+    // `now`. This is the steady state a long-running daemon holds: chunks older
+    // than `timeCapSeconds` are gone, the physical ring stays bounded.
+    await actor.evictNow()
 
     let chunkFileCount = countFiles(
       in: DataStoreLayout.chunksDirectory(dataRoot: dataRoot, sourceID: descriptor.id))

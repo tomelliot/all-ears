@@ -638,13 +638,12 @@ struct CaptureActorTests {
     await actor.stop()
   }
 
-  @Test("an aged-out chunk is evicted and logged on the next rollover")
+  @Test("an aged-out chunk is evicted and logged by evictNow()")
   func agedChunkEvicted() async throws {
     let dataRoot = try makeDataRoot()
     let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
     // A zero time cap so every finalized chunk is immediately aged out; four
-    // 0.5s buffers roll two chunks, and the eviction pass run on the second
-    // rollover deletes the first.
+    // 0.5s buffers roll two chunks, both tracked in `knownChunks`.
     let actor = try makeActor(
       dataRoot: dataRoot, clock: clock,
       buffers: [
@@ -653,11 +652,20 @@ struct CaptureActorTests {
       ],
       chunkSeconds: 1.0, timeCapSeconds: 0)
 
-    // Advance the clock well past the anchor so the first chunk's end is
-    // strictly before `now - timeCap` when the second chunk rolls over.
+    // Advance the clock well past the anchor so the finalized chunks' ends are
+    // strictly before `now - timeCap`.
     clock.set(Instant(secondsSinceEpoch: startEpoch + 10_000))
     try await actor.start()
     await actor.drainForTesting()
+
+    // Eviction is daemon-driven now, not a rollover side effect: the sweeper's
+    // per-source seam is `evictNow()`. Nothing is evicted until it runs.
+    let evictsBefore = try indexEvents(dataRoot: dataRoot).filter {
+      if case .evict = $0 { return true } else { return false }
+    }
+    #expect(evictsBefore.isEmpty)
+
+    await actor.evictNow()
 
     let evicts = try indexEvents(dataRoot: dataRoot).filter {
       if case .evict = $0 { return true } else { return false }
@@ -665,7 +673,7 @@ struct CaptureActorTests {
     #expect(!evicts.isEmpty)
   }
 
-  @Test("chunks written by a previous daemon run are evicted on start once past the cap")
+  @Test("chunks written by a previous daemon run are evicted by evictNow() once past the cap")
   func priorRunChunksEvictedOnStart() async throws {
     let dataRoot = try makeDataRoot()
 
@@ -691,13 +699,15 @@ struct CaptureActorTests {
 
     // Second run: a fresh actor (empty `knownChunks`) over the SAME data root,
     // clock advanced well past the cap so every prior chunk is aged out. The
-    // seed-from-index pass in start() must find and evict them immediately,
-    // before any new chunk rolls over — this is the restart-persistence bug.
+    // seed-from-index pass in start() recovers the prior run's chunks into
+    // `knownChunks`, so the first `evictNow()` deletes them even though no new
+    // chunk ever rolls over — the restart-persistence path.
     let clock2 = ManualClock(Instant(secondsSinceEpoch: startEpoch + 100_000))
     let actor2 = try makeActor(
       dataRoot: dataRoot, clock: clock2, buffers: [], chunkSeconds: 1.0, timeCapSeconds: 7_200)
     try await actor2.start()
     await actor2.drainForTesting()
+    await actor2.evictNow()
 
     let evictedFiles = Set(
       try indexEvents(dataRoot: dataRoot).compactMap { event -> String? in

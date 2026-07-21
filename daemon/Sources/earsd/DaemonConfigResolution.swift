@@ -105,6 +105,8 @@ enum DaemonConfigResolution {
       codec: defaults.codec,
       bitrate: defaults.bitrate,
       defaultTimeCapSeconds: defaults.defaultTimeCapSeconds,
+      evictionSweepIntervalSeconds: Double(
+        int(earsd, "eviction_sweep_interval_s", default: 60)),
       ingestWebSocket: resolveIngestWebSocket(earsd),
       controlWebSocket: resolveControlWebSocket(earsd),
       meetingIngestCloseGraceSeconds: Double(

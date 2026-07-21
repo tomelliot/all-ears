@@ -6,9 +6,15 @@ import Foundation
 /// access happens here, so this is unit-tested without touching disk even
 /// though every other type in this module is I/O-heavy.
 public enum DataStoreLayout {
+  /// `<data-root>/sources/` — the parent of every source directory, enumerated
+  /// by the daemon's eviction sweep to find sources with no live actor.
+  public static func sourcesRootDirectory(dataRoot: URL) -> URL {
+    dataRoot.appendingPathComponent("sources")
+  }
+
   /// `<data-root>/sources/<source-id-path-safe>/`.
   public static func sourceDirectory(dataRoot: URL, sourceID: SourceID) -> URL {
-    dataRoot.appendingPathComponent("sources").appendingPathComponent(sourceID.pathSafe)
+    sourcesRootDirectory(dataRoot: dataRoot).appendingPathComponent(sourceID.pathSafe)
   }
 
   /// `<data-root>/sources/<source-id-path-safe>/chunks/`, the native-rate

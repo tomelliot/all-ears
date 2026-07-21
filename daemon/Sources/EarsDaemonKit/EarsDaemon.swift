@@ -37,6 +37,12 @@ public struct EarsDaemonConfiguration: Sendable {
   public var codec: String
   public var bitrate: Int
   public var defaultTimeCapSeconds: Int
+  /// How often the daemon's ``EvictionSweeper`` runs its time-cap pass across
+  /// every source, in seconds. The cap itself is per-source
+  /// (`defaultTimeCapSeconds` / each source's `time_cap_seconds`); this only
+  /// bounds how far past the cap a recording can linger before being expired
+  /// (worst case ≈ cap + this interval). Default 60 s.
+  public var evictionSweepIntervalSeconds: Double
   /// `[earsd.ingest_ws]`, or `nil` when disabled (the default) — gates
   /// whether ``EarsDaemon/start()`` also binds the loopback ingest
   /// WebSocket.
@@ -75,6 +81,7 @@ public struct EarsDaemonConfiguration: Sendable {
     codec: String = "aac",
     bitrate: Int = 64_000,
     defaultTimeCapSeconds: Int = 7_200,
+    evictionSweepIntervalSeconds: Double = 60,
     ingestWebSocket: IngestWebSocketConfiguration? = nil,
     controlWebSocket: ControlWebSocketConfiguration? = nil,
     meetingIngestCloseGraceSeconds: Double = 120,
@@ -91,6 +98,7 @@ public struct EarsDaemonConfiguration: Sendable {
     self.bitrate = bitrate
     self.outputRoot = outputRoot
     self.defaultTimeCapSeconds = defaultTimeCapSeconds
+    self.evictionSweepIntervalSeconds = evictionSweepIntervalSeconds
     self.ingestWebSocket = ingestWebSocket
     self.controlWebSocket = controlWebSocket
     self.meetingIngestCloseGraceSeconds = meetingIngestCloseGraceSeconds
@@ -169,6 +177,10 @@ public actor EarsDaemon {
   private let bootID = UUID().uuidString.lowercased()
   private var powerObserver: PowerObserver?
   private var appSignalTriggerObserver: AppSignalTriggerObserver?
+  /// The daemon-owned, timer-driven time-cap enforcer — expires aged-out
+  /// recordings across every source independent of capture activity. Started in
+  /// ``start()`` after the control socket is bound, stopped in ``stop()``.
+  private var evictionSweeper: EvictionSweeper?
 
   // MARK: - Dynamic browser (ingest) sources
   //
@@ -495,9 +507,38 @@ public actor EarsDaemon {
     await observer.startObserving()
     powerObserver = observer
 
+    // The daemon owns time-cap enforcement: a periodic sweep over every source
+    // on disk, decoupled from capture so stopped/idle sources (an ended meeting,
+    // a disabled source) are expired too — not just the continuously-capturing
+    // mic. `[weak self]` to avoid a retain cycle (the daemon owns the sweeper).
+    let sweeper = EvictionSweeper(
+      dataRoot: configuration.dataRoot,
+      clock: clock,
+      intervalSeconds: configuration.evictionSweepIntervalSeconds,
+      log: log,
+      evictThroughActors: { [weak self] ids in
+        guard let self else { return [] }
+        return await self.evictThroughLiveActors(ids)
+      })
+    await sweeper.start()
+    evictionSweeper = sweeper
+
     if let ingestWebSocket = configuration.ingestWebSocket {
       await startIngestWebSocket(ingestWebSocket)
     }
+  }
+
+  /// Evicts each id that has a live `CaptureActor` through that actor (so the
+  /// actor's shared `IndexAppender` stays the single writer to its index), and
+  /// returns the ids it handled. The ``EvictionSweeper`` disk-evicts the rest.
+  private func evictThroughLiveActors(_ ids: Set<SourceID>) async -> Set<SourceID> {
+    var handled: Set<SourceID> = []
+    for id in ids {
+      guard let actor = captureActors[id] else { continue }
+      await actor.evictNow()
+      handled.insert(id)
+    }
+    return handled
   }
 
   /// Binds and starts the ingest WebSocket. A bind failure (e.g. the port is
@@ -590,6 +631,11 @@ public actor EarsDaemon {
     ingestServerRunTask?.cancel()
     ingestServerRunTask = nil
     self.ingestWebSocketServer = nil
+
+    if let evictionSweeper {
+      await evictionSweeper.stop()
+    }
+    evictionSweeper = nil
 
     if let powerObserver {
       await powerObserver.stopObserving()

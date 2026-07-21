@@ -42,7 +42,7 @@ Continuously capture every enabled audio source into its per-source ring buffer,
 ### Ring buffer maintenance
 
 - Chunks are fixed-duration (default 30 s), written atomically (temp + rename) then indexed. On flush, `fsync` both the file and its directory; on an encode failure, keep the partial chunk.
-- Eviction: on each new chunk, delete chunks whose end is older than `now - time_cap` and emit `evict`. If `hard_total_cap_bytes > 0`, evict oldest across sources until under budget.
+- Eviction: a daemon-owned periodic sweep (default every 60 s, independent of capture activity) deletes, for **every** source, chunks whose end is older than `now - time_cap` and emits `evict` — so stopped and idle sources (an ended meeting, a disabled source) are expired too, not just the continuously-capturing mic. Sources with a live capture actor are evicted through it (single index writer); actor-less sources are evicted straight from disk, deciding aged-out chunks from their filenames. If `hard_total_cap_bytes > 0`, evict oldest across sources until under budget.
 - On startup after downtime, emit a `gap` event covering the uncaptured interval.
 
 ### VAD
