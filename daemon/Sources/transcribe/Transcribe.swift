@@ -64,6 +64,13 @@ struct Transcribe: AsyncParsableCommand {
   @Option(name: .customLong("source"), help: "Source(s) to transcribe; repeatable.")
   var sources: [String] = []
 
+  @Option(
+    name: .customLong("file"),
+    help:
+      "Transcribe a standalone audio file (e.g. a .m4a) directly, bypassing the ring buffer; repeatable, one transcript written per file."
+  )
+  var files: [String] = []
+
   @Option(name: .customLong("out"), help: "Override the output transcript path.")
   var out: String?
 
@@ -89,6 +96,25 @@ struct Transcribe: AsyncParsableCommand {
     let exitCode = await EarsCLI.run(tool: "transcribe", version: "0.1.0", arguments: arguments)
     guard exitCode == 0 else { throw ExitCode(exitCode) }
     guard !printConfig, !configPath else { return }
+
+    if !files.isEmpty {
+      // `--file` is a standalone-file batch: every range/source/session
+      // selector and the live-`--follow` attach make no sense against a file
+      // with no index and no wall-clock time, so mixing them is a precise
+      // error rather than a silent ignore (matching `--follow`/`--meeting`).
+      guard follow == nil, last == nil, from == nil, to == nil, session == nil, meeting == nil,
+        sources.isEmpty, !json
+      else {
+        throw ValidationError(
+          "--file cannot be combined with "
+            + "--follow/--last/--from/--to/--session/--meeting/--source/--json")
+      }
+      let filesExitCode = await TranscribeRuntime.runFiles(
+        arguments: arguments,
+        inputs: TranscribeFilePipeline.Inputs(files: files, out: out))
+      guard filesExitCode == 0 else { throw ExitCode(filesExitCode) }
+      return
+    }
 
     if let follow {
       // Follow is attach-and-tail; batch is resolve-a-range-and-exit. The

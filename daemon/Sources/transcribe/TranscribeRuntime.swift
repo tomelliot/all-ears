@@ -70,6 +70,48 @@ enum TranscribeRuntime {
     )
   }
 
+  /// `transcribe --file`'s entry point: the file path needs only the model
+  /// selection config (`[transcribe]`'s `backend`/`model`/`compute`), never
+  /// `data_root`/`output_root`, so this resolves that much and delegates to
+  /// ``TranscribeFilePipeline``. Kept here beside ``run(arguments:inputs:)`` so
+  /// both share the same private config readers rather than duplicating them.
+  static func runFiles(
+    arguments: EarsCLI.Arguments, inputs: TranscribeFilePipeline.Inputs
+  ) async -> Int32 {
+    let environment = ProcessInfo.processInfo.environment
+    let homeDirectory = FileManager.default.homeDirectoryForCurrentUser.path
+    let flagsLayer = configLayer(
+      fromCLIFlags: CLILogFlags(level: arguments.logLevel, file: arguments.logFile))
+    let loadInputs = ConfigLoadInputs(
+      configFlag: arguments.config,
+      environment: environment,
+      homeDirectory: homeDirectory,
+      flags: flagsLayer
+    )
+
+    let loaded: LoadedConfig
+    switch loadConfig(loadInputs) {
+    case .success(let value): loaded = value
+    case .failure(let error):
+      writeStderr(describe(error))
+      return 1
+    }
+
+    let root = loaded.value
+    let backendName = stringValue(root, ["transcribe", "backend"], default: "fluidaudio")
+    let modelIdentifier = stringValue(root, ["transcribe", "model"])
+    let compute = computePreference(
+      stringValue(root, ["transcribe", "compute"], default: "automatic"))
+
+    return await TranscribeFilePipeline.run(
+      inputs: inputs,
+      backendName: backendName,
+      dependencies: .production(
+        loadOptions: LoadOptions(
+          modelIdentifier: modelIdentifier.isEmpty ? nil : modelIdentifier,
+          compute: compute)))
+  }
+
   private static func describe(_ error: ConfigLoadError) -> String {
     switch error {
     case .fileReadFailed(let path, let message):
