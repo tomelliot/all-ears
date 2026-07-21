@@ -120,4 +120,40 @@ struct MicCaptureBackendTests {
     await backend.stop()
     #expect(collected >= 2048)
   }
+
+  @Test(
+    "buffers are restamped with the new device rate after a route change",
+    .timeLimit(.minutes(1)))
+  func restampsSampleRateAfterRouteChange() async throws {
+    let provider = SyntheticSourceNodeProvider()
+    let backend = MicCaptureBackend(source: "mic", provider: provider, config: testConfig())
+    let stream = try await backend.start()
+
+    // Before the change: buffers carry the initial 48 kHz stamp.
+    for _ in 0..<12 { try await backend.renderOfflineForTesting(frames: 512) }
+    var sawInitialRate = false
+    for await buffer in stream {
+      #expect(buffer.sampleRate == 48_000)
+      sawInitialRate = true
+      break
+    }
+    #expect(sawInitialRate)
+
+    // The input device switches to 16 kHz; a route change rebuilds the engine,
+    // and the backend re-reads the new tap rate.
+    provider.setSampleRate(16_000)
+    await backend.simulateRouteChangeForTesting()
+
+    for _ in 0..<12 { try await backend.renderOfflineForTesting(frames: 512) }
+    var sawNewRate = false
+    for await buffer in stream {
+      // Skip any buffers still queued from the pre-change 48 kHz generation.
+      if buffer.sampleRate == 48_000 { continue }
+      #expect(buffer.sampleRate == 16_000)
+      sawNewRate = true
+      break
+    }
+    await backend.stop()
+    #expect(sawNewRate)  // the load-bearing input to normalization: restamped on rebuild
+  }
 }

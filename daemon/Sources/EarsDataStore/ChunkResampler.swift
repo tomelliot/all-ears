@@ -5,9 +5,11 @@ import AVFoundation
 /// class, not a captured `var`: the input block's closure type is
 /// `@Sendable`, so the compiler requires captured state to be `Sendable`
 /// itself rather than a plain mutable local -- this is called synchronously
-/// and exclusively within ``ChunkResampler/resample(_:)``, never actually
-/// shared across threads, so `@unchecked` is safe here.
-private final class ConversionInputState: @unchecked Sendable {
+/// and exclusively within a single converter call (``ChunkResampler/resample(_:)``
+/// or ``AdaptiveResampler/normalize(_:)``), never actually shared across
+/// threads, so `@unchecked` is safe here. `internal` (not `private`) so
+/// ``AdaptiveResampler`` shares this one input-block shim.
+final class ConversionInputState: @unchecked Sendable {
   var provided = false
   let inputBuffer: AVAudioPCMBuffer
 

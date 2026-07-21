@@ -2,6 +2,7 @@ import EarsCaptureKit
 import EarsCore
 import EarsCoreTestSupport
 import EarsDataStore
+import EarsLogging
 import Foundation
 import Synchronization
 import Testing
@@ -45,11 +46,18 @@ struct CaptureActorTests {
   }
 
   /// A mono buffer of `seconds` at `value` (0.5 lands well above the VAD's
-  /// 0.02 energy threshold, so a full-value buffer classifies as speech).
-  private func makeBuffer(seconds: Double, value: Float = 0.5) -> AudioBuffer {
-    AudioBuffer(
-      samples: [Float](repeating: value, count: Int(seconds * Double(nativeRate))),
-      sampleRate: nativeRate)
+  /// 0.02 energy threshold, so a full-value buffer classifies as speech). The
+  /// stamp defaults to the source's native rate; pass `sampleRate:` to model a
+  /// device delivering a *different* rate than the source is configured for —
+  /// the production bug this fix guards against. Sample count derives from the
+  /// stamped rate so `duration` stays honest.
+  private func makeBuffer(
+    seconds: Double, value: Float = 0.5, sampleRate: Int? = nil
+  ) -> AudioBuffer {
+    let rate = sampleRate ?? nativeRate
+    return AudioBuffer(
+      samples: [Float](repeating: value, count: Int(seconds * Double(rate))),
+      sampleRate: rate)
   }
 
   private func makeActor(
@@ -59,7 +67,9 @@ struct CaptureActorTests {
     chunkSeconds: Double = 1.0,
     timeCapSeconds: Int = 7_200,
     backend: (any CaptureBackend)? = nil,
-    eventSink: EventSink? = nil
+    eventSink: EventSink? = nil,
+    logSink: any LogRecordSink = NoOpLogRecordSink(),
+    encoderNativeRate: Int? = nil
   ) throws -> CaptureActor {
     let descriptor = makeDescriptor(timeCapSeconds: timeCapSeconds)
     let indexAppender = IndexAppender(
@@ -69,7 +79,7 @@ struct CaptureActorTests {
       dataRoot: dataRoot,
       codec: descriptor.codec,
       bitrate: descriptor.bitrate,
-      nativeSampleRate: nativeRate,
+      nativeSampleRate: encoderNativeRate ?? nativeRate,
       asrSampleRate: asrRate,
       storeNative: descriptor.storeNative,
       chunkSeconds: chunkSeconds,
@@ -84,7 +94,8 @@ struct CaptureActorTests {
       indexAppender: indexAppender,
       vad: EnergyVAD(),
       clock: clock,
-      eventSink: eventSink
+      eventSink: eventSink,
+      logSink: logSink
     )
   }
 
@@ -101,6 +112,164 @@ struct CaptureActorTests {
     try indexEvents(dataRoot: dataRoot).filter {
       if case .chunk = $0 { return true } else { return false }
     }
+  }
+
+  // MARK: - Sample-rate normalization (the production bug)
+
+  @Test("buffers stamped at a different rate than the source are normalized, not dropped")
+  func normalizesOffRateBuffers() async throws {
+    // The live incident: the input device switched to 16 kHz while the source
+    // is configured native 48 kHz. Before the fix the encoder rejected every
+    // buffer and 100% of audio was silently discarded. Now the actor resamples
+    // to 48 kHz first, so chunks and VAD index entries still land.
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
+    let actor = try makeActor(
+      dataRoot: dataRoot, clock: clock,
+      buffers: [
+        makeBuffer(seconds: 0.5, sampleRate: 16_000),
+        makeBuffer(seconds: 0.5, sampleRate: 16_000),
+      ],
+      chunkSeconds: 1.0)
+
+    try await actor.start()
+    await actor.drainForTesting()
+    // Flush the pending chunk: resampling rounding can leave the two half-second
+    // buffers a hair under the 1.0s rollover threshold, so finalize explicitly
+    // (the real stop/flush path) rather than depending on exact-duration rollover.
+    await actor.stop()
+
+    let events = try indexEvents(dataRoot: dataRoot)
+    let chunks = events.compactMap { event -> (Instant, Instant, String, Int)? in
+      if case .chunk(let s, let e, let f, let frames) = event { return (s, e, f, frames) }
+      return nil
+    }
+    let vads = events.filter { if case .vad = $0 { return true } else { return false } }
+    #expect(chunks.count == 1)
+    #expect(!vads.isEmpty)
+
+    let chunk = try #require(chunks.first)
+    // Frames are counted in the native 48 kHz domain the encoder writes: the two
+    // 16 kHz buffers hold 16 000 samples between them, but resampled to 48 kHz
+    // they persist well over 24 000 — proof normalization ran (unnormalized, the
+    // encoder's rate backstop would have rejected them and produced no chunk at
+    // all). A one-time resampler warmup trims the head, so this is a floor, not
+    // an exact count.
+    #expect(chunk.3 > nativeRate / 2)
+
+    // Real files landed in both the native `chunks/` and derived `asr/` dirs.
+    let chunkURL = DataStoreLayout.sourceDirectory(dataRoot: dataRoot, sourceID: "mic")
+      .appendingPathComponent(chunk.2)
+    #expect(FileManager.default.fileExists(atPath: chunkURL.path))
+    let asrEntries = try FileManager.default.contentsOfDirectory(
+      at: DataStoreLayout.asrDirectory(dataRoot: dataRoot, sourceID: "mic"),
+      includingPropertiesForKeys: nil)
+    #expect(!asrEntries.isEmpty)
+  }
+
+  @Test("a mid-stream device rate flip still produces one contiguous chunk")
+  func midStreamRateFlipStaysContiguous() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
+    // 0.5s at the native 48k, then 0.5s after the device drops to 16k. Both
+    // normalize to 48k, so the two half-seconds still roll into one 1.0s chunk.
+    let actor = try makeActor(
+      dataRoot: dataRoot, clock: clock,
+      buffers: [
+        makeBuffer(seconds: 0.5),
+        makeBuffer(seconds: 0.5, sampleRate: 16_000),
+      ],
+      chunkSeconds: 1.0)
+
+    try await actor.start()
+    await actor.drainForTesting()
+    await actor.stop()  // finalize the pending chunk (see normalizesOffRateBuffers)
+
+    let events = try indexEvents(dataRoot: dataRoot)
+    let chunks = events.compactMap { event -> (Instant, Instant)? in
+      if case .chunk(let s, let e, _, _) = event { return (s, e) }
+      return nil
+    }
+    #expect(chunks.count == 1)
+    let chunk = try #require(chunks.first)
+    let chunkStart = chunk.0
+    let chunkEnd = chunk.1
+    #expect(chunkStart == Instant(secondsSinceEpoch: startEpoch))
+
+    // The whole point: VAD coverage runs contiguously across the rate flip. Both
+    // fully-voiced half-seconds normalize to 48k on one timeline, so the spans
+    // start at the chunk start, run to its end, and leave no gap where the rate
+    // changed. (Exact end is warmup-dependent, so it's tied to the chunk's own
+    // bounds, not a nominal 1.0s.)
+    let vads = events.compactMap { event -> (Instant, Instant)? in
+      if case .vad(_, let s, let e) = event { return (s, e) }
+      return nil
+    }
+    .sorted { $0.0 < $1.0 }
+    #expect(!vads.isEmpty)
+    let earliest = try #require(vads.first).0
+    let latest = try #require(vads.map(\.1).max())
+    #expect(abs(earliest.interval(since: chunkStart)) < 0.01)
+    #expect(abs(latest.interval(since: chunkEnd)) < 0.01)
+    for (prev, next) in zip(vads, vads.dropFirst()) {
+      #expect(next.0 <= prev.1.advanced(by: 0.01))  // no gap between consecutive spans
+    }
+  }
+
+  @Test("a device rate flip emits a capture.input_rate_changed notice")
+  func logsInputRateChanged() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
+    let logger = RecordingLogRecordSink()
+    let actor = try makeActor(
+      dataRoot: dataRoot, clock: clock,
+      buffers: [
+        makeBuffer(seconds: 0.5),
+        makeBuffer(seconds: 0.5, sampleRate: 16_000),
+      ],
+      chunkSeconds: 30, logSink: logger)
+
+    try await actor.start()
+    await actor.drainForTesting()
+
+    // The flip from 48k to 16k is announced (the first buffer also emits one
+    // establishing the initial rate; the flip is the record with to == 16000).
+    let changes = logger.recorded.filter { $0.event == "capture.input_rate_changed" }
+    let flip = changes.first { record in
+      record.fields.contains(LogField("to", .int(16_000)))
+    }
+    let flipRecord = try #require(flip)
+    #expect(flipRecord.level == .notice)
+    #expect(flipRecord.fields.contains(LogField("from", .int(48_000))))
+    #expect(flipRecord.fields.contains(LogField("target", .int(nativeRate))))
+    #expect(flipRecord.fields.contains(LogField("source", .string("mic"))))
+  }
+
+  @Test("an encode failure is logged loudly and the consume loop survives it")
+  func logsEncodeFailureAndSurvives() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
+    let logger = RecordingLogRecordSink()
+    // Encoder built at 44.1k while the descriptor/normalizer target 48k: every
+    // normalized (48k) buffer trips the encoder's sample-rate backstop. The old
+    // empty `catch {}` swallowed this silently; now it must be logged, and the
+    // loop must drain every buffer regardless.
+    let actor = try makeActor(
+      dataRoot: dataRoot, clock: clock,
+      buffers: [makeBuffer(seconds: 0.5), makeBuffer(seconds: 0.5)],
+      chunkSeconds: 1.0, logSink: logger, encoderNativeRate: 44_100)
+
+    try await actor.start()
+    await actor.drainForTesting()
+
+    let failures = logger.recorded.filter { $0.event == "capture.encode_failed" }
+    let first = try #require(failures.first)
+    #expect(first.level == .error)
+    #expect(first.fields.contains(LogField("source", .string("mic"))))
+    #expect(first.fields.contains(LogField("count", .int(1))))
+    // Loop survived to completion: the actor is still capturing, not crashed.
+    #expect(await actor.status().state == .capturing)
+    await actor.stop()
   }
 
   @Test("start() drains synthetic audio into chunk files and index entries")

@@ -1,6 +1,7 @@
 import EarsCaptureKit
 import EarsCore
 import EarsDataStore
+import EarsLogging
 import Foundation
 
 /// The domain (non-wire) snapshot of one source's capture state, returned by
@@ -111,6 +112,31 @@ public actor CaptureActor {
   private let clock: any NowProviding
   private let eventSink: EventSink?
 
+  /// Normalizes every incoming buffer to the source's configured native rate
+  /// before VAD/encode, so an input device switching sample rate mid-run
+  /// (e.g. a 16 kHz Bluetooth headset replacing the 48 kHz built-in mic)
+  /// resamples rather than being rejected by the encoder's strict
+  /// single-rate contract. `nil` only if the descriptor's native rate is
+  /// non-positive (a broken config), in which case buffers pass through
+  /// unchanged and the encoder's `sampleRateMismatch` backstop still guards.
+  private let normalizer: AdaptiveResampler?
+  /// The one structured sink the capture path logs through — the same
+  /// ``LogRecordSink`` the rest of the daemon uses, so drop/rate-change events
+  /// land in the shared JSON-Lines + stderr + unified-logging stream (not a
+  /// separate path) and stay assertable in tests via a recorder.
+  private let logSink: any LogRecordSink
+
+  /// The input rate of the most recently consumed buffer, for detecting a
+  /// device rate change and emitting `capture.input_rate_changed` once per
+  /// transition rather than per buffer.
+  private var lastInputRate: Int?
+  /// Count of buffers dropped because normalization threw, for rate-limiting
+  /// the `capture.normalize_failed` error log (first + every 100th).
+  private var normalizeFailureCount = 0
+  /// Count of `encoder.append` failures, for rate-limiting the
+  /// `capture.encode_failed` error log (first + every 100th).
+  private var encodeFailureCount = 0
+
   /// Current runtime state, reported by ``status()``.
   private var runtimeState: SourceRuntimeState = .disabled
   /// When paused, the instant capture stopped — the `gap`'s `start`, closed on
@@ -155,6 +181,9 @@ public actor CaptureActor {
   ///     (``EarsDaemon`` supplies its ``EventBus``'s `publish`); `nil` (the
   ///     default) publishes nothing — the on-disk index is unaffected either
   ///     way.
+  ///   - logSink: The structured sink the capture path writes its
+  ///     drop/rate-change events to. Defaults to ``NoOpLogRecordSink`` so
+  ///     existing call sites and tests that don't care compile unchanged.
   public init(
     descriptor: SourceDescriptor,
     dataRoot: URL,
@@ -163,7 +192,8 @@ public actor CaptureActor {
     indexAppender: IndexAppender,
     vad: any VAD,
     clock: any NowProviding = SystemClock(),
-    eventSink: EventSink? = nil
+    eventSink: EventSink? = nil,
+    logSink: any LogRecordSink = NoOpLogRecordSink()
   ) {
     self.sourceID = descriptor.id
     self.descriptor = descriptor
@@ -174,6 +204,8 @@ public actor CaptureActor {
     self.vad = vad
     self.clock = clock
     self.eventSink = eventSink
+    self.logSink = logSink
+    self.normalizer = AdaptiveResampler(targetSampleRate: descriptor.nativeSampleRate)
   }
 
   /// Begin continuous capture: append a startup `gap` for any downtime since
@@ -348,7 +380,45 @@ public actor CaptureActor {
   /// Processes one buffer: append its `vad` spans on the buffer-derived
   /// timeline, feed it to the encoder, and — if that append rolled a chunk
   /// over — track the finalized chunk and run the per-source eviction pass.
-  private func consume(_ buffer: AudioBuffer) async {
+  private func consume(_ raw: AudioBuffer) async {
+    let buffer: AudioBuffer
+    if let normalizer {
+      if raw.sampleRate != lastInputRate {
+        await logEvent(
+          "capture.input_rate_changed", level: .notice,
+          fields: [
+            LogField("source", .string(sourceID.rawValue)),
+            LogField("from", .int(lastInputRate ?? 0)),
+            LogField("to", .int(raw.sampleRate)),
+            LogField("target", .int(normalizer.targetSampleRate)),
+          ])
+        lastInputRate = raw.sampleRate
+      }
+      do {
+        buffer = try normalizer.normalize(raw)
+      } catch {
+        normalizeFailureCount += 1
+        if normalizeFailureCount == 1 || normalizeFailureCount % 100 == 0 {
+          await logEvent(
+            "capture.normalize_failed", level: .error,
+            fields: [
+              LogField("source", .string(sourceID.rawValue)),
+              LogField("rate", .int(raw.sampleRate)),
+              LogField("target", .int(normalizer.targetSampleRate)),
+              LogField("error", .string(String(describing: error))),
+              LogField("count", .int(normalizeFailureCount)),
+            ])
+        }
+        // Drop the buffer and do NOT advance the playhead: keeping the
+        // playhead ↔ encoder timeline consistent matters more than the lost
+        // audio, and the wall-clock gap is reconciled by StartupGapAppender
+        // (the same accepted caveat as the encoder's partial writes).
+        return
+      }
+    } else {
+      buffer = raw
+    }
+
     let bufferStart = playhead
 
     if let spans = try? vad.detect(in: buffer) {
@@ -369,7 +439,18 @@ public actor CaptureActor {
       // A partial-chunk-write still finalizes (truncated) coverage and advances
       // the encoder's chunk start; a sample-rate mismatch leaves it untouched.
       // Either way the rollover check below reconciles our tracked state, so an
-      // encode failure is logged-by-the-encoder and non-fatal to the loop.
+      // encode failure is non-fatal to the loop — but it must be visible, never
+      // a silent drop, so it's logged (rate-limited: first + every 100th).
+      encodeFailureCount += 1
+      if encodeFailureCount == 1 || encodeFailureCount % 100 == 0 {
+        await logEvent(
+          "capture.encode_failed", level: .error,
+          fields: [
+            LogField("source", .string(sourceID.rawValue)),
+            LogField("error", .string(String(describing: error))),
+            LogField("count", .int(encodeFailureCount)),
+          ])
+      }
     }
     let chunkStartAfter = await encoder.currentChunkStart
 
@@ -510,6 +591,27 @@ public actor CaptureActor {
       }
     }
     return total
+  }
+
+  // MARK: - Logging
+
+  /// Builds and forwards one structured ``LogRecord`` to the shared
+  /// ``LogRecordSink``, stamping it with the actor's clock and the capture
+  /// subsystem/category. Keeps the capture-path call sites to a single
+  /// `event` + `fields` line. `try?` because a log-write failure must never
+  /// take down the capture loop; only ever called on exceptional events (a
+  /// rate change or a drop), never per buffer in the steady state.
+  private func logEvent(_ event: String, level: LogLevel, fields: [LogField]) async {
+    try? await logSink.log(
+      LogRecord(
+        ts: clock.now(),
+        level: level,
+        tool: "earsd",
+        subsystem: "net.tomelliot.ears",
+        category: "earsd.capture",
+        pid: ProcessInfo.processInfo.processIdentifier,
+        event: event,
+        fields: fields))
   }
 
   // MARK: - Test support

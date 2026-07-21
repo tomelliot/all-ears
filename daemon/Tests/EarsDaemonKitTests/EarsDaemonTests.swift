@@ -71,7 +71,7 @@ struct EarsDaemonTests {
   func perSourceStartupFailureIsolation() async throws {
     let dataRoot = try makeDataRoot()
     let clock = ManualClock(Instant(secondsSinceEpoch: 1_000))
-    let loggedMessages = Mutex<[String]>([])
+    let logRecorder = RecordingLogRecordSink()
 
     let configuration = EarsDaemonConfiguration(
       sources: [
@@ -92,7 +92,7 @@ struct EarsDaemonTests {
           source: descriptor.id, buffers: [self.makeBuffer(seconds: 0.1)])
       },
       clock: clock,
-      log: { message in loggedMessages.withLock { $0.append(message) } }
+      logSink: logRecorder
     )
 
     // Must not throw: a single source's permission-style failure never takes
@@ -102,7 +102,20 @@ struct EarsDaemonTests {
     let statuses = await daemon.statusForTesting()
     #expect(statuses["system"]?.state == .error)
     #expect(statuses["mic"]?.state == .capturing)
-    #expect(loggedMessages.withLock { $0.contains { $0.contains("system") } })
+
+    // The "source 'system' failed to start" lifecycle message fans out to the
+    // shared sink as a `daemon.log` record. The daemon's string-log wrapper is
+    // fire-and-forget (a detached Task), so poll briefly rather than assuming
+    // it has landed the instant start() returns.
+    var sawSystemLog = false
+    for _ in 0..<100 {
+      if logRecorder.recorded.contains(where: { $0.msg?.contains("system") == true }) {
+        sawSystemLog = true
+        break
+      }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(sawSystemLog)
 
     await daemon.stop()
   }

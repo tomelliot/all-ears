@@ -1,6 +1,7 @@
 import EarsCore
 import EarsDataStore
 import EarsIPC
+import EarsLogging
 import Foundation
 
 /// Constructs the ``CaptureBackend`` for one configured source. `earsd`'s real
@@ -140,6 +141,15 @@ public struct ControlWebSocketConfiguration: Sendable {
 public actor EarsDaemon {
   private let configuration: EarsDaemonConfiguration
   private let clock: any NowProviding
+  /// The one structured sink every part of the daemon logs through — the
+  /// capture path (via each ``CaptureActor``) and the lifecycle/component
+  /// string logs (via ``log``, which wraps this). One sink means one
+  /// consistent JSON-Lines + stderr + unified-logging fan-out everywhere.
+  private let logSink: any LogRecordSink
+  /// The daemon's free-text lifecycle/component logger, threaded into
+  /// `ControlServer`, `MeetingRegistry`, `OnClosePipelineRunner`, etc. Now a
+  /// thin wrapper over ``logSink`` (built in `init`) so those messages land in
+  /// the same stream as everything else, rather than a separate path.
   private let log: @Sendable (String) -> Void
 
   private var captureActors: [SourceID: CaptureActor]
@@ -203,15 +213,36 @@ public actor EarsDaemon {
   ///   pairing) — both indicate a fundamentally broken configuration, so
   ///   construction fails outright rather than degrading one source, unlike
   ///   ``start()``'s per-source backend-failure isolation.
+  /// - Parameter logSink: The single structured sink the whole daemon logs
+  ///   through — capture events, lifecycle, and every component's free-text
+  ///   log. Defaults to ``NoOpLogRecordSink`` so a caller (or test) that
+  ///   doesn't wire logging still constructs cleanly; `EarsdRuntime` passes
+  ///   the real `LogSink` built from config.
   public init(
     configuration: EarsDaemonConfiguration,
     backendFactory: @escaping CaptureBackendFactory,
     clock: any NowProviding = SystemClock(),
-    log: @escaping @Sendable (String) -> Void = { _ in }
+    logSink: any LogRecordSink = NoOpLogRecordSink()
   ) throws {
     self.configuration = configuration
     self.clock = clock
-    self.log = log
+    self.logSink = logSink
+
+    // The free-text lifecycle/component logger is a thin wrapper over the one
+    // sink: each message becomes a `daemon.log` record carrying it, so these
+    // land in the same JSON-Lines + stderr + unified stream as the structured
+    // capture and CLI records. Fire-and-forget (the closure is synchronous and
+    // reused across sync/async call sites); ordering isn't guaranteed for these
+    // operational lines, which is acceptable — anything requiring ordered flush
+    // (shutdown) logs through the sink directly in `EarsdRuntime`.
+    let pid = ProcessInfo.processInfo.processIdentifier
+    self.log = { message in
+      let record = LogRecord(
+        ts: clock.now(), level: .notice, tool: "earsd",
+        subsystem: "net.tomelliot.ears", category: "earsd", pid: pid,
+        event: "daemon.log", msg: message)
+      Task { try? await logSink.log(record) }
+    }
 
     let eventBus = EventBus()
     self.eventBus = eventBus
@@ -224,7 +255,8 @@ public actor EarsDaemon {
         configuration: configuration,
         backend: backendFactory(descriptor),
         clock: clock,
-        eventSink: eventSink)
+        eventSink: eventSink,
+        logSink: logSink)
     }
     self.captureActors = actors
   }
@@ -239,7 +271,8 @@ public actor EarsDaemon {
     configuration: EarsDaemonConfiguration,
     backend: any CaptureBackend,
     clock: any NowProviding,
-    eventSink: EventSink?
+    eventSink: EventSink?,
+    logSink: any LogRecordSink
   ) throws -> CaptureActor {
     let sourceDirectory = DataStoreLayout.sourceDirectory(
       dataRoot: configuration.dataRoot, sourceID: descriptor.id)
@@ -271,7 +304,8 @@ public actor EarsDaemon {
       indexAppender: indexAppender,
       vad: configuration.vad,
       clock: clock,
-      eventSink: eventSink)
+      eventSink: eventSink,
+      logSink: logSink)
   }
 
   /// Persists `descriptor` to `<data-root>/sources/<id>/meta.toml` via
@@ -636,7 +670,8 @@ public actor EarsDaemon {
         configuration: configuration,
         backend: backend,
         clock: clock,
-        eventSink: { [eventBus] event in await eventBus.publish(event) })
+        eventSink: { [eventBus] event in await eventBus.publish(event) },
+        logSink: logSink)
       captureActors[label] = built
       pushBackends[label] = backend
       await controlServer?.registerDynamicSource(built, id: label)

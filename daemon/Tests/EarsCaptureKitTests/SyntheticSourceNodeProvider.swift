@@ -22,12 +22,25 @@ final class SyntheticSourceNodeProvider: CaptureEngineProvider {
   }
 
   let sampleValue: Float
-  let sampleRate: Double
+  /// The rate the *next* `makeCaptureEngine()` synthesises at, stored in an
+  /// `Atomic` (like ``FrameCounter``) so a test can flip it between rebuilds —
+  /// modelling an input device that changes rate on a route change. Hz as an
+  /// `Int` because `Double` isn't `AtomicRepresentable`.
+  private let sampleRateHz: Atomic<Int>
   private let framesProduced = FrameCounter()
 
   init(sampleValue: Float = 0.5, sampleRate: Double = 48_000) {
     self.sampleValue = sampleValue
-    self.sampleRate = sampleRate
+    self.sampleRateHz = Atomic<Int>(Int(sampleRate))
+  }
+
+  /// The rate the next rebuild will synthesise at.
+  var sampleRate: Double { Double(sampleRateHz.load(ordering: .acquiring)) }
+
+  /// Change the rate the *next* `makeCaptureEngine()` uses, so a test can
+  /// simulate the input device switching sample rate across a route change.
+  func setSampleRate(_ rate: Double) {
+    sampleRateHz.store(Int(rate), ordering: .releasing)
   }
 
   /// Total frames the source node has synthesised across all engine generations.

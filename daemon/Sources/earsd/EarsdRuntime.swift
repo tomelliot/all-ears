@@ -3,8 +3,8 @@ import EarsCLISupport
 import EarsConfig
 import EarsCore
 import EarsDaemonKit
+import EarsLogging
 import Foundation
-import os
 
 /// `earsd`'s real, normal-run (no `--print-config`/`--config-path`) main
 /// logic: load and validate config against `earsd`'s own composed schema,
@@ -26,8 +26,6 @@ import os
 /// The decision logic it delegates to (``DaemonConfigResolution``) is unit
 /// tested directly.
 enum EarsdRuntime {
-  private static let logger = Logger(subsystem: "net.tomelliot.ears", category: "earsd")
-
   static func run(arguments: EarsCLI.Arguments) async -> Int32 {
     // Installed before any config loading or daemon construction, not just
     // before the final wait: a `SIGTERM` arriving mid-startup must still be
@@ -40,15 +38,15 @@ enum EarsdRuntime {
     // for) doesn't imply this handler is armed yet, so a `SIGTERM` sent right
     // after could still kill the process by signal instead of exiting 0.
     let handle = DaemonHandle()
-    let log: @Sendable (String) -> Void = { message in
-      logger.notice("\(message, privacy: .public)")
-      FileHandle.standardError.write(Data(("earsd: " + message + "\n").utf8))
-    }
+    // Late-bound so the SIGTERM handler (installed now, before config load) can
+    // log through the shared `LogSink` once it exists, and fall back to stderr
+    // for anything logged in the pre-config startup window.
+    let logHandle = LogHandle()
     let signalSource = SignalHandling.installSIGTERMHandler {
       Task {
-        log("SIGTERM received, shutting down")
+        await logHandle.emit("SIGTERM received, shutting down")
         await handle.stopIfStarted()
-        log("stopped")
+        await logHandle.emit("stopped")
         exit(0)
       }
     }
@@ -78,28 +76,42 @@ enum EarsdRuntime {
       return 1
     }
 
+    // Build the one `LogSink` the whole daemon shares — the same construction
+    // the CLI's `run.start`/`run.summary` used (via `EarsCLI.makeLogSink`), so
+    // lifecycle, component, and capture logs all fan out identically to the
+    // JSON-Lines file, stderr, and the unified-logging mirror. A failure here
+    // is non-fatal: `logHandle` keeps its stderr fallback and the daemon logs
+    // through a no-op sink, so capture still runs.
+    var daemonLogSink: any LogRecordSink = NoOpLogRecordSink()
+    if let bootstrap = try? EarsCLI.makeLogSink(
+      loaded: loaded, tool: "earsd", clock: SystemClock())
+    {
+      daemonLogSink = bootstrap.sink
+      await logHandle.set(bootstrap.sink)
+    }
+
     let resolution = DaemonConfigResolution.resolve(config: loaded.value, now: SystemClock().now())
     for skip in resolution.skipped {
-      log("skipping source '\(skip.id)': \(skip.reason)")
+      await logHandle.emit("skipping source '\(skip.id)': \(skip.reason)")
     }
     for skip in resolution.skippedTriggerRules {
-      log("skipping trigger rule '\(skip.name)': \(skip.reason)")
+      await logHandle.emit("skipping trigger rule '\(skip.name)': \(skip.reason)")
     }
     let sourceList =
       resolution.configuration.sources.isEmpty
       ? "(none)"
       : resolution.configuration.sources.map(\.id.rawValue).sorted().joined(separator: ", ")
-    log("run.start: resolved sources: \(sourceList)")
+    await logHandle.emit("run.start: resolved sources: \(sourceList)")
 
     let daemon: EarsDaemon
     do {
       daemon = try EarsDaemon(
         configuration: resolution.configuration,
         backendFactory: realCaptureBackendFactory(),
-        log: log
+        logSink: daemonLogSink
       )
     } catch {
-      log("failed to construct: \(error)")
+      await logHandle.emit("failed to construct: \(error)", level: .error)
       writeStderr("error: earsd failed to start: \(error)")
       return 1
     }
@@ -132,11 +144,11 @@ enum EarsdRuntime {
     do {
       try await daemon.start()
     } catch {
-      log("failed to start: \(error)")
+      await logHandle.emit("failed to start: \(error)", level: .error)
       writeStderr("error: earsd failed to start: \(error)")
       return 1
     }
-    log("started (socket: \(resolution.configuration.socketPath))")
+    await logHandle.emit("started (socket: \(resolution.configuration.socketPath))")
 
     await waitForever()
     // Unreachable: `waitForever()` only returns via the SIGTERM handler's
@@ -171,6 +183,37 @@ enum EarsdRuntime {
 
   private static func writeStderr(_ line: String) {
     FileHandle.standardError.write(Data((line + "\n").utf8))
+  }
+}
+
+/// Late-bound holder for the shared ``LogSink``, so the `SIGTERM` handler —
+/// installed at the very top of ``EarsdRuntime/run(arguments:)``, before config
+/// is loaded and the sink can be built — still logs through the same sink as
+/// everything else once it exists, and degrades to stderr for the pre-config
+/// startup window. An `actor` for the same reason as ``DaemonHandle``: the
+/// escaping signal-handler `Task` and `run(arguments:)` both touch it.
+private actor LogHandle {
+  private var sink: (any LogRecordSink)?
+  private let pid = ProcessInfo.processInfo.processIdentifier
+  private let clock = SystemClock()
+
+  func set(_ sink: any LogRecordSink) {
+    self.sink = sink
+  }
+
+  /// Logs one lifecycle message as a `daemon.log` ``LogRecord`` through the
+  /// sink once ``set(_:)`` has run; before that (e.g. a `SIGTERM` during early
+  /// startup) it writes the bare message to stderr so nothing is lost.
+  func emit(_ message: String, level: LogLevel = .notice, event: String = "daemon.log") async {
+    guard let sink else {
+      FileHandle.standardError.write(Data(("earsd: " + message + "\n").utf8))
+      return
+    }
+    let record = LogRecord(
+      ts: clock.now(), level: level, tool: "earsd",
+      subsystem: "net.tomelliot.ears", category: "earsd", pid: pid,
+      event: event, msg: message)
+    try? await sink.log(record)
   }
 }
 

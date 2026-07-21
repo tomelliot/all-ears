@@ -116,17 +116,36 @@ public enum EarsCLI {
     }
   }
 
-  /// The normal-run path: bootstrap the ``LogSink`` from resolved config,
-  /// emit `run.start` and `run.summary`. Both records are only sent to the
-  /// sink when they clear the effective `[log].level` threshold, so
-  /// `--log-level error` visibly silences them — the "changes what's
-  /// logged" requirement from `docs/configuration.md`.
-  private static func bootstrapLoggingAndRun(tool: String, version: String, loaded: LoadedConfig)
-    async throws
-  {
+  /// Everything a caller needs to log consistently through the one
+  /// ``LogSink`` built from resolved config: the sink itself plus the derived
+  /// values every ``LogRecord`` and level-gate needs. Returned by
+  /// ``makeLogSink(loaded:tool:clock:)`` so `earsd`'s long-running daemon
+  /// (`EarsdRuntime`) logs through an *identically-configured* sink as this
+  /// CLI's `run.start`/`run.summary`, with no risk of the two constructions
+  /// drifting apart.
+  public struct LogBootstrap: Sendable {
+    public let sink: LogSink
+    public let effectiveLevel: LogLevel
+    public let subsystem: String
+    public let pid: Int32
+
+    public init(sink: LogSink, effectiveLevel: LogLevel, subsystem: String, pid: Int32) {
+      self.sink = sink
+      self.effectiveLevel = effectiveLevel
+      self.subsystem = subsystem
+      self.pid = pid
+    }
+  }
+
+  /// Builds the ``LogSink`` (JSON Lines file + stderr + unified-logging
+  /// mirror) from resolved config's `[log]` section — the single construction
+  /// site both this CLI bootstrap and the daemon runtime call, so all logging
+  /// fans out through the same sink in the same format.
+  public static func makeLogSink(
+    loaded: LoadedConfig, tool: String, clock: any NowProviding
+  ) throws -> LogBootstrap {
     let config = loaded.value
     let dataRoot = stringValue(config, ["data_root"])
-    let outputRoot = stringValue(config, ["output_root"])
     let subsystem = stringValue(config, ["log", "subsystem"], default: "net.tomelliot.ears")
     let oslogEnabled = boolValue(config, ["log", "oslog"], default: true)
     let rotateMaxBytes = intValue(config, ["log", "rotate_max_bytes"], default: 52_428_800)
@@ -140,9 +159,7 @@ public enum EarsCLI {
       ? DefaultLogFilePath.resolve(dataRoot: dataRoot, tool: tool)
       : configuredLogFile
 
-    let clock = SystemClock()
     let pid = ProcessInfo.processInfo.processIdentifier
-
     let writer = try FileLogWriter(
       url: URL(fileURLWithPath: logFilePath),
       rotation: .init(rotateMaxBytes: rotateMaxBytes, rotateMaxFiles: rotateMaxFiles),
@@ -157,6 +174,29 @@ public enum EarsCLI {
       ? OSLogUnifiedLogging(subsystem: subsystem, category: tool) : NoOpUnifiedLogging()
     let sink = LogSink(
       file: writer, stderr: RealStderrWriter(), unified: unified, tty: RealTTYDetector())
+
+    return LogBootstrap(
+      sink: sink, effectiveLevel: effectiveLevel, subsystem: subsystem, pid: pid)
+  }
+
+  /// The normal-run path: bootstrap the ``LogSink`` from resolved config,
+  /// emit `run.start` and `run.summary`. Both records are only sent to the
+  /// sink when they clear the effective `[log].level` threshold, so
+  /// `--log-level error` visibly silences them — the "changes what's
+  /// logged" requirement from `docs/configuration.md`.
+  private static func bootstrapLoggingAndRun(tool: String, version: String, loaded: LoadedConfig)
+    async throws
+  {
+    let config = loaded.value
+    let dataRoot = stringValue(config, ["data_root"])
+    let outputRoot = stringValue(config, ["output_root"])
+
+    let clock = SystemClock()
+    let bootstrap = try makeLogSink(loaded: loaded, tool: tool, clock: clock)
+    let sink = bootstrap.sink
+    let subsystem = bootstrap.subsystem
+    let pid = bootstrap.pid
+    let effectiveLevel = bootstrap.effectiveLevel
 
     let startup = LogRecord(
       ts: clock.now(),
