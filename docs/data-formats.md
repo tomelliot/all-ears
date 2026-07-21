@@ -43,7 +43,7 @@ This document defines the on-disk contract. Because the ring buffer layout *is* 
 - Fixed-duration chunks (default 30 s), named by their UTC start instant, ISO-8601 with `:` replaced by `-`.
 - Compressed: AAC in an M4A container, or Opus. Codec and bitrate are per-source config, recorded in `meta.toml`.
 - Chunk boundaries are a storage detail, independent of speech. Speech spans live in the index and may cross chunk boundaries.
-- Chunks older than the source's time cap are deleted oldest-first; deletion is logged and indexed.
+- Chunks older than the source's time cap are deleted oldest-first; deletion is logged and indexed. The cap is enforced across daemon restarts: on startup the daemon recovers the still-on-disk chunk set from the index and evicts anything already aged out, so chunks written by an earlier run don't outlive the cap.
 - Written atomically (temp + rename); on flush, `fsync` both the file and its directory.
 
 ### Dual-rate storage

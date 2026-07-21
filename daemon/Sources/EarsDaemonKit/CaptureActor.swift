@@ -116,8 +116,11 @@ public actor CaptureActor {
   /// When paused, the instant capture stopped — the `gap`'s `start`, closed on
   /// ``resume()``. `nil` whenever the source is not paused.
   private var pauseStartInstant: Instant?
-  /// The chunks this source has indexed, tracked incrementally so the eviction
-  /// pass doesn't re-parse `index.jsonl` on every rollover.
+  /// The chunks this source currently has on disk, subject to the time cap.
+  /// Seeded once from `index.jsonl` at ``start()`` (so chunks from earlier
+  /// daemon runs are still evicted — see ``seedKnownChunksFromIndex()``), then
+  /// tracked incrementally on each rollover so the eviction pass doesn't
+  /// re-parse the index every time.
   private var knownChunks: [IndexedChunk] = []
   /// The task draining `backend`'s stream into the encoder/VAD; `nil` while
   /// stopped or paused.
@@ -190,6 +193,15 @@ public actor CaptureActor {
     // first new chunk lands, so the gap is ordered ahead of resumed capture.
     _ = try? await StartupGapAppender.detectAndAppend(
       now: clock.now(), indexAppender: indexAppender)
+
+    // Recover chunks written by previous daemon runs into the eviction set,
+    // then evict any already aged past the time cap. Without this, a fresh
+    // actor's `knownChunks` starts empty and only ever sees chunks written in
+    // *this* process, so every restart orphans the prior run's chunks from the
+    // time cap — they'd never be evicted and the buffer would grow past
+    // `time_cap_seconds` without bound. Best-effort: a read/parse failure just
+    // leaves eviction to catch up incrementally as new chunks roll over.
+    await seedKnownChunksFromIndex()
 
     let stream: AsyncStream<AudioBuffer>
     do {
@@ -442,6 +454,23 @@ public actor CaptureActor {
     let file = DataStoreLayout.relativeChunkPath(subdirectory: subdirectory, filename: filename)
     let frames = Int((end.interval(since: start) * Double(descriptor.nativeSampleRate)).rounded())
     return IndexedChunk(range: TimeRange(start: start, end: end), file: file, frames: frames)
+  }
+
+  /// Seeds `knownChunks` from the existing `index.jsonl` at ``start()``, so the
+  /// eviction pass covers chunks written by earlier daemon runs — not just this
+  /// process's — then runs one pass to evict whatever is already aged out.
+  ///
+  /// Reads the whole index (via ``IndexAppender/readContents()``) rather than
+  /// the tail: the live chunk set can only be recovered by pairing every
+  /// `chunk` event with its `evict`, which needs the full log. This runs once
+  /// per source per daemon start, after the control socket is already bound
+  /// (see ``EarsDaemon/start()``), so its cost doesn't hold the control plane.
+  /// A read or parse failure is swallowed — capture still starts, and eviction
+  /// resumes incrementally as new chunks roll over.
+  private func seedKnownChunksFromIndex() async {
+    guard let contents = try? await indexAppender.readContents(), !contents.isEmpty else { return }
+    knownChunks = RingBufferReconstruction.liveChunks(from: IndexLog.parse(contents).events)
+    await runEviction()
   }
 
   /// Runs the per-source eviction pass over the tracked chunks and drops any it
