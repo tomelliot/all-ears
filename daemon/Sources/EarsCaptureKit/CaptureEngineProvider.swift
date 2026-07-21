@@ -1,4 +1,5 @@
 import AVFoundation
+import os
 
 /// Supplies the `AVAudioEngine` graph that ``MicCaptureBackend`` taps.
 ///
@@ -91,18 +92,79 @@ public enum CaptureEngineError: Error, Sendable {
 /// The production ``CaptureEngineProvider``: taps the real microphone input node
 /// of a fresh real-time `AVAudioEngine`.
 ///
+/// **Input-device selection.** Rather than always following the system default
+/// input, this binds the engine to a chosen device via ``InputDeviceSelection``:
+/// an explicitly configured `deviceUID` when present, otherwise (by default) the
+/// built-in mic. That default is what keeps a connected Bluetooth headset out of
+/// the capture path — opening a Bluetooth input would force the whole device off
+/// A2DP onto the hands-free profile and wreck its playback quality for as long as
+/// `earsd` holds the mic open (see ``AudioInputDevice``). Selection is
+/// best-effort: if no device matches, or binding fails, the engine falls back to
+/// the system default input, exactly as before.
+///
 /// Constructing this and calling `makeCaptureEngine()` does **not** prompt for or
 /// begin microphone capture — that happens only when the backend calls
 /// ``CaptureEngine/start()`` on the returned engine, which is gated by a TCC grant
-/// and is never done in automated tests.
+/// and is never done in automated tests. (Enumerating devices reads Core Audio
+/// metadata only; it does not open an input or trigger a TCC prompt.)
 public struct RealMicSourceProvider: CaptureEngineProvider {
-  public init() {}
+  private let deviceUID: String
+  private let preferBuiltIn: Bool
+  private let enumerator: any AudioInputDeviceEnumerating
+  private static let log = Logger(subsystem: "net.tomelliot.ears", category: "capture")
+
+  /// - Parameters:
+  ///   - deviceUID: A specific Core Audio device UID to bind to. Empty (the
+  ///     default) means "no explicit device"; selection then falls to
+  ///     `preferBuiltIn`.
+  ///   - preferBuiltIn: When no `deviceUID` matches, prefer the built-in mic
+  ///     over the system default input. Defaults to `true` so a connected
+  ///     Bluetooth headset is never captured — and therefore never downgraded —
+  ///     unless the user explicitly names it.
+  ///   - enumerator: The device-enumeration seam; the real Core Audio one by
+  ///     default, overridable in tests.
+  public init(
+    deviceUID: String = "",
+    preferBuiltIn: Bool = true,
+    enumerator: any AudioInputDeviceEnumerating = CoreAudioInputDeviceEnumerator()
+  ) {
+    self.deviceUID = deviceUID
+    self.preferBuiltIn = preferBuiltIn
+    self.enumerator = enumerator
+  }
 
   public func makeCaptureEngine() throws -> CaptureEngine {
     let engine = AVAudioEngine()
     let input = engine.inputNode
+    bindInputDevice(on: input)
+    // Read the format *after* binding: the chosen device dictates the tap
+    // format, so reading it first would capture the default input's format.
     let format = input.outputFormat(forBus: 0)
     return CaptureEngine(
       engine: engine, tapNode: input, tapBus: 0, tapFormat: format, mode: .realtime)
+  }
+
+  /// Best-effort: pick a device and bind the input node's audio unit to it,
+  /// leaving the engine on the system default input if there is nothing to
+  /// choose or the bind fails. Never throws — capture must still start.
+  private func bindInputDevice(on input: AVAudioInputNode) {
+    guard
+      let chosen = InputDeviceSelection.choose(
+        from: enumerator.inputDevices(),
+        preferredUID: deviceUID,
+        preferBuiltIn: preferBuiltIn)
+    else {
+      return  // no override; AVAudioEngine follows the system default input
+    }
+    do {
+      try input.auAudioUnit.setDeviceID(chosen.id)
+      Self.log.notice(
+        "mic capture bound to input device \(chosen.name, privacy: .public) (uid \(chosen.uid, privacy: .public), transport \(chosen.transportType, privacy: .public))"
+      )
+    } catch {
+      Self.log.error(
+        "mic capture could not bind to \(chosen.name, privacy: .public); falling back to default input: \(error.localizedDescription, privacy: .public)"
+      )
+    }
   }
 }
