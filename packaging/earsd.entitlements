@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Under Hardened Runtime (codesign with the runtime option), microphone
+         capture is blocked unless the binary carries this entitlement. earsd
+         captures the microphone (and, for system/app sources, system audio),
+         so it must declare audio input. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>

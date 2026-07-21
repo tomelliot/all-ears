@@ -15,35 +15,58 @@ All Ears runs a small daemon that continuously records every audio source you co
 - **Local-first.** Audio and transcripts stay on disk on your Mac. The only network calls are to whichever LLM you configure for cleanup and summaries.
 - **Retroactive capture.** The daemon is always recording into a bounded local buffer (2 hours by default). Realise ten minutes in that you should've been taking notes? The audio is already there. Just ask for a transcript of the last 30 minutes.
 
-## Quick start
+## Install
 
 Requires Apple Silicon, macOS 15+, and [Swift 6](https://www.swift.org/install/).
 
 ```sh
 git clone https://github.com/tomelliot/all-ears.git
-cd all-ears/daemon
+cd all-ears
+make install
+```
+
+`make install` builds the release binaries, signs them, installs the five tools
+(`earsd`, `ears`, `transcribe`, `cleanup`, `summarize`) to `~/.local/bin`, and
+registers `earsd` as a per-user launchd **LaunchAgent** — started at login, kept
+alive, and restarted on crash. Check it's running:
+
+```sh
+ears status
+```
+
+- **Where things go.** Binaries → `$PREFIX/bin` (default `~/.local`; if that
+  isn't on your `PATH`, `make install` prints the line to add). LaunchAgent →
+  `~/Library/LaunchAgents/net.tomelliot.ears.earsd.plist`. Pre-logger crash
+  output → `~/Library/Logs/ears/`. Your config, recordings, and transcripts live
+  under `~/.config/ears`, `~/Library/Application Support/ears`, and
+  `~/Documents/Transcripts` respectively.
+- **System-wide install.** `make install PREFIX=/usr/local` puts the binaries on
+  the default `PATH`; the copy elevates itself with `sudo` when needed. Run
+  `make install` as your normal user, never under `sudo` — the agent must load
+  into your GUI session.
+- **Signing & permissions.** macOS ties the microphone / system-audio grant to
+  the binary's code-signing identity. Pass a stable one so the grant survives
+  reinstalls: `make install SIGN_IDENTITY="Developer ID Application: You (TEAMID)"`.
+  Without it, the install signs ad-hoc and warns that macOS may re-prompt after
+  an upgrade.
+- **Upgrade.** Re-run `make install` (or `make reinstall`) after `git pull`; it
+  rebuilds, re-signs, and reloads the agent onto the new binary.
+- **Uninstall.** `make uninstall` stops and removes the agent and the binaries.
+  Your recordings, config, and transcripts are left untouched.
+
+### Build without installing
+
+To run straight from the build directory instead:
+
+```sh
+cd daemon
 swift build -c release
+.build/release/earsd &          # start the daemon (captures your mic by default)
+.build/release/ears status      # check what it's hearing
 ```
 
-Start the daemon. It captures your microphone by default, no config file required:
-
-```sh
-.build/release/earsd &
-```
-
-Check what it's hearing:
-
-```sh
-.build/release/ears status
-```
-
-Pull a transcript of the last 30 minutes, whenever you realise you need it:
-
-```sh
-.build/release/transcribe --last 30m --source mic --out notes.md
-```
-
-Add the `daemon/.build/release` directory to your `PATH` and the rest of this README drops the leading `.build/release/`.
+Add `daemon/.build/release` to your `PATH` and the commands below drop the
+leading `.build/release/`.
 
 ## Usage
 
