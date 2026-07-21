@@ -98,7 +98,7 @@ public actor ControlSocketClient {
         do {
           try await self.connection.send(line)
         } catch {
-          await self.fail(id: id, with: error)
+          self.fail(id: id, with: error)
         }
       }
     }
