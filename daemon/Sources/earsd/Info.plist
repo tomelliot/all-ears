@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Embedded into the earsd binary's __TEXT,__info_plist section at link
+         time (see the earsd target's linkerSettings in Package.swift). A bare
+         command-line tool has no bundle Info.plist, so macOS has no usage
+         string to show when earsd first requests microphone access — under
+         Hardened Runtime that request is denied/terminated without one. -->
+    <key>CFBundleName</key>
+    <string>earsd</string>
+    <key>CFBundleIdentifier</key>
+    <string>net.tomelliot.ears.earsd</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>All Ears records your microphone into a local, on-disk buffer so you can transcribe conversations after the fact. Audio never leaves your Mac.</string>
+</dict>
+</plist>

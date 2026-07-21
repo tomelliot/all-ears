@@ -171,6 +171,25 @@ let package = Package(
         // not a test-only one.
         "EarsCoreTestSupport",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
+      ],
+      // `Info.plist` is embedded into the binary at link time (see
+      // `linkerSettings` below), not compiled or bundled as a resource — tell
+      // SwiftPM to leave it alone rather than warn about an unhandled file.
+      exclude: ["Info.plist"],
+      linkerSettings: [
+        // Embed `Sources/earsd/Info.plist` into the `earsd` Mach-O's
+        // `__TEXT,__info_plist` section so macOS has an
+        // `NSMicrophoneUsageDescription` to show when the daemon first requests
+        // microphone access. A bare CLI has no bundle Info.plist otherwise, and
+        // once `earsd` is signed with Hardened Runtime (`make install`) the mic
+        // request is denied without one. The path is relative to the package
+        // root, which is SwiftPM's working directory during the build.
+        .unsafeFlags([
+          "-Xlinker", "-sectcreate",
+          "-Xlinker", "__TEXT",
+          "-Xlinker", "__info_plist",
+          "-Xlinker", "Sources/earsd/Info.plist",
+        ])
       ]
     ),
     .executableTarget(

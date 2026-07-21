@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>net.tomelliot.ears.earsd</string>
+
+    <!-- The installed earsd absolute path. @PREFIX@ is substituted by the
+         Makefile at install time (default $HOME/.local, override with PREFIX=). -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>@PREFIX@/bin/earsd</string>
+    </array>
+
+    <!-- Start at login. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on crash, but not after a clean exit (e.g. `ears shutdown`),
+         so a deliberate stop stays stopped until the next login. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Don't spin tightly if earsd crash-loops: wait 10s between respawns. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Give the daemon a PATH that contains the installed CLIs. The meeting
+         `on_end` hook shells out via `/usr/bin/env transcribe`; without the
+         install bin dir here it fails with exit 127 (command not found). -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>@PREFIX@/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <!-- Interactive: earsd is a per-user, GUI-session audio agent. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <!-- Pre-logger crash output. launchd needs somewhere to capture stdout/
+         stderr from before earsd's own JSON-Lines logger is initialized (or if
+         it fails to start at all). @HOME@ is substituted by the Makefile;
+         launchd does not expand a literal `~`. -->
+    <key>StandardOutPath</key>
+    <string>@HOME@/Library/Logs/ears/earsd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>@HOME@/Library/Logs/ears/earsd.err.log</string>
+</dict>
+</plist>
