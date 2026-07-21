@@ -1,5 +1,13 @@
-import { beforeEach, describe, expect, it } from "vitest";
-import { LinearResampler, MeetDecodeSource, RingBuffer, type MeetDecodeDeps } from "./audio-tap";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  LinearResampler,
+  MeetDecodeSource,
+  RingBuffer,
+  SILENT_CAPTURE_GRACE_MS,
+  SilentCaptureWatchdog,
+  silentReport,
+  type MeetDecodeDeps,
+} from "./audio-tap";
 import type { EncodedAudioListener } from "./rtc-hook";
 
 describe("LinearResampler", () => {
@@ -88,6 +96,81 @@ describe("RingBuffer", () => {
     const drained = ring.drain();
     expect(drained.length).toBe(3);
     expect(drained.map((f) => f[0])).toEqual([97, 98, 99]);
+  });
+});
+
+// ── Silent-capture watchdog (journal #72) ───────────────────────────────────
+
+describe("SilentCaptureWatchdog", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("fires once when an unmuted track never yields a frame", () => {
+    const silent: number[] = [];
+    const wd = new SilentCaptureWatchdog((ms) => silent.push(ms));
+    wd.armOnUnmute();
+    vi.advanceTimersByTime(SILENT_CAPTURE_GRACE_MS);
+    expect(silent).toEqual([SILENT_CAPTURE_GRACE_MS]);
+  });
+
+  it("stays quiet when a frame arrives within the grace window", () => {
+    const silent: number[] = [];
+    const wd = new SilentCaptureWatchdog((ms) => silent.push(ms));
+    wd.armOnUnmute();
+    vi.advanceTimersByTime(SILENT_CAPTURE_GRACE_MS / 2);
+    wd.noteFrame();
+    vi.advanceTimersByTime(SILENT_CAPTURE_GRACE_MS);
+    expect(silent).toEqual([]);
+  });
+
+  it("reports at most once across repeated unmutes", () => {
+    const silent: number[] = [];
+    const wd = new SilentCaptureWatchdog((ms) => silent.push(ms));
+    wd.armOnUnmute();
+    vi.advanceTimersByTime(SILENT_CAPTURE_GRACE_MS);
+    wd.armOnUnmute(); // a later speaking turn must not re-warn
+    vi.advanceTimersByTime(SILENT_CAPTURE_GRACE_MS);
+    expect(silent).toHaveLength(1);
+  });
+
+  it("a frame seen before an unmute keeps the track silent-free forever", () => {
+    const silent: number[] = [];
+    const wd = new SilentCaptureWatchdog((ms) => silent.push(ms));
+    wd.noteFrame();
+    wd.armOnUnmute();
+    vi.advanceTimersByTime(SILENT_CAPTURE_GRACE_MS * 2);
+    expect(silent).toEqual([]);
+  });
+
+  it("stop() cancels a pending warning (track ended mid-grace)", () => {
+    const silent: number[] = [];
+    const wd = new SilentCaptureWatchdog((ms) => silent.push(ms));
+    wd.armOnUnmute();
+    wd.stop();
+    vi.advanceTimersByTime(SILENT_CAPTURE_GRACE_MS * 2);
+    expect(silent).toEqual([]);
+  });
+});
+
+describe("silentReport", () => {
+  it("escalates to a loud warning when nothing has decoded on the call", () => {
+    const r = silentReport("speaker-1", "meet", false, SILENT_CAPTURE_GRACE_MS);
+    expect(r.level).toBe("warn");
+    expect(r.text).toContain("SILENT");
+    expect(r.text).toContain("createEncodedStreams");
+  });
+
+  it("downgrades to a benign note when other participants are being captured (a quiet/noise-gated speaker)", () => {
+    const r = silentReport("speaker-3", "meet", true, SILENT_CAPTURE_GRACE_MS);
+    expect(r.level).toBe("info");
+    expect(r.text).toContain("noise-suppressed");
+    expect(r.text).not.toContain("SILENT");
+  });
+
+  it("omits the Meet-specific hint on other platforms", () => {
+    const r = silentReport("speaker-1", "zoom", false, SILENT_CAPTURE_GRACE_MS);
+    expect(r.level).toBe("warn");
+    expect(r.text).not.toContain("createEncodedStreams");
   });
 });
 

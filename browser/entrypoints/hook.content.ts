@@ -1,7 +1,7 @@
 import { defineContentScript } from "#imports";
 import { claimEpoch } from "../lib/epoch";
-import { installHook } from "../lib/rtc-hook";
-import { initCapture, __devCaptureStream } from "../lib/audio-tap";
+import { installHook, hookDebugState } from "../lib/rtc-hook";
+import { initCapture, captureDebugState, __devCaptureStream } from "../lib/audio-tap";
 import { selectAdapter, type PlatformAdapter } from "../lib/identity/adapter";
 import { MeetMeetingIdWatcher } from "../lib/identity/meet-meeting-id";
 import { isControlEnvelope, isMainEnvelope, postToIsolated, type Platform } from "../lib/protocol";
@@ -50,24 +50,48 @@ export default defineContentScript({
     const host = location.host;
     const adapter = selectAdapter(host);
     const platform = platformForHost(host, adapter);
-    if (!adapter) console.warn(`[ears] no identity adapter for ${host} — using speaker-<n>`);
+    if (!adapter) console.warn(`[ears][hook] no identity adapter for ${host} — using speaker-<n>`);
 
     let captureOn = false;
     let stopMeetingWatch: (() => void) | null = null;
+    let lastMeetingId: string | null = null;
+
+    // On-demand state snapshot for the popup's "Report state" button. Dumps to
+    // THIS tab's console (where the [ears] logs already live) so it can be read
+    // mid-meeting; also exposed on window for a direct console call.
+    const reportDebugState = (): void => {
+      const snapshot = {
+        ts: new Date().toISOString(),
+        host,
+        platform,
+        captureOn,
+        meetingId: lastMeetingId,
+        ...hookDebugState(),
+        capture: captureDebugState(),
+      };
+      console.debug("[ears][debug][state]", snapshot);
+    };
+    (window as unknown as { __earsReportState?: () => void }).__earsReportState = reportDebugState;
+
     window.addEventListener("message", (event: MessageEvent) => {
       if (event.source !== window) return; // only same-window
       if (!isControlEnvelope(event.data)) return;
       const msg = event.data.msg;
+      if (msg.kind === "report-state") {
+        reportDebugState();
+        return;
+      }
       if (msg.kind !== "capture-state" || msg.enabled === captureOn) return;
       captureOn = msg.enabled;
       if (captureOn) {
         startEpoch(platform, adapter);
         stopMeetingWatch?.();
-        stopMeetingWatch = startMeetingWatch(platform);
+        stopMeetingWatch = startMeetingWatch(platform, (id) => (lastMeetingId = id));
       } else {
         stopCapture();
         stopMeetingWatch?.();
         stopMeetingWatch = null;
+        lastMeetingId = null;
       }
     });
 
@@ -95,7 +119,7 @@ function startEpoch(platform: Platform, adapter: PlatformAdapter | null): void {
 function stopCapture(): void {
   claimEpoch();
   (window as unknown as { __earsTeardown?: () => void }).__earsTeardown?.();
-  console.log("[ears] capture disabled — epoch released, pipelines torn down");
+  console.debug("[ears][hook] capture disabled — epoch released, pipelines torn down");
 }
 
 // How long the meeting-id watcher stays quiet before logging its one
@@ -113,11 +137,12 @@ const MEETING_ID_SOFT_FAIL_MS = 15_000;
  * by design: an unresolved id logs once and skips marking; capture is never
  * blocked or delayed (identity's standing contract, see meet.ts).
  */
-function startMeetingWatch(platform: Platform): () => void {
+function startMeetingWatch(platform: Platform, onMeetingId?: (id: string) => void): () => void {
   if (platform !== "meet") return () => {};
 
   const watcher = new MeetMeetingIdWatcher((spaceId) => {
-    console.log(`[ears] Meet meeting id resolved: ${spaceId}`);
+    console.debug(`[ears][hook] Meet meeting id resolved: ${spaceId}`);
+    onMeetingId?.(spaceId);
     postToIsolated({ kind: "meeting-started", platform, externalMeetingId: spaceId });
   });
 
@@ -140,7 +165,7 @@ function startMeetingWatch(platform: Platform): () => void {
     if (!warned && Date.now() - startedAt > MEETING_ID_SOFT_FAIL_MS) {
       warned = true;
       console.warn(
-        "[ears] Meet meeting id has not resolved yet — the meeting can't be marked until it does; capture is unaffected",
+        "[ears][hook] Meet meeting id has not resolved yet — the meeting can't be marked until it does; capture is unaffected",
       );
     }
   }, MEETING_ID_POLL_MS);

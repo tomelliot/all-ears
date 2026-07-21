@@ -247,7 +247,7 @@ export class MeetingTracker {
           : await this.control.meetingResume(record.meetingId);
         record.paused = meeting.state === "paused";
       } catch (err) {
-        console.warn(`[ears] meeting.${paused ? "pause" : "resume"} failed:`, err);
+        console.warn(`[ears][meeting] meeting.${paused ? "pause" : "resume"} failed:`, err);
       }
     }
     this.emitState();
@@ -311,7 +311,7 @@ export class MeetingTracker {
         }
         const wantPaused = record.paused;
         record.meetingId = meeting.id;
-        console.log(`[ears] meeting ${record.externalMeetingId} → ${meeting.id}`);
+        console.debug(`[ears][meeting] meeting ${record.externalMeetingId} → ${meeting.id}`);
         // The popup may have toggled pause before the id was known; apply
         // it now. Otherwise adopt the daemon's state (idempotent re-declare
         // of an already-paused meeting stays paused).
@@ -327,7 +327,7 @@ export class MeetingTracker {
       })
       .catch((err) => {
         record.starting = false;
-        console.warn(`[ears] meeting.start failed for ${record.externalMeetingId}:`, err);
+        console.warn(`[ears][meeting] meeting.start failed for ${record.externalMeetingId}:`, err);
       });
   }
 
@@ -339,7 +339,7 @@ export class MeetingTracker {
     }
     const meetingId = record.meetingId;
     void this.control.meetingAttendee(meetingId, attendee).catch((err) => {
-      console.warn(`[ears] meeting.attendee(${attendee.id}) failed:`, err);
+      console.warn(`[ears][meeting] meeting.attendee(${attendee.id}) failed:`, err);
     });
   }
 
@@ -349,7 +349,7 @@ export class MeetingTracker {
     this.meetings.delete(record.externalMeetingId);
     if (record.meetingId) {
       void this.control.meetingEnd(record.meetingId).catch((err) => {
-        console.warn(`[ears] meeting.end(${record.meetingId}) failed:`, err);
+        console.warn(`[ears][meeting] meeting.end(${record.meetingId}) failed:`, err);
       });
     }
     // No meetingId yet: declare() notices `ended` when the start lands and

@@ -63,7 +63,12 @@ export const EARS_CTL_MARKER = "__earsCtl" as const;
  * anything it needs from storage/runtime arrives on this channel — today
  * that's just the capture toggle (see capture-toggle.ts).
  */
-export type ControlMessage = { kind: "capture-state"; enabled: boolean };
+export type ControlMessage =
+  | { kind: "capture-state"; enabled: boolean }
+  // Debug: dump a MAIN-world capture/probe/hook state snapshot to this tab's
+  // console. Triggered from the popup via a storage-key nudge (content.ts),
+  // so it reaches every open meeting tab and needs no extra permissions.
+  | { kind: "report-state" };
 
 export interface ControlEnvelope {
   [EARS_CTL_MARKER]: true;

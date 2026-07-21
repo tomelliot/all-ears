@@ -1,6 +1,6 @@
 import { defineContentScript } from "#imports";
 import { browser } from "wxt/browser";
-import { CAPTURE_ENABLED_KEY, resolveCaptureToggleState } from "../lib/capture-toggle";
+import { CAPTURE_ENABLED_KEY, DEBUG_REPORT_KEY, resolveCaptureToggleState } from "../lib/capture-toggle";
 import { ReconnectingPort } from "../lib/pcm-port";
 import {
   isMainEnvelope,
@@ -29,7 +29,7 @@ export default defineContentScript({
   ],
   runAt: "document_start",
   main() {
-    console.log("[ears] content relay loaded on", location.host);
+    console.debug("[ears][relay] content relay loaded on", location.host);
 
     // Hand the worklet URL to the MAIN world (it has no chrome.runtime).
     document.documentElement.dataset.earsWorklet = browser.runtime.getURL("/pcm-worklet.js");
@@ -47,6 +47,9 @@ export default defineContentScript({
     browser.storage.local.onChanged?.addListener?.((changes) => {
       const c = changes[CAPTURE_ENABLED_KEY];
       if (c) publishToggle(c.newValue);
+      // The popup's "Report state" button writes a fresh nonce here; nudge the
+      // MAIN world to dump its state to this tab's console.
+      if (changes[DEBUG_REPORT_KEY]) postToMain({ kind: "report-state" });
     });
 
     // Lifecycle facts this document knows, mirrored from the hook's messages:
@@ -69,8 +72,8 @@ export default defineContentScript({
             ...(p.displayName ? { displayName: p.displayName } : {}),
           });
         }
-        console.log(
-          `[ears/relay] replayed to respawned worker: ` +
+        console.debug(
+          `[ears][relay] replayed to respawned worker: ` +
             `meeting=${state.liveMeeting?.externalMeetingId ?? "none"}, ` +
             `${state.participants.size} participant(s)`,
         );
@@ -108,15 +111,15 @@ function relay(msg: MainMessage, port: ReconnectingPort, state: RelayState): voi
         platform: msg.platform,
         ...(msg.displayName ? { displayName: msg.displayName } : {}),
       });
-      console.log(`[ears/relay] joined ${msg.participantId} gen${msg.generation} (${msg.platform})`);
+      console.debug(`[ears][relay] joined ${msg.participantId} gen${msg.generation} (${msg.platform})`);
       break;
     case "participant-left":
       state.participants.delete(msg.participantId);
       port.post({ type: "left", participantId: msg.participantId });
-      console.log(`[ears/relay] left ${msg.participantId} gen${msg.generation}`);
+      console.debug(`[ears][relay] left ${msg.participantId} gen${msg.generation}`);
       break;
     case "status":
-      console.log(`[ears/relay] status: ${msg.text}`);
+      console.debug(`[ears][relay] status: ${msg.text}`);
       break;
     case "meeting-started":
       state.liveMeeting = { platform: msg.platform, externalMeetingId: msg.externalMeetingId };
@@ -125,7 +128,7 @@ function relay(msg: MainMessage, port: ReconnectingPort, state: RelayState): voi
         platform: msg.platform,
         externalMeetingId: msg.externalMeetingId,
       });
-      console.log(`[ears/relay] meeting started: ${msg.platform}/${msg.externalMeetingId}`);
+      console.debug(`[ears][relay] meeting started: ${msg.platform}/${msg.externalMeetingId}`);
       break;
     case "meeting-ended":
       state.liveMeeting = null;
@@ -134,7 +137,7 @@ function relay(msg: MainMessage, port: ReconnectingPort, state: RelayState): voi
         platform: msg.platform,
         externalMeetingId: msg.externalMeetingId,
       });
-      console.log(`[ears/relay] meeting ended: ${msg.platform}/${msg.externalMeetingId}`);
+      console.debug(`[ears][relay] meeting ended: ${msg.platform}/${msg.externalMeetingId}`);
       break;
     case "pcm": {
       const platform = state.participants.get(msg.participantId)?.platform;

@@ -94,7 +94,7 @@ export class ControlSocket {
   private open(): void {
     // Loopback only — a non-127.0.0.1 host is a bug, not a config.
     if (!this.url.startsWith("ws://127.0.0.1:")) {
-      console.error(`[ears] refusing non-loopback control URL: ${this.url}`);
+      console.error(`[ears][control] refusing non-loopback control URL: ${this.url}`);
       return;
     }
     this.setStatus("connecting");
@@ -102,19 +102,19 @@ export class ControlSocket {
     try {
       ws = new WebSocket(this.url);
     } catch (err) {
-      console.error("[ears] control WebSocket construct failed:", err);
+      console.error("[ears][control] control WebSocket construct failed:", err);
       this.scheduleReconnect();
       return;
     }
     this.ws = ws;
 
     ws.onopen = () => {
-      console.log(`[ears] control connected: ${this.url}`);
+      console.debug(`[ears][control] control connected: ${this.url}`);
       this.backoff = BASE_BACKOFF_MS;
       void this.handshake();
     };
     ws.onmessage = (e) => this.onFrame(e.data);
-    ws.onerror = () => console.warn("[ears] control socket error");
+    ws.onerror = () => console.warn("[ears][control] control socket error");
     ws.onclose = () => {
       if (this.ws === ws) this.ws = undefined;
       this.ready = false;
@@ -132,7 +132,7 @@ export class ControlSocket {
         true,
       )) as HelloResult;
       if (hello.protocol !== PROTOCOL_VERSION) {
-        console.error(`[ears] daemon speaks protocol ${hello.protocol}, expected v2 — giving up`);
+        console.error(`[ears][control] daemon speaks protocol ${hello.protocol}, expected v2 — giving up`);
         return;
       }
       const bootChanged = this.lastBootId !== undefined && this.lastBootId !== hello.boot_id;
@@ -147,7 +147,7 @@ export class ControlSocket {
       this.setStatus("connected");
       this.onReady(snapshot, bootChanged);
     } catch (err) {
-      console.warn("[ears] control handshake failed:", err);
+      console.warn("[ears][control] control handshake failed:", err);
       this.ws?.close();
     }
   }
@@ -215,13 +215,13 @@ export class ControlSocket {
     try {
       frame = JSON.parse(data) as ResponseFrame | EventFrame;
     } catch {
-      console.warn("[ears] bad control frame JSON");
+      console.warn("[ears][control] bad control frame JSON");
       return;
     }
     if ("id" in frame && frame.id !== undefined && frame.id !== null) {
       const pending = this.pending.get(frame.id);
       if (!pending) {
-        console.warn("[ears] response for unknown request id:", frame.id);
+        console.warn("[ears][control] response for unknown request id:", frame.id);
         return;
       }
       this.pending.delete(frame.id);

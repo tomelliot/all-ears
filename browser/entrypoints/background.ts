@@ -32,7 +32,7 @@ const DEFAULT_CONTROL_PORT = 47812;
 const CONTROL_PORT_STORAGE_KEY = "earsdControlPort";
 
 export default defineBackground(() => {
-  console.log("[ears] background loaded");
+  console.debug("[ears][bg] background loaded");
 
   // ── Badge state: transport status composed with meeting state ─────────────
   // Transport problems win outright; otherwise the meeting layer's
@@ -59,17 +59,17 @@ export default defineBackground(() => {
 
   const socket = new EarsSocket(DEFAULT_PORT, (s) => {
     status = s;
-    console.log(`[ears] transport status: ${s}`);
+    console.debug(`[ears][bg] transport status: ${s}`);
     broadcastStatus();
   });
 
   const control = new ControlSocket(DEFAULT_CONTROL_PORT, (s) => {
-    console.log(`[ears] control transport status: ${s}`);
+    console.debug(`[ears][bg] control transport status: ${s}`);
   });
 
   const meetings = new MeetingTracker(control, (s) => {
     meetingState = s;
-    console.log(`[ears] meeting state: ${s}`);
+    console.debug(`[ears][bg] meeting state: ${s}`);
     broadcastStatus();
   });
 
@@ -96,7 +96,7 @@ export default defineBackground(() => {
   // The alarm's job is done by firing: the event resets the worker's idle
   // timer (or respawns a dead worker, whose top level then reconnects).
   browser.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === KEEPALIVE_ALARM) console.log("[ears] keepalive tick");
+    if (alarm.name === KEEPALIVE_ALARM) console.debug("[ears][bg] keepalive tick");
   });
 
   // Apply the configured ports, then connect both sockets.
@@ -130,7 +130,7 @@ export default defineBackground(() => {
   browser.runtime.onConnect.addListener((port) => {
     if (port.name !== "pcm") return;
     const portId = `pcm-${nextPortId++}`;
-    console.log(`[ears] pcm port connected (${portId})`);
+    console.debug(`[ears][bg] pcm port connected (${portId})`);
     port.onMessage.addListener((raw) => {
       const msg = raw as PortMessage;
       switch (msg.type) {
@@ -161,7 +161,7 @@ export default defineBackground(() => {
           );
           const n = (counts.get(msg.participantId) ?? 0) + 1;
           counts.set(msg.participantId, n);
-          if (n % 50 === 0) console.log(`[ears] forwarded ${n} frames for ${msg.participantId}`);
+          if (n % 50 === 0) console.debug(`[ears][bg] forwarded ${n} frames for ${msg.participantId}`);
           return;
         }
       }
@@ -176,8 +176,8 @@ export default defineBackground(() => {
         participantPorts.delete(id);
       }
       meetings.portDisconnected(portId);
-      console.log(
-        `[ears] pcm port disconnected (${portId})` +
+      console.debug(
+        `[ears][bg] pcm port disconnected (${portId})` +
           (orphaned.length ? ` — closed ${orphaned.length} orphaned stream(s)` : ""),
       );
     });
@@ -197,7 +197,7 @@ export default defineBackground(() => {
       void meetings
         .setPaused(m.paused === true)
         .then(() => broadcastStatus())
-        .catch((err) => console.warn("[ears] pause toggle failed:", err));
+        .catch((err) => console.warn("[ears][bg] pause toggle failed:", err));
       sendResponse({ ok: true });
       return true;
     }

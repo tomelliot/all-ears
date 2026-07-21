@@ -76,6 +76,7 @@ function dispatchTrack(e: RTCTrackEvent): void {
   // Keep the registry honest so a later epoch's replay never resurrects a dead
   // track. Deleting here is safe: the sink also handles its own onended.
   e.track.addEventListener("ended", () => registry.delete(e.track));
+  if (location.host === "meet.google.com") noteMeetAudioTrackLive();
   hw().__earsOnTrack?.(e.track, stream, e.transceiver);
 }
 
@@ -138,9 +139,11 @@ export function installHook(): void {
   // Applying the tee on other platforms would double-capture where the
   // standard MediaStreamTrackProcessor path already works.
   if (location.host === "meet.google.com") installMeetEncodedAudioTee();
+  if (location.host === "meet.google.com") installMeetTransformProbe();
+  if (location.host === "meet.google.com") installMeetWebAudioProbe();
   if (location.host === "meet.google.com" && debugChannelsEnabled()) installNetworkTracer();
 
-  console.log("[ears] RTCPeerConnection hook installed");
+  console.debug("[ears][hook] RTCPeerConnection hook installed");
 }
 
 // ── Meet collections datachannel: device-id/speaking-flag signal ───────────
@@ -184,7 +187,7 @@ function maybeWarnCollectionsSchema(): void {
   if (collectionsSeen < 5 || collectionsParsed > 0) return; // give it a few messages before concluding it's broken
   warnedCollectionsSchema = true;
   console.warn(
-    "[ears] Meet 'collections' datachannel is sending messages but none parsed as the expected " +
+    "[ears][hook] Meet 'collections' datachannel is sending messages but none parsed as the expected " +
       "device-id/speaking-flag shape — Meet likely changed its wire format. Identity upgrade via " +
       "this path is disabled for this session; capture still works via speaker-<n>. See lib/identity/meet-collections.ts.",
   );
@@ -321,11 +324,11 @@ function previewPayload(data: unknown): string {
 async function logCollectionsStructure(buf: ArrayBuffer): Promise<void> {
   const inflated = await inflateGzip(buf);
   if (!inflated) {
-    console.log("[ears/debug-net] collections message: not gzip, or failed to inflate");
+    console.debug("[ears][debug][net] collections message: not gzip, or failed to inflate");
     return;
   }
   const lines = debugDecodeStructure(inflated);
-  console.log(`[ears/debug-net] collections decoded structure (${inflated.length}B):\n${lines.join("\n")}`);
+  console.debug(`[ears][debug][net] collections decoded structure (${inflated.length}B):\n${lines.join("\n")}`);
 }
 
 function attachChannelLogger(ch: RTCDataChannel): void {
@@ -334,14 +337,14 @@ function attachChannelLogger(ch: RTCDataChannel): void {
     if (ev.data instanceof Blob) {
       void ev.data.arrayBuffer().then((buf) => {
         const preview = bufferPreview(buf);
-        console.log(`[ears/debug-net] DC[${ch.label}] ${preview}`);
+        console.debug(`[ears][debug][net] DC[${ch.label}] ${preview}`);
         netLog().push({ t, iso: new Date(t).toISOString(), kind: "datachannel", label: ch.label, preview, bytes: rawBytes(buf) });
         if (ch.label === "collections") void logCollectionsStructure(buf);
       });
       return;
     }
     const preview = previewPayload(ev.data);
-    console.log(`[ears/debug-net] DC[${ch.label}] ${preview}`);
+    console.debug(`[ears][debug][net] DC[${ch.label}] ${preview}`);
     const entry: NetLogEntry = { t, iso: new Date(t).toISOString(), kind: "datachannel", label: ch.label, preview };
     let buf: ArrayBuffer | null = null;
     if (ev.data instanceof ArrayBuffer) buf = ev.data;
@@ -360,15 +363,15 @@ function attachChannelLogger(ch: RTCDataChannel): void {
 function installChannelTracer(pc: RTCPeerConnection): void {
   pc.addEventListener("datachannel", (ev: RTCDataChannelEvent) => {
     const ch = ev.channel;
-    console.log(
-      `[ears/debug-net] datachannel (remote) label="${ch.label}" id=${ch.id} protocol="${ch.protocol}" ordered=${ch.ordered}`,
+    console.debug(
+      `[ears][debug][net] datachannel (remote) label="${ch.label}" id=${ch.id} protocol="${ch.protocol}" ordered=${ch.ordered}`,
     );
     attachChannelLogger(ch);
   });
   const nativeCreate = pc.createDataChannel.bind(pc);
   pc.createDataChannel = ((label: string, opts?: RTCDataChannelInit) => {
     const ch = nativeCreate(label, opts);
-    console.log(`[ears/debug-net] datachannel (local) label="${ch.label}" id=${ch.id}`);
+    console.debug(`[ears][debug][net] datachannel (local) label="${ch.label}" id=${ch.id}`);
     attachChannelLogger(ch);
     return ch;
   }) as typeof pc.createDataChannel;
@@ -379,19 +382,19 @@ function installNetworkTracer(): void {
   if (!Native) return;
   function Wrapped(this: unknown, url: string | URL, protocols?: string | string[]): WebSocket {
     const ws = protocols === undefined ? new Native(url) : new Native(url, protocols);
-    console.log(`[ears/debug-net] WebSocket open → ${url}`);
+    console.debug(`[ears][debug][net] WebSocket open → ${url}`);
     ws.addEventListener("message", (ev: MessageEvent) => {
       const t = Date.now();
       if (ev.data instanceof Blob) {
         void ev.data.arrayBuffer().then((buf) => {
           const preview = bufferPreview(buf);
-          console.log(`[ears/debug-net] WS ← ${url} ${preview}`);
+          console.debug(`[ears][debug][net] WS ← ${url} ${preview}`);
           netLog().push({ t, iso: new Date(t).toISOString(), kind: "ws", url: String(url), preview, bytes: rawBytes(buf) });
         });
         return;
       }
       const preview = previewPayload(ev.data);
-      console.log(`[ears/debug-net] WS ← ${url} ${preview}`);
+      console.debug(`[ears][debug][net] WS ← ${url} ${preview}`);
       const entry: NetLogEntry = { t, iso: new Date(t).toISOString(), kind: "ws", url: String(url), preview };
       if (ev.data instanceof ArrayBuffer) entry.bytes = rawBytes(ev.data);
       else if (ArrayBuffer.isView(ev.data)) {
@@ -400,13 +403,13 @@ function installNetworkTracer(): void {
       }
       netLog().push(entry);
     });
-    ws.addEventListener("close", () => console.log(`[ears/debug-net] WebSocket closed → ${url}`));
+    ws.addEventListener("close", () => console.debug(`[ears][debug][net] WebSocket closed → ${url}`));
     return ws;
   }
   Wrapped.prototype = Native.prototype;
   Object.setPrototypeOf(Wrapped, Native);
   window.WebSocket = Wrapped as unknown as typeof WebSocket;
-  console.log("[ears/debug-net] WebSocket tracer installed");
+  console.debug("[ears][debug][net] WebSocket tracer installed");
 }
 
 // ── Meet encoded-audio tee ───────────────────────────────────────────────
@@ -469,8 +472,89 @@ async function pumpEncodedAudio(
       encodedAudioListeners().get(track)?.(value);
     }
   } catch (err) {
-    console.error(`[ears] encoded-audio tee read error for track ${track.id}:`, err);
+    console.error(`[ears][hook] encoded-audio tee read error for track ${track.id}:`, err);
   }
+}
+
+// Diagnostic for the silent-capture failure (journal #72): count how many audio
+// receivers Meet actually routed through our createEncodedStreams wrap. If audio
+// tracks go live but this stays zero, Meet never called our hook and every
+// participant records silence for the whole call — surface it loudly, once.
+let teedAudioStreamCount = 0;
+let teeWatchdogArmed = false;
+const TEE_WATCHDOG_MS = 6_000;
+
+// Probe findings (set by installMeetTransformProbe), surfaced in the tee
+// watchdog so a single guaranteed-visible `[ears][hook]` line names the encoded-frame
+// API Meet actually used this call — no separate probe line to hunt for.
+let probeScriptTransformApiPresent = false;
+let probeCreateEncodedStreamsPresent = false;
+let probeScriptTransformCtorCount = 0;
+let probeAudioTransformSetCount = 0;
+// WebAudio / decoded-output probe counters (journal #75) — where Meet's audio
+// actually surfaces once it bypasses every encoded-frame API.
+let probeAudioContextCount = 0;
+let probeAudioWorkletNodeCount = 0;
+let probeTrackGeneratorCount = 0;
+let probeMediaStreamSourceCount = 0;
+let probeMediaElementSrcObjectCount = 0;
+
+/** Hook-layer state for the popup's debug report (see hook.content.ts). */
+export function hookDebugState(): {
+  liveTracks: number;
+  teedAudioStreamCount: number;
+  probe: {
+    createEncodedStreamsPresent: boolean;
+    scriptTransformApiPresent: boolean;
+    scriptTransformCtorCount: number;
+    audioTransformSetCount: number;
+  };
+  webaudio: {
+    audioContexts: number;
+    audioWorkletNodes: number;
+    trackGenerators: number;
+    mediaStreamSources: number;
+    mediaElementSrcObjects: number;
+  };
+} {
+  return {
+    liveTracks: liveTracks().size,
+    teedAudioStreamCount,
+    probe: {
+      createEncodedStreamsPresent: probeCreateEncodedStreamsPresent,
+      scriptTransformApiPresent: probeScriptTransformApiPresent,
+      scriptTransformCtorCount: probeScriptTransformCtorCount,
+      audioTransformSetCount: probeAudioTransformSetCount,
+    },
+    webaudio: {
+      audioContexts: probeAudioContextCount,
+      audioWorkletNodes: probeAudioWorkletNodeCount,
+      trackGenerators: probeTrackGeneratorCount,
+      mediaStreamSources: probeMediaStreamSourceCount,
+      mediaElementSrcObjects: probeMediaElementSrcObjectCount,
+    },
+  };
+}
+
+function noteMeetAudioTrackLive(): void {
+  if (teeWatchdogArmed) return;
+  teeWatchdogArmed = true;
+  setTimeout(() => {
+    if (teedAudioStreamCount > 0) return;
+    console.error(
+      "[ears][capture] ⚠ Meet audio capture is SILENT: audio tracks are live but Meet never called our " +
+        "createEncodedStreams hook (0 streams tee'd). Meet likely changed its audio pipeline " +
+        "(e.g. RTCRtpScriptTransform), or the receivers predate the hook. No participant audio " +
+        "will be captured this call — reload the tab to re-arm. (journal #72)",
+    );
+    console.error(
+      `[ears][probe] Meet audio API probe — createEncodedStreams:${probeCreateEncodedStreamsPresent ? "present" : "absent"}` +
+        ` RTCRtpScriptTransform:${probeScriptTransformApiPresent ? "present" : "absent"}` +
+        ` · scriptTransform ctor×${probeScriptTransformCtorCount}` +
+        ` · audio receiver.transform set×${probeAudioTransformSetCount}` +
+        " — the fix hooks whichever Meet actually used (journal #73)",
+    );
+  }, TEE_WATCHDOG_MS);
 }
 
 function installMeetEncodedAudioTee(): void {
@@ -481,7 +565,7 @@ function installMeetEncodedAudioTee(): void {
     // MUST-NOT #13: surface this rather than silently reporting a working
     // capture that will actually record zero audio for every participant.
     console.error(
-      "[ears] RTCRtpReceiver.createEncodedStreams unavailable on meet.google.com — Meet audio capture will not work",
+      "[ears][hook] RTCRtpReceiver.createEncodedStreams unavailable on meet.google.com — Meet audio capture will not work",
     );
     return;
   }
@@ -491,10 +575,166 @@ function installMeetEncodedAudioTee(): void {
     const track = this.track;
     if (!track || track.kind !== "audio") return streams; // video: pass through untouched
     const [ours, theirs] = streams.readable.tee();
+    teedAudioStreamCount += 1;
     void pumpEncodedAudio(track, ours);
-    console.log(`[ears] tee'd encoded audio stream for track ${track.id}`);
+    console.debug(`[ears][hook] tee'd encoded audio stream for track ${track.id} (${teedAudioStreamCount} total)`);
     return { readable: theirs, writable: streams.writable };
   };
 
-  console.log("[ears] RTCRtpReceiver.createEncodedStreams hook installed (meet.google.com)");
+  console.debug("[ears][hook] RTCRtpReceiver.createEncodedStreams hook installed (meet.google.com)");
+}
+
+// Temporary diagnostic (journal #73): Meet stopped calling createEncodedStreams,
+// and the loaded modules (loadNetEqSabWrapper — SharedArrayBuffer WASM NetEQ)
+// point at RTCRtpScriptTransform, the worker-based successor. This probe reports
+// which encoded-frame API Meet actually uses on this build and logs where it
+// routes audio — WITHOUT changing behaviour (every wrap passes straight through)
+// so the real capture fix knows exactly what to hook. Remove once the fix lands.
+function installMeetTransformProbe(): void {
+  try {
+    const w = window as unknown as {
+      RTCRtpScriptTransform?: new (...a: unknown[]) => object;
+      RTCRtpReceiver?: { prototype: object };
+    };
+    const proto = w.RTCRtpReceiver?.prototype;
+    const hasScriptTransform = typeof w.RTCRtpScriptTransform === "function";
+    const hasCreateEncodedStreams =
+      !!proto && typeof (proto as { createEncodedStreams?: unknown }).createEncodedStreams === "function";
+    const hasTransformAccessor = !!proto && !!Object.getOwnPropertyDescriptor(proto, "transform")?.set;
+    probeScriptTransformApiPresent = hasScriptTransform;
+    probeCreateEncodedStreamsPresent = hasCreateEncodedStreams;
+    // Bracket-tree tag: filter `[ears][probe]` for just this, `[ears]` for all.
+    console.debug(
+      `[ears][probe] Meet audio APIs on this build — RTCRtpScriptTransform:${hasScriptTransform} ` +
+        `receiver.transform:${hasTransformAccessor} createEncodedStreams:${hasCreateEncodedStreams}`,
+    );
+
+    // Log every RTCRtpScriptTransform construction — the options name Meet's
+    // decode topology (which worker, what role). Pass-through constructor.
+    if (hasScriptTransform) {
+      const Native = w.RTCRtpScriptTransform!;
+      const Wrapped = function (this: unknown, ...args: unknown[]): object {
+        probeScriptTransformCtorCount += 1;
+        console.debug("[ears][probe] new RTCRtpScriptTransform — options:", args[1]);
+        return new Native(...args);
+      } as unknown as new (...a: unknown[]) => object;
+      Wrapped.prototype = Native.prototype;
+      Object.setPrototypeOf(Wrapped, Native);
+      w.RTCRtpScriptTransform = Wrapped;
+    }
+
+    // Log when Meet assigns a transform to an audio receiver — the exact seam
+    // the real fix will tee encoded Opus from. Pass-through setter.
+    if (proto) {
+      const desc = Object.getOwnPropertyDescriptor(proto, "transform");
+      if (desc?.set && desc.get) {
+        const nativeSet = desc.set;
+        const nativeGet = desc.get;
+        Object.defineProperty(proto, "transform", {
+          configurable: true,
+          enumerable: desc.enumerable ?? true,
+          get(): unknown {
+            return nativeGet.call(this);
+          },
+          set(value: unknown): void {
+            const kind = (this as { track?: MediaStreamTrack }).track?.kind ?? "?";
+            if (kind === "audio") probeAudioTransformSetCount += 1;
+            const name = (value as { constructor?: { name?: string } })?.constructor?.name ?? String(value);
+            console.debug(`[ears][probe] receiver.transform set on a ${kind} receiver → ${name}`);
+            nativeSet.call(this, value);
+          },
+        });
+      }
+    }
+  } catch (err) {
+    console.debug("[ears][probe] transform probe failed to install (non-fatal):", err);
+  }
+}
+
+// WebAudio / decoded-output probe (journal #75). Meet uses no JS encoded-frame
+// tap, so its decoded participant audio must surface later — through WebAudio
+// nodes, a MediaStreamTrackGenerator, or a media element. This maps that graph
+// (pass-through, diagnostic only) to answer the one question that decides
+// feasibility: does Meet keep ONE node/generator PER participant (per-participant
+// capture still possible), or mix everything into one (only blended audio left)?
+// Filter the console by `[ears][probe][webaudio]`.
+function installMeetWebAudioProbe(): void {
+  try {
+    const w = window as unknown as Record<string, unknown>;
+
+    const streamTracks = (v: unknown): string => {
+      const s = v as { getAudioTracks?: () => Array<{ id: string }> } | null;
+      const ids = s?.getAudioTracks?.().map((t) => t.id) ?? null;
+      return ids ? `[${ids.join(",")}]` : String(v);
+    };
+
+    // Pass-through constructor wrap: log each construction + count it.
+    const wrapCtor = (name: string, label: (args: unknown[]) => string, tick: () => void): void => {
+      const Native = w[name];
+      if (typeof Native !== "function") return;
+      const N = Native as new (...a: unknown[]) => object;
+      const Wrapped = function (this: unknown, ...args: unknown[]): object {
+        tick();
+        console.debug(`[ears][probe][webaudio] new ${name} — ${label(args)}`);
+        return new N(...args);
+      } as unknown as new (...a: unknown[]) => object;
+      Wrapped.prototype = N.prototype;
+      Object.setPrototypeOf(Wrapped, N);
+      w[name] = Wrapped;
+    };
+
+    wrapCtor(
+      "AudioContext",
+      (a) => `sampleRate=${(a[0] as { sampleRate?: number })?.sampleRate ?? "default"}`,
+      () => (probeAudioContextCount += 1),
+    );
+    wrapCtor("webkitAudioContext", () => "webkit", () => (probeAudioContextCount += 1));
+    wrapCtor(
+      "AudioWorkletNode",
+      (a) => `processor="${String(a[1])}" ch=${(a[2] as { channelCount?: number })?.channelCount ?? "?"}`,
+      () => (probeAudioWorkletNodeCount += 1),
+    );
+    wrapCtor(
+      "MediaStreamTrackGenerator",
+      (a) => `kind=${(a[0] as { kind?: string })?.kind ?? String(a[0])}`,
+      () => (probeTrackGeneratorCount += 1),
+    );
+
+    // createMediaStreamSource tells us which stream (→ which participant) Meet
+    // routes into WebAudio, if any. Pass-through method wrap on the prototype.
+    const acProto = (w.AudioContext as { prototype?: Record<string, unknown> } | undefined)?.prototype;
+    const orig = acProto?.createMediaStreamSource;
+    if (acProto && typeof orig === "function") {
+      const native = orig as (...a: unknown[]) => unknown;
+      acProto.createMediaStreamSource = function (this: unknown, ...args: unknown[]): unknown {
+        probeMediaStreamSourceCount += 1;
+        console.debug(`[ears][probe][webaudio] createMediaStreamSource(audioTracks=${streamTracks(args[0])})`);
+        return native.apply(this, args);
+      };
+    }
+
+    // media.srcObject = stream — the other way decoded audio reaches output.
+    const meProto = (w.HTMLMediaElement as { prototype?: object } | undefined)?.prototype;
+    const desc = meProto && Object.getOwnPropertyDescriptor(meProto, "srcObject");
+    if (meProto && desc?.set && desc.get) {
+      const nset = desc.set;
+      const nget = desc.get;
+      Object.defineProperty(meProto, "srcObject", {
+        configurable: true,
+        enumerable: desc.enumerable ?? true,
+        get(): unknown {
+          return nget.call(this);
+        },
+        set(value: unknown): void {
+          if (value) {
+            probeMediaElementSrcObjectCount += 1;
+            console.debug(`[ears][probe][webaudio] media.srcObject = audioTracks=${streamTracks(value)}`);
+          }
+          nset.call(this, value);
+        },
+      });
+    }
+  } catch (err) {
+    console.debug("[ears][probe][webaudio] probe failed to install (non-fatal):", err);
+  }
 }

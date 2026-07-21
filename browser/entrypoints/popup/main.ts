@@ -1,5 +1,5 @@
 import { browser } from "wxt/browser";
-import { CAPTURE_ENABLED_KEY, resolveCaptureToggleState } from "../../lib/capture-toggle";
+import { CAPTURE_ENABLED_KEY, DEBUG_REPORT_KEY, resolveCaptureToggleState } from "../../lib/capture-toggle";
 import type { BadgeState } from "../../lib/meeting-tracker";
 
 // Popup: capture on/off toggle + earsd status badge + (while a meeting is
@@ -110,6 +110,26 @@ pauseToggleEl?.addEventListener("change", () => {
     pauseLabelEl.textContent = paused ? "Transcription paused" : "Transcription on";
   }
   browser.runtime.sendMessage({ kind: "set-transcription-paused", paused }).catch(() => {});
+});
+
+// ── Debug: report state → meeting tab console(s) ────────────────────────────
+
+// Writing a fresh nonce fires storage.onChanged in every open meeting tab's
+// content script, which nudges the MAIN world to log `[ears][debug][state]`.
+// Same popup ⇄ storage ⇄ content path as the capture toggle — no tabs/scripting
+// permission needed, and it reaches every meeting tab at once.
+const debugBtnEl = document.getElementById("debug-report") as HTMLButtonElement | null;
+const debugNoteEl = document.getElementById("debug-report-note");
+
+debugBtnEl?.addEventListener("click", () => {
+  browser.storage.local
+    .set({ [DEBUG_REPORT_KEY]: Date.now() })
+    .then(() => {
+      if (debugNoteEl) debugNoteEl.textContent = "State dumped — see the meeting tab console ([ears][debug][state]).";
+    })
+    .catch(() => {
+      if (debugNoteEl) debugNoteEl.textContent = "Couldn't trigger the report.";
+    });
 });
 
 // ── Status + meeting state ──────────────────────────────────────────────────

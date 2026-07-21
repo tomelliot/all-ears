@@ -369,8 +369,8 @@ class MeetAdapter implements PlatformAdapter {
     const track = this.liveTracksById.get(match.trackKey);
     if (!track) return; // track ended before confirmation landed
     this.upgradedTracks.set(match.trackKey, match.deviceId);
-    console.log(
-      `[ears] Meet identity upgraded via collections datachannel: track ${match.trackKey} → ${match.deviceId} ` +
+    console.debug(
+      `[ears][identity] Meet identity upgraded via collections datachannel: track ${match.trackKey} → ${match.deviceId} ` +
         `(${match.confirmations} confirming turns)`,
     );
     this.identifyCb?.(track, match.deviceId);
@@ -462,7 +462,7 @@ class MeetAdapter implements PlatformAdapter {
     if (!anyStream) return;
     this.warnedMissingIds = true;
     console.warn(
-      `[ears] Meet DOM carries none of the expected participant-id attributes (${PARTICIPANT_ID_ATTRIBUTES.join(", ")}) on any tile — identity degrades to speaker-<n>. The Meet build's tile DOM has likely changed; see lib/identity/meet.ts for the verification checklist and CSRC fallback notes.`,
+      `[ears][identity] Meet DOM carries none of the expected participant-id attributes (${PARTICIPANT_ID_ATTRIBUTES.join(", ")}) on any tile — identity degrades to speaker-<n>. The Meet build's tile DOM has likely changed; see lib/identity/meet.ts for the verification checklist and CSRC fallback notes.`,
     );
   }
 }

@@ -30,6 +30,8 @@ interface Pipeline {
   participantId: ParticipantId;
   generation: number;
   stop(): void;
+  /** Whether this pipeline has decoded at least one audio frame (debug report). */
+  receiving(): boolean;
 }
 
 interface CaptureConfig {
@@ -49,6 +51,14 @@ const generations = new Map<ParticipantId, number>(); // participantId → segme
 const fallbackIds = new WeakMap<MediaStreamTrack, ParticipantId>();
 let speakerCounter = 0;
 let cfg: CaptureConfig;
+
+// True once ANY participant on this call has produced a decoded frame. Gates the
+// per-track silent warning: Meet legitimately delivers no audio for an unmuted
+// but silent participant (DTX / noise suppression), so "unmuted + no frames" is
+// not on its own proof of breakage. Only escalate to a loud "SILENT" warning
+// when nothing has decoded anywhere on the call (see silentReport). Not reset on
+// epoch handoff — a mid-call re-inject must not forget that audio once flowed.
+let anyAudioDecodedThisCall = false;
 
 // Low-frequency safety net: sweep liveTracks() for any track this epoch owns
 // but has no pipeline for, and (re)adopt it. Covers a new-attendee track whose
@@ -83,7 +93,28 @@ export function initCapture(config: CaptureConfig): void {
   reconcileTimer = setInterval(reconcile, RECONCILE_INTERVAL_MS);
 
   postToIsolated({ kind: "status", text: `capture epoch ${config.epoch} active (${config.platform})` });
-  console.log(`[ears] capture active — epoch ${config.epoch}, platform ${config.platform}`);
+  console.debug(`[ears][capture] capture active — epoch ${config.epoch}, platform ${config.platform}`);
+}
+
+/** Capture-side state for the popup's debug report (see hook.content.ts). */
+export function captureDebugState(): {
+  platform: Platform | undefined;
+  epoch: number | undefined;
+  pipelineCount: number;
+  anyAudioDecodedThisCall: boolean;
+  participants: Array<{ id: ParticipantId; generation: number; receiving: boolean }>;
+} {
+  return {
+    platform: cfg?.platform,
+    epoch: cfg?.epoch,
+    pipelineCount: pipelines.size,
+    anyAudioDecodedThisCall,
+    participants: [...pipelines.values()].map((p) => ({
+      id: p.participantId,
+      generation: p.generation,
+      receiving: p.receiving(),
+    })),
+  };
 }
 
 /**
@@ -115,7 +146,7 @@ function handleIdentityUpgrade(track: MediaStreamTrack, id: ParticipantId): void
   if (!pipeline || pipeline.participantId === id) return;
   const rec = liveTracks().get(track);
   if (!rec) return; // track already ended; nothing to restart
-  console.log(`[ears] identity upgrade: track ${track.id} ${pipeline.participantId} → ${id} — restarting as a new segment`);
+  console.debug(`[ears][capture] identity upgrade: track ${track.id} ${pipeline.participantId} → ${id} — restarting as a new segment`);
   stopPipeline(track);
   startPipeline(track, rec.stream, rec.transceiver, id);
 }
@@ -150,13 +181,14 @@ function startPipeline(
     stop() {
       capture.stop();
     },
+    receiving: () => capture.receiving,
   };
   pipelines.set(track, pipeline);
   capture.start();
 
   postToIsolated({ kind: "participant-joined", platform: cfg.platform, participantId, generation, displayName });
-  console.log(
-    `[ears] +track → ${participantId} (gen ${generation})` +
+  console.debug(
+    `[ears][capture] +track → ${participantId} (gen ${generation})` +
       `${displayName ? ` "${displayName}"` : ""} — ${pipelines.size} live`,
   );
 
@@ -164,8 +196,8 @@ function startPipeline(
   // resurrect a dead entry.
   const end = () => stopPipeline(track);
   track.addEventListener("ended", end);
-  track.addEventListener("mute", () => console.log(`[ears] mute → ${participantId}`));
-  track.addEventListener("unmute", () => console.log(`[ears] unmute → ${participantId}`));
+  track.addEventListener("mute", () => console.debug(`[ears][capture] mute → ${participantId}`));
+  track.addEventListener("unmute", () => console.debug(`[ears][capture] unmute → ${participantId}`));
 }
 
 function stopPipeline(track: MediaStreamTrack): void {
@@ -174,7 +206,7 @@ function stopPipeline(track: MediaStreamTrack): void {
   pipelines.delete(track);
   pipeline.stop();
   postToIsolated({ kind: "participant-left", participantId: pipeline.participantId, generation: pipeline.generation });
-  console.log(`[ears] -track → ${pipeline.participantId} (gen ${pipeline.generation}) — ${pipelines.size} live`);
+  console.debug(`[ears][capture] -track → ${pipeline.participantId} (gen ${pipeline.generation}) — ${pipelines.size} live`);
 }
 
 function teardownAll(): void {
@@ -282,12 +314,106 @@ type FrameSourceFactory = (
 ) => FrameSource;
 
 /** One track → its own frame source, resampler, ring buffer, and PCM emitter. */
+// A track that unmutes but never yields a decoded frame is the silent-capture
+// failure (journal #72): on Meet the encoded-audio tee may never wrap the
+// receiver, so the decoder is fed nothing and the whole call records silence
+// while +track/unmute/identity all still look healthy. The grace window covers
+// the ~1-frame latency between an unmute and the first decoded frame with wide
+// margin, so a brief blip never false-positives.
+export const SILENT_CAPTURE_GRACE_MS = 4_000;
+
+/**
+ * Decide how to surface a track that unmuted but produced no decoded frame.
+ * Meet delivers no audio for an unmuted-but-silent participant (DTX / noise
+ * suppression), so "no frames" alone is NOT proof of breakage. Escalate to a
+ * loud warning only when nothing has decoded anywhere on the call
+ * (`anyAudioThisCall === false`) — the same condition the call-level tee
+ * watchdog flags. If other participants are being captured, this one is simply
+ * quiet: a benign info note, never a scary ⚠ (journal #67: quiet ≠ broken).
+ */
+export function silentReport(
+  participantId: ParticipantId,
+  platform: Platform | undefined,
+  anyAudioThisCall: boolean,
+  graceMs: number,
+): { level: "warn" | "info"; text: string } {
+  const secs = Math.round(graceMs / 1000);
+  if (anyAudioThisCall) {
+    return {
+      level: "info",
+      text:
+        `${participantId} unmuted but no audio decoded in ${secs}s` +
+        " — likely silent or noise-suppressed (other participants are being captured)",
+    };
+  }
+  const hint =
+    platform === "meet"
+      ? " — Meet exposes no decodable track audio, so no encoded frames reached the decoder" +
+        " (createEncodedStreams not intercepted, or Meet changed its audio pipeline)." +
+        " Reload the tab to re-arm."
+      : "";
+  return {
+    level: "warn",
+    text: `⚠ ${participantId} unmuted but no audio decoded in ${secs}s — capture is SILENT for this participant${hint}`,
+  };
+}
+
+/**
+ * Per-track detector for the silent-capture failure. `armOnUnmute()` starts a
+ * one-shot timer; unless `noteFrame()` lands before it fires, `onSilent` runs
+ * once (latched for the track's life). Kept free of TrackCapture's
+ * window/postMessage wiring so it unit-tests under fake timers.
+ */
+export class SilentCaptureWatchdog {
+  private firstFrameSeen = false;
+  private reported = false;
+  private timer?: ReturnType<typeof setTimeout>;
+
+  constructor(
+    private readonly onSilent: (graceMs: number) => void,
+    private readonly graceMs: number = SILENT_CAPTURE_GRACE_MS,
+  ) {}
+
+  /** The track unmuted — a decoded frame must follow. Arm once; ignore repeat
+   * unmutes and any unmute after a frame already proved capture live. */
+  armOnUnmute(): void {
+    if (this.firstFrameSeen || this.reported || this.timer !== undefined) return;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      if (this.firstFrameSeen || this.reported) return;
+      this.reported = true;
+      this.onSilent(this.graceMs);
+    }, this.graceMs);
+  }
+
+  /** A decoded frame arrived — capture is live; cancel the watchdog for good. */
+  noteFrame(): void {
+    if (this.firstFrameSeen) return;
+    this.firstFrameSeen = true;
+    this.clearTimer();
+  }
+
+  stop(): void {
+    this.clearTimer();
+  }
+
+  private clearTimer(): void {
+    if (this.timer !== undefined) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+  }
+}
+
 class TrackCapture {
   private stopped = false;
   private resampler?: LinearResampler;
   private readonly acc: number[] = []; // 16 kHz mono float, awaiting a full frame
   private readonly ring: RingBuffer;
   private source?: FrameSource;
+  private firstFrameSeen = false;
+  private readonly silentWatchdog: SilentCaptureWatchdog;
+  private unmuteHandler?: () => void;
   // Debug-only state — see DEBUG_AUDIO above.
   private vSum = 0;
   private vPeak = 0;
@@ -304,6 +430,12 @@ class TrackCapture {
   ) {
     this.ring = new RingBuffer(RING_CAPACITY, participantId);
     this.trackId = track.id;
+    this.silentWatchdog = new SilentCaptureWatchdog((graceMs) => this.reportSilent(graceMs));
+  }
+
+  /** Whether at least one audio frame has decoded on this track (debug report). */
+  get receiving(): boolean {
+    return this.firstFrameSeen;
   }
 
   start(): void {
@@ -312,21 +444,53 @@ class TrackCapture {
       (reason) => this.fail(reason),
     );
     this.source.start();
+    // An unmute means the platform says this participant is producing audio now,
+    // so a decoded frame must follow; if none does, capture is silently dropping
+    // them (journal #72). Arm on unmute, not on start — a genuinely quiet
+    // participant yields no frames and that is not a failure.
+    this.unmuteHandler = () => this.silentWatchdog.armOnUnmute();
+    this.track.addEventListener("unmute", this.unmuteHandler);
   }
 
   stop(): void {
     if (this.stopped) return;
     this.stopped = true;
+    if (this.unmuteHandler) {
+      this.track.removeEventListener("unmute", this.unmuteHandler);
+      this.unmuteHandler = undefined;
+    }
+    this.silentWatchdog.stop();
     this.source?.stop();
   }
 
   private fail(reason: string): void {
-    console.error(`[ears] ${this.participantId} capture failed: ${reason}`);
+    console.error(`[ears][capture] ${this.participantId} capture failed: ${reason}`);
     this.stop();
     this.onFatal();
   }
 
+  /** The silent-capture watchdog fired: this participant unmuted but no decoded
+   * frame ever arrived. Loud console error plus a `status` line the isolated-
+   * world relay logs (and can surface in the popup/daemon). See journal #72. */
+  private reportSilent(graceMs: number): void {
+    const report = silentReport(this.participantId, cfg?.platform, anyAudioDecodedThisCall, graceMs);
+    if (report.level === "warn") {
+      console.error(`[ears][capture] ${report.text}`);
+      postToIsolated({ kind: "status", text: report.text });
+    } else {
+      // Benign: the pipeline works, this participant is just quiet. Keep it low
+      // so it never reads as a failure to a user scanning the console.
+      console.debug(`[ears][capture] ${report.text}`);
+    }
+  }
+
   private consume(frame: AudioDataLike): void {
+    if (!this.firstFrameSeen) {
+      this.firstFrameSeen = true;
+      anyAudioDecodedThisCall = true;
+      this.silentWatchdog.noteFrame();
+      console.debug(`[ears][capture] ✓ ${this.participantId} first audio frame — capture confirmed live`);
+    }
     const inRate = frame.sampleRate;
     const nFrames = frame.numberOfFrames;
     const nCh = frame.numberOfChannels;
@@ -406,8 +570,8 @@ class TrackCapture {
         framePeak: Number(framePeak.toFixed(4)),
       };
       audioLog().push(entry);
-      console.log(
-        `[ears/audio] ${entry.iso} ${this.participantId} (track ${this.trackId}) speaking-${entry.state} peak=${entry.framePeak}`,
+      console.debug(
+        `[ears][debug][audio] ${entry.iso} ${this.participantId} (track ${this.trackId}) speaking-${entry.state} peak=${entry.framePeak}`,
       );
     }
   }
@@ -424,8 +588,8 @@ class TrackCapture {
 
     if (this.vCount >= inRate) {
       const rms = Math.sqrt(this.vSum / this.vCount);
-      console.log(
-        `[ears/debug] ${this.participantId} rms=${rms.toFixed(4)} peak=${this.vPeak.toFixed(4)} ` +
+      console.debug(
+        `[ears][debug][audio] ${this.participantId} rms=${rms.toFixed(4)} peak=${this.vPeak.toFixed(4)} ` +
           `(${this.vPeak > 0.005 ? "AUDIO" : "silent"})`,
       );
       this.vSum = 0;
@@ -659,8 +823,8 @@ export class MeetDecodeSource implements FrameSource {
   private onDecoderError(reason: string): void {
     if (this.stopped) return;
     if (DEBUG_AUDIO_NOW()) {
-      console.error(
-        `[ears/debug] ${this.track.id} decoder error — last ${this.recentFrames.length} frames fed:`,
+      console.debug(
+        `[ears][debug][audio] ${this.track.id} decoder error — last ${this.recentFrames.length} frames fed:`,
         this.recentFrames,
       );
     }
@@ -674,7 +838,7 @@ export class MeetDecodeSource implements FrameSource {
     }
     this.restarts.push(now);
     this.closeDecoder();
-    console.warn(`[ears] ${this.track.id} decoder restart ${this.restarts.length}/${DECODER_MAX_RESTARTS} after: ${reason}`);
+    console.warn(`[ears][capture] ${this.track.id} decoder restart ${this.restarts.length}/${DECODER_MAX_RESTARTS} after: ${reason}`);
     // Same encoded-audio listener stays attached; onEncodedFrame reads the fresh decoder.
     this.buildDecoder();
   }
@@ -758,7 +922,7 @@ export class RingBuffer {
       this.q.shift();
       this.dropped++;
       if (this.dropped % 50 === 1) {
-        console.warn(`[ears] ring overflow for ${this.label}: dropped ${this.dropped} frame(s)`);
+        console.warn(`[ears][capture] ring overflow for ${this.label}: dropped ${this.dropped} frame(s)`);
       }
     }
     this.q.push(frame);

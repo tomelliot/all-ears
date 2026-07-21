@@ -86,7 +86,7 @@ export class EarsSocket {
   private open(): void {
     // Loopback only — a non-127.0.0.1 host is a bug, not a config.
     if (!this.url.startsWith("ws://127.0.0.1:")) {
-      console.error(`[ears] refusing non-loopback ingest URL: ${this.url}`);
+      console.error(`[ears][transport] refusing non-loopback ingest URL: ${this.url}`);
       return;
     }
     this.setStatus("connecting");
@@ -94,7 +94,7 @@ export class EarsSocket {
     try {
       ws = new WebSocket(this.url);
     } catch (err) {
-      console.error("[ears] WebSocket construct failed:", err);
+      console.error("[ears][transport] WebSocket construct failed:", err);
       this.scheduleReconnect();
       return;
     }
@@ -102,14 +102,14 @@ export class EarsSocket {
     this.ws = ws;
 
     ws.onopen = () => {
-      console.log(`[ears] ingest connected: ${this.url}`);
+      console.debug(`[ears][transport] ingest connected: ${this.url}`);
       this.backoff = BASE_BACKOFF_MS;
       // stream_ids are per-connection; a fresh connection re-opens lazily.
       this.resetState();
       this.setStatus("connected");
     };
     ws.onmessage = (e) => this.onControlResponse(e.data);
-    ws.onerror = () => console.warn("[ears] ingest socket error");
+    ws.onerror = () => console.warn("[ears][transport] ingest socket error");
     ws.onclose = () => {
       if (this.ws === ws) this.ws = undefined;
       this.setStatus("disconnected");
@@ -176,7 +176,7 @@ export class EarsSocket {
     if (this.ws.bufferedAmount > BUFFERED_AMOUNT_LIMIT) {
       st.dropped++;
       if (st.dropped % 50 === 1) {
-        console.warn(`[ears] back-pressure drop for ${streamId}: ${st.dropped} frame(s)`);
+        console.warn(`[ears][transport] back-pressure drop for ${streamId}: ${st.dropped} frame(s)`);
       }
       return;
     }
@@ -200,14 +200,14 @@ export class EarsSocket {
     if (typeof data !== "string") return; // binary from earsd is unexpected
     const req = this.pending.shift();
     if (!req) {
-      console.warn("[ears] unsolicited control response:", data);
+      console.warn("[ears][transport] unsolicited control response:", data);
       return;
     }
     let parsed: { ok?: boolean; data?: { stream_id?: string }; error?: string };
     try {
       parsed = JSON.parse(data);
     } catch {
-      console.error("[ears] bad control response JSON:", data);
+      console.error("[ears][transport] bad control response JSON:", data);
       return;
     }
 
@@ -227,7 +227,7 @@ export class EarsSocket {
       // No per-frame retry: mark failed and drop this participant's audio.
       st.failed = true;
       st.queue = [];
-      console.warn(`[ears] ingest.open failed for ${req.participantId}: ${parsed.error ?? "unknown"}`);
+      console.warn(`[ears][transport] ingest.open failed for ${req.participantId}: ${parsed.error ?? "unknown"}`);
     }
   }
 
