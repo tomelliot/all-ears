@@ -499,6 +499,46 @@ struct CaptureActorTests {
     await actor.stop()
   }
 
+  @Test("resume() re-anchors the chunk timeline to wall clock across a pause gap")
+  func resumeReanchorsTimelineAcrossGap() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
+    // chunkSeconds == buffer length, so each captured buffer rolls exactly one
+    // chunk; SyntheticCaptureBackend replays its script on every start(), so the
+    // resumed generation delivers another buffer's worth of audio to encode.
+    let actor = try makeActor(
+      dataRoot: dataRoot, clock: clock,
+      buffers: [makeBuffer(seconds: 0.5)], chunkSeconds: 0.5)
+
+    try await actor.start()
+    await actor.drainForTesting()
+
+    // Pause 100s of wall-clock in, resume 60s after that — a gap the
+    // sample-derived timeline would otherwise swallow whole.
+    clock.set(Instant(secondsSinceEpoch: startEpoch + 100))
+    try await actor.pause()
+    clock.set(Instant(secondsSinceEpoch: startEpoch + 160))
+    try await actor.resume()
+    await actor.drainForTesting()
+    await actor.stop()
+
+    let starts = try chunkEvents(dataRoot: dataRoot).compactMap { event -> Instant? in
+      if case .chunk(let start, _, _, _) = event { return start }
+      return nil
+    }
+    // The pre-gap chunk anchors at start; the post-gap chunk must land at the
+    // resume instant (startEpoch + 160), re-tied to wall clock — not continue
+    // the frozen timeline at ~startEpoch + 0.5, which is the ~gap-duration
+    // drift this fix removes.
+    #expect(starts.contains(Instant(secondsSinceEpoch: startEpoch)))
+    #expect(starts.contains(Instant(secondsSinceEpoch: startEpoch + 160)))
+    #expect(
+      !starts.contains {
+        $0 > Instant(secondsSinceEpoch: startEpoch)
+          && $0 < Instant(secondsSinceEpoch: startEpoch + 100)
+      })
+  }
+
   @Test("pause() is idempotent and records only one gap across a double pause")
   func pauseIsIdempotent() async throws {
     let dataRoot = try makeDataRoot()

@@ -300,6 +300,16 @@ public actor CaptureActor {
     }
     pauseStartInstant = nil
 
+    // Re-anchor the encoder's sample-derived timeline to the resume instant so
+    // audio captured after the gap is stamped at real wall-clock time, not
+    // continued from where the timeline froze at pause. Without this, each
+    // pause shifts every later chunk/vad timestamp behind wall clock by the
+    // gap's full duration (a system sleep of hours is the pathological case),
+    // and `transcribe --last Nm` — a wall-clock window — can't find the audio.
+    // The teardown above flushed the encoder, so no in-flight chunk is
+    // mis-stamped. `playhead` picks up the re-anchored start below.
+    await encoder.reanchor(to: resumeTime)
+
     let stream: AsyncStream<AudioBuffer>
     do {
       stream = try await backend.start()

@@ -136,6 +136,30 @@ public actor ChunkEncoder {
     chunkStart
   }
 
+  /// Re-anchors the next chunk's start to `instant`. Called by
+  /// ``CaptureActor/resume()`` after a pause/gap so post-gap audio is stamped
+  /// at real wall-clock time instead of continuing the sample-derived timeline
+  /// from where it froze.
+  ///
+  /// This timeline is `startInstant + Σ(written chunk durations)` — it advances
+  /// only as audio is encoded and never reads a clock (see the type doc). A
+  /// pause therefore freezes it while wall-clock marches on, and without this
+  /// re-anchor a pause of duration D leaves every later chunk stamped D behind
+  /// wall clock, compounding across gaps. A daemon *restart* avoids the drift
+  /// for free by constructing a fresh encoder with `startInstant: clock.now()`;
+  /// pause/resume reuses the same encoder, so it must re-anchor explicitly.
+  ///
+  /// Only valid with no pending buffers — `chunkStart` is the start of the
+  /// in-flight accumulation, so re-anchoring mid-chunk would mis-stamp audio
+  /// already buffered. ``CaptureActor`` flushes the encoder in its pause
+  /// teardown, so the pending set is empty by the time it resumes; a non-empty
+  /// set (an unexpected caller) is left untouched rather than corrupting the
+  /// in-flight chunk.
+  public func reanchor(to instant: Instant) {
+    guard pendingBuffers.isEmpty else { return }
+    chunkStart = instant
+  }
+
   /// Appends one incoming buffer, rolling over to a new chunk once the
   /// accumulated duration reaches `chunkSeconds`.
   ///
