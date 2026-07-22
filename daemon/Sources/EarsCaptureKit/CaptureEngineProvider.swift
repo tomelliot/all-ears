@@ -1,4 +1,6 @@
 import AVFoundation
+import AudioToolbox
+import CoreAudio
 import os
 
 /// Supplies the `AVAudioEngine` graph that ``MicCaptureBackend`` taps.
@@ -40,18 +42,30 @@ public final class CaptureEngine {
   public let tapFormat: AVAudioFormat
   public let mode: Mode
 
+  /// `true` when this engine had its input bound to an explicit HAL device (not
+  /// the system default). Binding provokes one *self-induced*
+  /// `AVAudioEngineConfigurationChange` shortly after start; the backend uses
+  /// this flag to know it must **suppress** that first change rather than
+  /// rebuild on it — rebuilding mid-bind is the `AVAudioIOUnit` use-after-free
+  /// that crashed the first attempt (see ``RealMicSourceProvider`` and commit
+  /// `a2f01f9`). `false` for the system-default and synthetic paths, which
+  /// induce no such change.
+  public let boundInputDevice: Bool
+
   public init(
     engine: AVAudioEngine,
     tapNode: AVAudioNode,
     tapBus: AVAudioNodeBus,
     tapFormat: AVAudioFormat,
-    mode: Mode
+    mode: Mode,
+    boundInputDevice: Bool = false
   ) {
     self.engine = engine
     self.tapNode = tapNode
     self.tapBus = tapBus
     self.tapFormat = tapFormat
     self.mode = mode
+    self.boundInputDevice = boundInputDevice
   }
 
   /// Prepare and start the engine. Required before ``render(frames:)`` in
@@ -102,6 +116,19 @@ public enum CaptureEngineError: Error, Sendable {
 /// best-effort: if no device matches, or binding fails, the engine falls back to
 /// the system default input, exactly as before.
 ///
+/// **Crash-safe binding.** The bind sets the HAL device on the input node's
+/// audio unit (`kAudioOutputUnitProperty_CurrentDevice`) on a **fresh,
+/// not-yet-started** engine, *before* the tap is installed and `start()` is
+/// called — never on a live input node via `AUAudioUnit.setDeviceID`, which
+/// crashed AVFoundation: the device/format change it induced fired
+/// `AVAudioIOUnit`'s internal property listener, which raced the engine teardown
+/// that ``MicCaptureBackend``'s route-change/stall rebuild performs and messaged
+/// a freed engine (`EXC_BAD_ACCESS`; commit `a2f01f9`). Setting the device at
+/// construction still provokes one self-induced `AVAudioEngineConfigurationChange`
+/// once the engine starts, so ``makeCaptureEngine()`` flags the returned engine
+/// (``CaptureEngine/boundInputDevice``) and ``MicCaptureBackend`` suppresses that
+/// first change within a short settle window rather than rebuilding on it.
+///
 /// Constructing this and calling `makeCaptureEngine()` does **not** prompt for or
 /// begin microphone capture — that happens only when the backend calls
 /// ``CaptureEngine/start()`` on the returned engine, which is gated by a TCC grant
@@ -136,35 +163,62 @@ public struct RealMicSourceProvider: CaptureEngineProvider {
   public func makeCaptureEngine() throws -> CaptureEngine {
     let engine = AVAudioEngine()
     let input = engine.inputNode
-    logIntendedInputDevice()
+    let boundInputDevice = bindInputDevice(on: input)
+    // The bound device dictates the input node's output format, so read it
+    // *after* binding; the tap must be installed at the device's real rate.
     let format = input.outputFormat(forBus: 0)
     return CaptureEngine(
-      engine: engine, tapNode: input, tapBus: 0, tapFormat: format, mode: .realtime)
+      engine: engine, tapNode: input, tapBus: 0, tapFormat: format, mode: .realtime,
+      boundInputDevice: boundInputDevice)
   }
 
-  /// **Device binding is disabled.** Binding the input node to a chosen device
-  /// via `AUAudioUnit.setDeviceID` crashed AVFoundation: the device/format change
-  /// it induces fires `AVAudioIOUnit`'s internal property listener, which races
-  /// the engine teardown that ``MicCaptureBackend``'s route-change/stall rebuild
-  /// performs and messages a freed engine — `EXC_BAD_ACCESS` in
-  /// `AVAudioIOUnit::IOUnitPropertyListener`, a ~10 s restart loop that flapped a
-  /// connected Bluetooth headset between A2DP and HFP on every relaunch.
+  /// The input device this provider would bind, applying ``InputDeviceSelection``
+  /// to the current device list — or `nil` to leave the engine on the system
+  /// default. Pure (no `AVAudioEngine`, no live audio); the seam a fake
+  /// enumerator drives to assert the built-in mic is preferred over Bluetooth.
+  func resolvedInputDevice() -> AudioInputDevice? {
+    InputDeviceSelection.choose(
+      from: enumerator.inputDevices(),
+      preferredUID: deviceUID,
+      preferBuiltIn: preferBuiltIn)
+  }
+
+  /// Bind `input` to the resolved device (if any) **before** the engine starts
+  /// and before any tap is installed — the crash-safe shape: set the HAL device
+  /// on the not-yet-running unit via `kAudioOutputUnitProperty_CurrentDevice`,
+  /// never override a live node with `AUAudioUnit.setDeviceID` (which crashed
+  /// AVFoundation; see this type's doc comment and commit `a2f01f9`).
   ///
-  /// Until a crash-safe device-selection path exists (selecting the HAL device
-  /// out-of-band from `AVAudioEngine`, rather than overriding a live input node),
-  /// capture stays on the system default input. ``InputDeviceSelection`` and
-  /// ``CoreAudioInputDeviceEnumerator`` are kept — read-only and safe — so the
-  /// resolved choice is logged for diagnostics and the reselection can be rebuilt
-  /// on top of them.
-  private func logIntendedInputDevice() {
-    guard
-      let chosen = InputDeviceSelection.choose(
-        from: enumerator.inputDevices(),
-        preferredUID: deviceUID,
-        preferBuiltIn: preferBuiltIn)
-    else { return }
+  /// Returns whether a device was actually bound, so the backend knows to expect
+  /// — and suppress — the self-induced configuration change the bind provokes.
+  /// Best-effort throughout: an absent selection, an inaccessible audio unit, or
+  /// a failed HAL set all leave capture on the system default input rather than
+  /// failing to start.
+  private func bindInputDevice(on input: AVAudioInputNode) -> Bool {
+    guard let chosen = resolvedInputDevice() else { return false }
+    guard let unit = input.audioUnit else {
+      Self.log.error(
+        "mic capture could not access the input audio unit to bind device \(chosen.name, privacy: .public); using system default input"
+      )
+      return false
+    }
+    var deviceID: AudioDeviceID = chosen.id
+    let status = AudioUnitSetProperty(
+      unit,
+      kAudioOutputUnitProperty_CurrentDevice,
+      kAudioUnitScope_Global,
+      0,
+      &deviceID,
+      UInt32(MemoryLayout<AudioDeviceID>.size))
+    guard status == noErr else {
+      Self.log.error(
+        "mic capture failed to bind input device \(chosen.name, privacy: .public) (uid \(chosen.uid, privacy: .public)): OSStatus \(status, privacy: .public); using system default input"
+      )
+      return false
+    }
     Self.log.notice(
-      "mic capture would prefer input device \(chosen.name, privacy: .public) (uid \(chosen.uid, privacy: .public)); device binding disabled — using system default input"
+      "mic capture bound input device \(chosen.name, privacy: .public) (uid \(chosen.uid, privacy: .public)); a connected Bluetooth headset stays in A2DP"
     )
+    return true
   }
 }

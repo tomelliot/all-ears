@@ -27,11 +27,16 @@ final class SyntheticSourceNodeProvider: CaptureEngineProvider {
   /// modelling an input device that changes rate on a route change. Hz as an
   /// `Int` because `Double` isn't `AtomicRepresentable`.
   private let sampleRateHz: Atomic<Int>
+  /// Whether the engines this provider hands back report having bound an input
+  /// device, so a test can exercise ``MicCaptureBackend``'s bind-settle-window
+  /// suppression without real Core Audio device binding.
+  private let boundInputDevice: Bool
   private let framesProduced = FrameCounter()
 
-  init(sampleValue: Float = 0.5, sampleRate: Double = 48_000) {
+  init(sampleValue: Float = 0.5, sampleRate: Double = 48_000, boundInputDevice: Bool = false) {
     self.sampleValue = sampleValue
     self.sampleRateHz = Atomic<Int>(Int(sampleRate))
+    self.boundInputDevice = boundInputDevice
   }
 
   /// The rate the next rebuild will synthesise at.
@@ -70,7 +75,8 @@ final class SyntheticSourceNodeProvider: CaptureEngineProvider {
     engine.connect(source, to: engine.mainMixerNode, format: format)
     try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4096)
     return CaptureEngine(
-      engine: engine, tapNode: source, tapBus: 0, tapFormat: format, mode: .offlineManual)
+      engine: engine, tapNode: source, tapBus: 0, tapFormat: format, mode: .offlineManual,
+      boundInputDevice: boundInputDevice)
   }
 }
 

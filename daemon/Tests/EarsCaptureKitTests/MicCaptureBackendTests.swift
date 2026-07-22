@@ -1,5 +1,6 @@
 import AVFoundation
 import EarsCore
+import EarsCoreTestSupport
 import Testing
 
 @testable import EarsCaptureKit
@@ -119,6 +120,65 @@ struct MicCaptureBackendTests {
     }
     await backend.stop()
     #expect(collected >= 2048)
+  }
+
+  @Test(
+    "a self-induced configuration change within the bind settle window is suppressed",
+    .timeLimit(.minutes(1)))
+  func bindSettleWindowSuppressesSelfInducedChange() async throws {
+    // A provider whose engines report having bound an input device: the backend
+    // must ignore the self-induced configuration change that binding provokes,
+    // within `bindSettleSeconds` of the build, rather than rebuild on it (the
+    // AVAudioIOUnit use-after-free the settle window exists to avoid).
+    let clock = ManualClock(Instant(secondsSinceEpoch: 100))
+    let provider = SyntheticSourceNodeProvider(boundInputDevice: true)
+    let config = MicCaptureBackend.Config(
+      drainPollInterval: .milliseconds(1),
+      routeChangeDebounce: .milliseconds(1),
+      bindSettleSeconds: 1.5,
+      enableStallWatchdog: false)
+    let backend = MicCaptureBackend(
+      source: "mic", provider: provider, clock: clock, config: config)
+    _ = try await backend.start()
+    let generationAtStart = await backend.currentInstallGeneration
+
+    // Inside the settle window (deadline = 100 + 1.5): suppressed, no rebuild.
+    clock.set(Instant(secondsSinceEpoch: 101.0))
+    await backend.handleConfigurationChangeForTesting()
+    #expect(await backend.currentInstallGeneration == generationAtStart)
+
+    // Past the settle window: a genuine change rebuilds, bumping the generation.
+    clock.set(Instant(secondsSinceEpoch: 102.0))
+    await backend.handleConfigurationChangeForTesting()
+    #expect(await backend.currentInstallGeneration != generationAtStart)
+
+    await backend.stop()
+  }
+
+  @Test(
+    "with no device bound, an early configuration change still rebuilds (no suppression)",
+    .timeLimit(.minutes(1)))
+  func noSuppressionWhenNoDeviceBound() async throws {
+    // The default synthetic provider binds no device, so there is no
+    // self-induced change to suppress: even an immediate configuration change
+    // must rebuild, exactly as the system-default path behaves.
+    let clock = ManualClock(Instant(secondsSinceEpoch: 100))
+    let provider = SyntheticSourceNodeProvider()
+    let config = MicCaptureBackend.Config(
+      drainPollInterval: .milliseconds(1),
+      routeChangeDebounce: .milliseconds(1),
+      bindSettleSeconds: 1.5,
+      enableStallWatchdog: false)
+    let backend = MicCaptureBackend(
+      source: "mic", provider: provider, clock: clock, config: config)
+    _ = try await backend.start()
+    let generationAtStart = await backend.currentInstallGeneration
+
+    // Same instant as the build, but nothing was bound: not suppressed.
+    await backend.handleConfigurationChangeForTesting()
+    #expect(await backend.currentInstallGeneration != generationAtStart)
+
+    await backend.stop()
   }
 
   @Test(
