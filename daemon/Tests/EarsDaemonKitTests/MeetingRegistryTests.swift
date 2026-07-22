@@ -292,6 +292,36 @@ struct MeetingRegistryTests {
     #expect(hookCount.withLock { $0 } == 1)
   }
 
+  // MARK: - meeting-scoped capture
+
+  @Test("capture starts on meeting start and stops on meeting end")
+  func meetingScopesCapture() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let startCalls = Mutex<[[SourceID]]>([])
+    let stopCalls = Mutex<[[SourceID]]>([])
+    let ids = Mutex(0)
+    let registry = MeetingRegistry(
+      dataRoot: dataRoot,
+      clock: clock,
+      makeID: {
+        ids.withLock { next in
+          next += 1
+          return "meeting-\(next)"
+        }
+      },
+      startCapture: { _, sources in startCalls.withLock { $0.append(sources) } },
+      stopCapture: { _, sources in stopCalls.withLock { $0.append(sources) } })
+
+    let meeting = try await registry.start(
+      MeetingStartParams(title: "standup", sources: ["mic"]))
+    #expect(startCalls.withLock { $0 } == [["mic"]])
+    #expect(stopCalls.withLock { $0 }.isEmpty)
+
+    _ = try await registry.end(id: meeting.id)
+    #expect(stopCalls.withLock { $0 } == [["mic"]])
+  }
+
   // MARK: - rename / attendee
 
   @Test("rename is a compare-and-set under if_rev")
