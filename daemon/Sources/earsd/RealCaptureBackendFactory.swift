@@ -61,9 +61,8 @@ func realCaptureBackendFactory() -> CaptureBackendFactory {
       switch descriptor.sourceClass {
       case .mic:
         // Pass the configured device UID through; with none set,
-        // RealMicSourceProvider prefers the built-in mic over the system
-        // default input, so a connected Bluetooth headset is never captured
-        // (and so never forced off A2DP) unless explicitly named.
+        // RealMicSourceProvider follows the system default input (whatever the
+        // user has selected, Bluetooth included).
         return MicCaptureBackend(
           source: descriptor.id,
           provider: RealMicSourceProvider(deviceUID: descriptor.deviceUID))
