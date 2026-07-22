@@ -805,7 +805,7 @@ public actor EarsDaemon {
   /// the ``PowerObserver``'s live view — read on each sleep/wake transition so
   /// it pauses/resumes exactly what a meeting is recording right now.
   private func currentPausables() -> [any SuspendablePauseResume] {
-    Array(captureActors.values)
+    captureActors.values.map { $0 as any SuspendablePauseResume }
   }
 
   // MARK: - Meeting-scoped capture
