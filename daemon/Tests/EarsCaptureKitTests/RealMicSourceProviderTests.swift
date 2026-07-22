@@ -18,40 +18,30 @@ struct RealMicSourceProviderTests {
     func inputDevices() -> [AudioInputDevice] { devices }
   }
 
-  private func device(id: AudioObjectID, uid: String, transport: UInt32) -> AudioInputDevice {
-    AudioInputDevice(id: id, uid: uid, name: uid, transportType: transport)
+  private func device(id: AudioObjectID, uid: String) -> AudioInputDevice {
+    AudioInputDevice(id: id, uid: uid, name: uid)
   }
 
-  private var builtIn: AudioInputDevice {
-    device(id: 1, uid: "BuiltInMicrophoneDevice", transport: kAudioDeviceTransportTypeBuiltIn)
-  }
-  private var bluetooth: AudioInputDevice {
-    device(id: 2, uid: "AirPods-Pro", transport: kAudioDeviceTransportTypeBluetooth)
-  }
+  private var builtIn: AudioInputDevice { device(id: 1, uid: "BuiltInMicrophoneDevice") }
+  private var bluetooth: AudioInputDevice { device(id: 2, uid: "AirPods-Pro") }
 
-  @Test("resolves the built-in mic over a connected Bluetooth headset")
-  func prefersBuiltInOverBluetooth() {
+  @Test("with no explicit device UID, resolves nil so capture follows the system default input")
+  func noUIDResolvesSystemDefault() {
     let provider = RealMicSourceProvider(enumerator: FakeEnumerator(devices: [bluetooth, builtIn]))
-    #expect(provider.resolvedInputDevice() == builtIn)
+    #expect(provider.resolvedInputDevice() == nil)
   }
 
-  @Test("an explicit device UID is honoured even when it is Bluetooth")
+  @Test("an explicit device UID is honoured, even when it is a Bluetooth device")
   func explicitBluetoothUIDHonoured() {
     let provider = RealMicSourceProvider(
       deviceUID: "AirPods-Pro", enumerator: FakeEnumerator(devices: [builtIn, bluetooth]))
     #expect(provider.resolvedInputDevice() == bluetooth)
   }
 
-  @Test("with preferBuiltIn disabled and no explicit UID, resolves nil (system default)")
-  func noPreferenceResolvesNil() {
+  @Test("an explicit device UID that is not present resolves nil (system default)")
+  func absentUIDResolvesSystemDefault() {
     let provider = RealMicSourceProvider(
-      preferBuiltIn: false, enumerator: FakeEnumerator(devices: [builtIn, bluetooth]))
-    #expect(provider.resolvedInputDevice() == nil)
-  }
-
-  @Test("with only a Bluetooth input present and no explicit UID, resolves nil (system default)")
-  func bluetoothOnlyResolvesNil() {
-    let provider = RealMicSourceProvider(enumerator: FakeEnumerator(devices: [bluetooth]))
+      deviceUID: "Not-Connected", enumerator: FakeEnumerator(devices: [builtIn, bluetooth]))
     #expect(provider.resolvedInputDevice() == nil)
   }
 }
