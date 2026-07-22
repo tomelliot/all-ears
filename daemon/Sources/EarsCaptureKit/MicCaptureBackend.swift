@@ -31,6 +31,16 @@ public actor MicCaptureBackend: CaptureBackend, CaptureStatsReporting {
     /// Coalescing window for a flurry of configuration-change notifications
     /// (Bluetooth route flaps), so a burst triggers one rebuild.
     public var routeChangeDebounce: Duration
+    /// Seconds after a (re)build during which a configuration-change
+    /// notification is treated as the *self-induced* change that binding the
+    /// input device provokes, and ignored rather than rebuilt on. Only applies
+    /// when the built engine actually bound a device
+    /// (``CaptureEngine/boundInputDevice``). Must comfortably exceed
+    /// `routeChangeDebounce` so the debounced rebuild never fires before the
+    /// window is judged. Rebuilding *on* the self-induced change is the
+    /// `AVAudioIOUnit` use-after-free that crashed the first attempt
+    /// (commit `a2f01f9`); this window is what keeps the bind crash-safe.
+    public var bindSettleSeconds: Double
     /// Whether the stall watchdog is armed (real-time engines only).
     public var enableStallWatchdog: Bool
     /// How often the watchdog checks for a stall.
@@ -45,6 +55,7 @@ public actor MicCaptureBackend: CaptureBackend, CaptureStatsReporting {
       drainPollInterval: Duration = .milliseconds(5),
       backoff: ExponentialBackoff = ExponentialBackoff(),
       routeChangeDebounce: Duration = .milliseconds(500),
+      bindSettleSeconds: Double = 1.5,
       enableStallWatchdog: Bool = true,
       stallCheckInterval: Duration = .seconds(2),
       stallThresholdSeconds: Double = 5
@@ -54,6 +65,7 @@ public actor MicCaptureBackend: CaptureBackend, CaptureStatsReporting {
       self.drainPollInterval = drainPollInterval
       self.backoff = backoff
       self.routeChangeDebounce = routeChangeDebounce
+      self.bindSettleSeconds = bindSettleSeconds
       self.enableStallWatchdog = enableStallWatchdog
       self.stallCheckInterval = stallCheckInterval
       self.stallThresholdSeconds = stallThresholdSeconds
@@ -81,6 +93,11 @@ public actor MicCaptureBackend: CaptureBackend, CaptureStatsReporting {
   private var observerToken: (any NSObjectProtocol)?
   private var routeChangeEpoch = 0
   private var isRunning = false
+  /// While set and in the future, a configuration-change notification is the
+  /// self-induced change from binding the input device and is ignored (see
+  /// ``Config/bindSettleSeconds``). `nil` when the current engine bound no
+  /// device, so genuine route changes are never suppressed on that engine.
+  private var configChangeSettleDeadline: Instant?
 
   public init(
     source: SourceID = "mic",
@@ -157,6 +174,12 @@ public actor MicCaptureBackend: CaptureBackend, CaptureStatsReporting {
     startedAt = clock.now()
     heartbeat.reset()
     engine = captureEngine
+    // Arm (or clear) the bind settle window *before* the observer exists, so the
+    // self-induced configuration change a device bind provokes is suppressed
+    // however soon it arrives. Re-armed on every (re)build because each fresh
+    // engine re-binds and re-provokes the change.
+    configChangeSettleDeadline =
+      captureEngine.boundInputDevice ? clock.now().advanced(by: config.bindSettleSeconds) : nil
     registerConfigurationChangeObserver(for: captureEngine)
   }
 
@@ -243,6 +266,17 @@ public actor MicCaptureBackend: CaptureBackend, CaptureStatsReporting {
 
   /// Debounce a flurry of route-change notifications into a single rebuild.
   private func handleConfigurationChange() async {
+    // Suppress the self-induced change from binding the input device: within the
+    // settle window after a build, rebuilding would tear the just-built engine
+    // down while AVFoundation's internal `AVAudioIOUnit` property listener is
+    // still mid-flight — the use-after-free that crashed the first attempt
+    // (commit `a2f01f9`). Judge arrival time (now), not post-debounce time.
+    if let deadline = configChangeSettleDeadline, clock.now() < deadline {
+      Self.log.notice(
+        "capture source \(self.source.rawValue, privacy: .public) ignoring self-induced configuration change within the input-device bind settle window"
+      )
+      return
+    }
     routeChangeEpoch += 1
     let epoch = routeChangeEpoch
     try? await Task.sleep(for: config.routeChangeDebounce)
@@ -316,6 +350,14 @@ public actor MicCaptureBackend: CaptureBackend, CaptureStatsReporting {
   /// so tests can assert rebuild behaviour without wall-clock waits.
   func simulateRouteChangeForTesting() async {
     await rebuildWithBackoff()
+  }
+
+  /// Drive the real configuration-change handler (the debounce + bind-settle
+  /// suppression path the `AVAudioEngineConfigurationChange` observer invokes),
+  /// so a test can assert the settle window with a ``ManualClock`` — a rebuild
+  /// bumps ``currentInstallGeneration``; a suppressed change leaves it unchanged.
+  func handleConfigurationChangeForTesting() async {
+    await handleConfigurationChange()
   }
 
   /// The generation a freshly-installed tap would have to match to be accepted.
