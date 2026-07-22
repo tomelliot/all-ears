@@ -15,17 +15,19 @@ struct InputDeviceSelectionTests {
 
   @Test("an explicitly configured UID selects that device")
   func explicitUIDSelected() {
-    let chosen = InputDeviceSelection.choose(from: [builtIn, bluetooth, usb], preferredUID: "USB-Mic")
+    let chosen = InputDeviceSelection.choose(
+      from: [builtIn, bluetooth, usb], preferredUID: "USB-Mic")
     #expect(chosen == usb)
   }
 
   @Test("an explicit UID is honoured regardless of the device's transport (Bluetooth included)")
   func explicitBluetoothIsHonoured() {
-    let chosen = InputDeviceSelection.choose(from: [builtIn, bluetooth], preferredUID: "AirPods-Pro")
+    let chosen = InputDeviceSelection.choose(
+      from: [builtIn, bluetooth], preferredUID: "AirPods-Pro")
     #expect(chosen == bluetooth)
   }
 
-  @Test("with no configured UID, selection yields nil so the engine follows the system default input")
+  @Test("with no configured UID, selection yields nil so the engine follows the system default")
   func noUIDYieldsSystemDefault() {
     let chosen = InputDeviceSelection.choose(from: [bluetooth, builtIn], preferredUID: "")
     #expect(chosen == nil)
@@ -33,7 +35,8 @@ struct InputDeviceSelectionTests {
 
   @Test("a configured UID that is not present yields nil (system default), not a substitute device")
   func absentUIDYieldsSystemDefault() {
-    let chosen = InputDeviceSelection.choose(from: [builtIn, bluetooth], preferredUID: "Not-Connected")
+    let chosen = InputDeviceSelection.choose(
+      from: [builtIn, bluetooth], preferredUID: "Not-Connected")
     #expect(chosen == nil)
   }
 
