@@ -73,7 +73,9 @@ struct CaptureActorTests {
   ) throws -> CaptureActor {
     let descriptor = makeDescriptor(timeCapSeconds: timeCapSeconds)
     let indexAppender = IndexAppender(
-      fileURL: DataStoreLayout.indexFile(dataRoot: dataRoot, sourceID: descriptor.id))
+      fileURL: DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: descriptor.id))
+    let vadWriter = VADSegmentWriter(
+      directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: descriptor.id))
     let encoder = try ChunkEncoder(
       sourceID: descriptor.id,
       dataRoot: dataRoot,
@@ -92,6 +94,7 @@ struct CaptureActorTests {
       backend: backend ?? SyntheticCaptureBackend(source: descriptor.id, buffers: buffers),
       encoder: encoder,
       indexAppender: indexAppender,
+      vadWriter: vadWriter,
       vad: EnergyVAD(),
       clock: clock,
       eventSink: eventSink,
@@ -99,13 +102,25 @@ struct CaptureActorTests {
     )
   }
 
+  /// Merges the split logs — structural `chunks.jsonl` plus every VAD segment —
+  /// back into one event list, so assertions can look for chunk/gap/evict *and*
+  /// vad events exactly as they did against the old single index.
   private func indexEvents(dataRoot: URL) throws -> [IndexEvent] {
-    let indexURL = DataStoreLayout.indexFile(dataRoot: dataRoot, sourceID: "mic")
-    guard FileManager.default.fileExists(atPath: indexURL.path) else { return [] }
-    let contents = try String(contentsOf: indexURL, encoding: .utf8)
-    let parsed = IndexLog.parse(contents)
-    #expect(parsed.malformedLines.isEmpty)
-    return parsed.events
+    var events: [IndexEvent] = []
+    let structuralURL = DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: "mic")
+    if FileManager.default.fileExists(atPath: structuralURL.path) {
+      let parsed = IndexLog.parse(try String(contentsOf: structuralURL, encoding: .utf8))
+      #expect(parsed.malformedLines.isEmpty)
+      events.append(contentsOf: parsed.events)
+    }
+    for segment in VADSegmentStore.segmentURLs(
+      directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: "mic"))
+    {
+      let parsed = IndexLog.parse(try String(contentsOf: segment.url, encoding: .utf8))
+      #expect(parsed.malformedLines.isEmpty)
+      events.append(contentsOf: parsed.events)
+    }
+    return events.sorted { $0.start < $1.start }
   }
 
   private func chunkEvents(dataRoot: URL) throws -> [IndexEvent] {

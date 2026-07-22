@@ -14,7 +14,9 @@ This document defines the on-disk contract. Because the ring buffer layout *is* 
         2026-07-17T10-30-30Z.<ext>
       asr/                           # derived 16kHz mono feed the transcriber consumes
         2026-07-17T10-30-00Z.<ext>
-      index.jsonl                    # append-only VAD + chunk index (speech/silence spans)
+      chunks.jsonl                   # structural index: chunk/gap/evict, read whole at startup
+      vad/                           # segmented VAD stream (speech/silence spans)
+        2026-07-17T10-30-00Z.jsonl   # one size/time-rotated segment, named by first event
   sessions/
     2026-07-17T10-30-00Z_standup/    # session id: start-timestamp + slug
       session.toml                   # session descriptor (sources, range, trigger, state)
@@ -73,9 +75,14 @@ time_cap_seconds = 7200  # this source's ring-buffer window
 created = "2026-07-17T10-30-00Z"
 ```
 
-## The index (`index.jsonl`)
+## The index (`chunks.jsonl` + `vad/`)
 
-Append-only JSON Lines, one event per line, ordered by time. It maps wall-clock time to audio and records speech activity so transcription can skip silence. Event types:
+The index is split across two logs, both append-only JSON Lines (one event per line, ordered by time), because `vad` events outnumber the rest by roughly 50-to-1 yet are consulted only when reconstructing a specific range:
+
+- **`chunks.jsonl` — the structural log.** `chunk`/`gap`/`evict` events. Small, and read whole at startup to recover the live chunk set. Nothing else is needed to answer "which audio exists".
+- **`vad/<timestamp>.jsonl` — the segmented VAD stream.** `vad` speech/silence spans, written to segments that roll over on a byte cap (~8 MB) or a wall-clock span (~1 h), each named by its first event's start. A range read opens only the segments overlapping the range; eviction drops whole aged-out segments by `unlink`, so this stream stays bounded without ever rewriting a file a `--follow` reader may be tailing.
+
+It maps wall-clock time to audio and records speech activity so transcription can skip silence. Event types:
 
 ```jsonc
 // a written chunk
@@ -92,7 +99,7 @@ Append-only JSON Lines, one event per line, ordered by time. It maps wall-clock 
 {"t":"evict","file":"chunks/2026-07-17T08-30-00Z.m4a","start":"2026-07-17T08:30:00Z"}
 ```
 
-A reader reconstructs available audio for any range from `chunk` events, uses `vad` spans to skip silence, and honours `gap` events as known-missing. Because it is append-only, `tail -f index.jsonl` shows live capture.
+A reader reconstructs available audio for any range from `chunk` events, uses `vad` spans to skip silence, and honours `gap` events as known-missing. Both logs are append-only, so `tail -f chunks.jsonl` and `tail -f vad/*.jsonl` show live capture.
 
 ## Sessions (`session.toml`)
 

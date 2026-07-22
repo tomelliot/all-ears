@@ -50,7 +50,7 @@ struct SegmentedAudioReaderTests {
     try FileManager.default.createDirectory(at: asrDirectory, withIntermediateDirectories: true)
 
     let indexAppender = IndexAppender(
-      fileURL: DataStoreLayout.indexFile(dataRoot: dataRoot, sourceID: "mic"))
+      fileURL: DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: "mic"))
     for chunk in chunks {
       let samples = (0..<chunk.sampleCount).map { Float($0) }
       let data = samples.withUnsafeBufferPointer { Data(buffer: $0) }
@@ -60,9 +60,11 @@ struct SegmentedAudioReaderTests {
           start: instant(chunk.start), end: instant(chunk.end),
           file: "asr/\(chunk.filename)", frames: chunk.sampleCount))
     }
+    let vadWriter = VADSegmentWriter(
+      directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: "mic"))
     for span in vadSpans {
-      try await indexAppender.append(
-        .vad(state: span.state, start: instant(span.start), end: instant(span.end)))
+      try await vadWriter.append(
+        state: span.state, start: instant(span.start), end: instant(span.end))
     }
 
     return Fixture(dataRoot: dataRoot)

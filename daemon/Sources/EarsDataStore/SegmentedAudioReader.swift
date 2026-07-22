@@ -39,12 +39,18 @@ public struct SegmentedAudioReader: Sendable {
   public func slices(source sourceID: SourceID, range requested: TimeRange) throws -> [AudioSlice] {
     let descriptor = try SourceMetaStore.read(sourceID: sourceID, dataRoot: dataRoot)
 
-    let indexURL = DataStoreLayout.indexFile(dataRoot: dataRoot, sourceID: sourceID)
-    let indexContents =
-      FileManager.default.fileExists(atPath: indexURL.path)
-      ? try String(contentsOf: indexURL, encoding: .utf8) : ""
-    let parsed = IndexLog.parse(indexContents)
-    let reconstructed = RangeReconstructor.reconstruct(requested, events: parsed.events)
+    // Structural events (chunk/gap) from chunks.jsonl, VAD spans from just the
+    // segments overlapping the requested range — joined for reconstruction.
+    let structuralURL = DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: sourceID)
+    let structuralContents =
+      FileManager.default.fileExists(atPath: structuralURL.path)
+      ? try String(contentsOf: structuralURL, encoding: .utf8) : ""
+    let structuralEvents = IndexLog.parse(structuralContents).events
+    let vadEvents = VADSegmentStore.events(
+      directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: sourceID),
+      overlapping: requested)
+    let reconstructed = RangeReconstructor.reconstruct(
+      requested, events: structuralEvents + vadEvents)
 
     let windows = NaturalPauseSegmenter.segments(
       vadSpans: reconstructed.vadSpans, rangeDuration: requested.duration,

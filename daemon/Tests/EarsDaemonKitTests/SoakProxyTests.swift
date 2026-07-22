@@ -96,7 +96,9 @@ struct SoakProxyTests {
     let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
     let descriptor = makeDescriptor()
     let indexAppender = IndexAppender(
-      fileURL: DataStoreLayout.indexFile(dataRoot: dataRoot, sourceID: descriptor.id))
+      fileURL: DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: descriptor.id))
+    let vadWriter = VADSegmentWriter(
+      directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: descriptor.id))
     let encoder = try ChunkEncoder(
       sourceID: descriptor.id,
       dataRoot: dataRoot,
@@ -118,6 +120,7 @@ struct SoakProxyTests {
       backend: backend,
       encoder: encoder,
       indexAppender: indexAppender,
+      vadWriter: vadWriter,
       vad: EnergyVAD(),
       clock: clock
     )
@@ -141,7 +144,7 @@ struct SoakProxyTests {
       in: DataStoreLayout.chunksDirectory(dataRoot: dataRoot, sourceID: descriptor.id))
     let bytesUsed = await actor.status().bytesUsed
 
-    let indexURL = DataStoreLayout.indexFile(dataRoot: dataRoot, sourceID: descriptor.id)
+    let indexURL = DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: descriptor.id)
     let contents = try String(contentsOf: indexURL, encoding: .utf8)
     let parsed = IndexLog.parse(contents)
     #expect(parsed.malformedLines.isEmpty)

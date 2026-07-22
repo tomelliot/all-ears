@@ -71,7 +71,7 @@ struct EvictionSweeperTests {
     #expect(try remainingASRFiles(id: id, dataRoot: dataRoot).isEmpty)
     let events = IndexLog.parse(
       try await IndexAppender(
-        fileURL: DataStoreLayout.indexFile(dataRoot: dataRoot, sourceID: id)
+        fileURL: DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: id)
       ).readContents()
     ).events
     #expect(events.count == 3)
