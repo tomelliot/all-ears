@@ -160,7 +160,26 @@ public actor EarsDaemon {
   /// the same stream as everything else, rather than a separate path.
   private let log: @Sendable (String) -> Void
 
+  /// Every source's live ``CaptureActor``. Empty at boot: the daemon builds and
+  /// starts a source's actor only when a meeting that names it starts (config
+  /// sources, via ``startMeetingCapture(meetingID:sources:)``) or on its first
+  /// `ingest.open` (browser sources), and tears it down when the last meeting
+  /// referencing it ends (or its ingest stream closes).
   private var captureActors: [SourceID: CaptureActor]
+  /// The config-declared sources' descriptors, kept for on-demand capture. A
+  /// meeting names a source id; this is where its capture parameters (rates,
+  /// codec, device uid) are resolved from when the actor is built. Browser
+  /// sources have no entry here — they're built by ``openIngestSource`` from
+  /// the ingest format instead.
+  private let configuredDescriptors: [SourceID: SourceDescriptor]
+  /// Builds a config source's real capture backend on demand — stored so a
+  /// meeting can construct actors after the daemon has already started.
+  private let backendFactory: CaptureBackendFactory
+  /// Which live meetings currently reference each config source's capture. A
+  /// source records while this set is non-empty and is stopped and torn down
+  /// once it empties, so two concurrent meetings sharing the mic keep it alive
+  /// until both end.
+  private var captureMeetingRefs: [SourceID: Set<String>] = [:]
   /// The producer→subscriber bridge for live-feed events: every
   /// ``CaptureActor`` and the ``SessionRegistry`` publish into it from
   /// construction on, and ``start()`` attaches the socket server's fan-out
@@ -216,15 +235,13 @@ public actor EarsDaemon {
     case notABrowserSource(SourceID)
   }
 
-  /// Builds every source's `CaptureActor` (and its `ChunkEncoder`/
-  /// `IndexAppender`) from `configuration`, but starts nothing yet — no
-  /// backend is started, no socket is bound, until ``start()``.
+  /// Records `configuration` and boots **idle**: no `CaptureActor` is built,
+  /// no source directory or `meta.toml` is written, and no backend or socket
+  /// is started until ``start()`` — and even then capture stays off until a
+  /// meeting starts. Recording is meeting-scoped, so a source's actor is built
+  /// and started only when a meeting names it (see
+  /// ``startMeetingCapture(meetingID:sources:)``) or on its first `ingest.open`.
   ///
-  /// - Throws: if a source's on-disk directory can't be created, or its
-  ///   `ChunkEncoder` can't be constructed (an invalid native/ASR sample-rate
-  ///   pairing) — both indicate a fundamentally broken configuration, so
-  ///   construction fails outright rather than degrading one source, unlike
-  ///   ``start()``'s per-source backend-failure isolation.
   /// - Parameter logSink: The single structured sink the whole daemon logs
   ///   through — capture events, lifecycle, and every component's free-text
   ///   log. Defaults to ``NoOpLogRecordSink`` so a caller (or test) that
@@ -239,6 +256,9 @@ public actor EarsDaemon {
     self.configuration = configuration
     self.clock = clock
     self.logSink = logSink
+    self.backendFactory = backendFactory
+    self.configuredDescriptors = Dictionary(
+      configuration.sources.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
 
     // The free-text lifecycle/component logger is a thin wrapper over the one
     // sink: each message becomes a `daemon.log` record carrying it, so these
@@ -258,19 +278,12 @@ public actor EarsDaemon {
 
     let eventBus = EventBus()
     self.eventBus = eventBus
-    let eventSink: EventSink = { event in await eventBus.publish(event) }
 
-    var actors: [SourceID: CaptureActor] = [:]
-    for descriptor in configuration.sources {
-      actors[descriptor.id] = try Self.buildCaptureActor(
-        for: descriptor,
-        configuration: configuration,
-        backend: backendFactory(descriptor),
-        clock: clock,
-        eventSink: eventSink,
-        logSink: logSink)
-    }
-    self.captureActors = actors
+    // Idle boot: no capture actor is built, and nothing is written to disk,
+    // until a meeting starts (see `startMeetingCapture`) or an `ingest.open`
+    // creates a browser source. A fresh daemon start therefore writes no audio
+    // and creates no source directories.
+    self.captureActors = [:]
   }
 
   /// Builds one source's `CaptureActor` — and its `ChunkEncoder`/
@@ -404,8 +417,17 @@ public actor EarsDaemon {
         guard let self else { return [] }
         return await self.currentSourceIDs()
       },
+      startCapture: { [weak self] meetingID, sources in
+        await self?.startMeetingCapture(meetingID: meetingID, sources: sources)
+      },
+      stopCapture: { [weak self] meetingID, sources in
+        await self?.stopMeetingCapture(meetingID: meetingID, sources: sources)
+      },
       log: log)
-    await meetings.loadFromDisk()
+    // `loadFromDisk()` is deferred to after `self.controlServer` is assigned
+    // below: a meeting still active on disk resumes capture through
+    // `startMeetingCapture`, which registers the rebuilt source into the
+    // control server so `status`/`sources.list` see it.
     meetingRegistry = meetings
 
     // Browser-triggered on-close transcribe: the browser extension has no
@@ -450,23 +472,16 @@ public actor EarsDaemon {
       listener: listener, identity: identity, log: log, handler: controlServer.makeHandler())
     controlSocketServer = socketServer
     controlServerRunTask = Task { await socketServer.run() }
-    // Start capture sources *after* the control socket is bound and listening
-    // — a source backend can hang in `start()` (e.g. `MicCaptureBackend`
-    // blocking on a Core Audio permission prompt or a missing device), and
-    // the control plane must stay reachable while it does. Each source's
-    // `CaptureActor.start()` is tried independently; a throwing source is
-    // logged and left in `.error` state, and every other source still starts.
-    for (id, actor) in captureActors.sorted(by: { $0.key < $1.key }) {
-      do {
-        try await actor.start()
-      } catch {
-        log("source '\(id.rawValue)' failed to start and is disabled: \(error)")
-      }
-    }
-    // Kept so openIngestSource(label:format:) can register a dynamically-
-    // created source into this SAME actor's captureActors — otherwise it's
-    // a value-type copy neither sees the other's later changes to.
+    // Kept so `openIngestSource`/`startMeetingCapture` can register a
+    // dynamically-built source into this SAME actor's `captureActors` —
+    // otherwise it's a value-type copy neither sees the other's later changes
+    // to. No capture is started here: the daemon boots idle and starts
+    // recording only when a meeting begins.
     self.controlServer = controlServer
+
+    // Now that the control server is wired, recover any meeting still active
+    // on disk — resuming capture of its sources through `startMeetingCapture`.
+    await meetings.loadFromDisk()
 
     // The loopback control-plane WebSocket serves the SAME handler as the
     // Unix socket — zero duplicated command dispatch between transports.
@@ -507,7 +522,13 @@ public actor EarsDaemon {
       await triggerObserver?.handle(frame.event)
     }
 
-    let observer = PowerObserver(captureActors: captureActors)
+    // Capture is meeting-scoped, so the set of live actors changes over the
+    // daemon's lifetime — the observer reads it live rather than snapshotting
+    // an (empty at boot) map, so sleep/wake pauses whatever is recording for
+    // the active meeting.
+    let observer = PowerObserver(activeCaptureActors: { [weak self] in
+      await self?.currentPausables() ?? []
+    })
     await observer.startObserving()
     powerObserver = observer
 
@@ -770,11 +791,101 @@ public actor EarsDaemon {
     await meetingRegistry?.ingestStreamClosed(source: label)
   }
 
-  /// The ids of every source this daemon currently knows — config-declared
-  /// sources plus any dynamically-created `browser:<label>` sources — read
-  /// live for ``SessionRegistry``'s `knownSourceIDs` validation seam.
+  /// The ids of every source this daemon currently knows — the config-declared
+  /// sources (whether or not they're capturing right now) plus any live
+  /// `browser:<label>` sources built by `ingest.open` — read live for
+  /// ``SessionRegistry``/``MeetingRegistry``'s `knownSourceIDs` validation
+  /// seam. Config sources stay "known" while idle so a meeting can still fold
+  /// in `local_sources` (the mic) before any actor exists.
   private func currentSourceIDs() -> Set<SourceID> {
-    Set(captureActors.keys)
+    Set(configuredDescriptors.keys).union(captureActors.keys)
+  }
+
+  /// Every currently-live capture actor as a ``SuspendablePauseResume``, for
+  /// the ``PowerObserver``'s live view — read on each sleep/wake transition so
+  /// it pauses/resumes exactly what a meeting is recording right now.
+  private func currentPausables() -> [any SuspendablePauseResume] {
+    Array(captureActors.values)
+  }
+
+  // MARK: - Meeting-scoped capture
+
+  /// Starts capture for the config-declared sources a meeting names,
+  /// ref-counted by meeting id so a source shared by concurrent meetings keeps
+  /// recording until the last one ends. Browser (`browser:*`) and unknown ids
+  /// have no ``configuredDescriptors`` entry and are skipped — browser sources
+  /// are driven by their ingest streams, not the meeting controller.
+  /// Idempotent per meeting: re-declaring a meeting only starts sources it
+  /// hasn't already claimed.
+  func startMeetingCapture(meetingID: String, sources: [SourceID]) async {
+    for id in sources {
+      guard let descriptor = configuredDescriptors[id] else { continue }
+      let wasIdle = (captureMeetingRefs[id]?.isEmpty ?? true)
+      captureMeetingRefs[id, default: []].insert(meetingID)
+      guard wasIdle else { continue }
+      await ensureCaptureStarted(descriptor)
+    }
+  }
+
+  /// Releases a meeting's hold on its config sources; a source with no
+  /// remaining meeting is stopped (flushing its in-progress chunk) and torn
+  /// down. Browser/unknown ids are skipped, as in ``startMeetingCapture``.
+  func stopMeetingCapture(meetingID: String, sources: [SourceID]) async {
+    for id in sources {
+      guard configuredDescriptors[id] != nil else { continue }
+      guard captureMeetingRefs[id]?.remove(meetingID) != nil else { continue }
+      if captureMeetingRefs[id]?.isEmpty ?? true {
+        captureMeetingRefs[id] = nil
+        await teardownCaptureActor(id)
+      }
+    }
+  }
+
+  /// Builds (if needed) and starts a config source's `CaptureActor`, registering
+  /// a freshly-built one into the control server so `status`/`sources.list` see
+  /// it. A build failure disables just that source (logged), and a backend
+  /// `start()` failure leaves it in `.error` — never taking down the meeting or
+  /// the daemon, mirroring the old per-source startup isolation.
+  private func ensureCaptureStarted(_ descriptor: SourceDescriptor) async {
+    let actor: CaptureActor
+    if let existing = captureActors[descriptor.id] {
+      actor = existing
+    } else {
+      do {
+        actor = try Self.buildCaptureActor(
+          for: descriptor,
+          configuration: configuration,
+          backend: backendFactory(descriptor),
+          clock: clock,
+          eventSink: { [eventBus] event in await eventBus.publish(event) },
+          logSink: logSink)
+      } catch {
+        log(
+          "meeting capture: source '\(descriptor.id.rawValue)' failed to build and is disabled: \(error)"
+        )
+        return
+      }
+      captureActors[descriptor.id] = actor
+      await controlServer?.registerDynamicSource(actor, id: descriptor.id)
+    }
+    do {
+      try await actor.start()
+    } catch CaptureActorError.alreadyCapturing {
+      // Already running for another meeting — nothing to do.
+    } catch {
+      log("meeting capture: source '\(descriptor.id.rawValue)' failed to start: \(error)")
+    }
+  }
+
+  /// Stops a config source's actor and removes it from the live set and the
+  /// control server. Its `meta.toml` and captured audio are left on disk —
+  /// transcription and retention still need them; the daemon just stops holding
+  /// the actor.
+  private func teardownCaptureActor(_ id: SourceID) async {
+    guard let actor = captureActors[id] else { return }
+    await actor.stop()
+    captureActors[id] = nil
+    await controlServer?.unregisterDynamicSource(id: id)
   }
 
   /// Every source's current status, keyed by id — a test-only seam so an
@@ -787,6 +898,24 @@ public actor EarsDaemon {
       statuses[id] = await actor.status()
     }
     return statuses
+  }
+
+  /// Test-only: drive the meeting lifecycle through the daemon's real
+  /// ``MeetingRegistry``, so an end-to-end test can assert capture starts and
+  /// stops on meeting boundaries without a socket round-trip (a separate
+  /// real-socket path already proves the control plane). Both call the exact
+  /// registry entry points `meeting.start`/`meeting.end` route to.
+  func startMeetingForTesting(_ params: MeetingStartParams) async throws -> Meeting {
+    guard let meetingRegistry else {
+      fatalError("startMeetingForTesting called before start()")
+    }
+    return try await meetingRegistry.start(params)
+  }
+
+  @discardableResult
+  func endMeetingForTesting(id: String) async throws -> Meeting? {
+    guard let meetingRegistry else { return nil }
+    return try await meetingRegistry.end(id: id)
   }
 
   /// The socket server's current subscriber count — a test-only seam so an

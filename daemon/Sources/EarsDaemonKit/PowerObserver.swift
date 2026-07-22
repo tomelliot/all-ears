@@ -88,20 +88,28 @@ extension CaptureActor: SuspendablePauseResume {}
 /// ``SuspendablePauseResume``s standing in for real `CaptureActor`s.
 public actor PowerObserver {
   private var state = SuspensionState()
-  private let pausables: [SourceID: any SuspendablePauseResume]
+  /// The set of capture actors to pause/resume, read *live* on each suspension
+  /// transition. Capture is meeting-scoped, so which actors exist changes over
+  /// the daemon's lifetime; snapshotting once (as the always-on daemon did)
+  /// would miss every meeting-started source.
+  private let activeCaptureActors: @Sendable () async -> [any SuspendablePauseResume]
   private var workspaceTokens: [NSObjectProtocol] = []
   private var distributedTokens: [NSObjectProtocol] = []
 
-  /// - Parameter captureActors: Every source's capture actor, paused/resumed
-  ///   together on each suspension transition.
-  public init(captureActors: [SourceID: CaptureActor]) {
-    self.pausables = captureActors.mapValues { $0 as any SuspendablePauseResume }
+  /// - Parameter activeCaptureActors: A live lookup of every currently-live
+  ///   capture actor, queried on each sleep/wake transition so exactly what a
+  ///   meeting is recording right now is paused/resumed.
+  public init(
+    activeCaptureActors: @escaping @Sendable () async -> [any SuspendablePauseResume]
+  ) {
+    self.activeCaptureActors = activeCaptureActors
   }
 
-  /// Test-only seam: construct directly over ``SuspendablePauseResume`` so
-  /// unit tests can inject fakes without a real `CaptureActor`.
+  /// Test-only seam: a fixed set of ``SuspendablePauseResume`` fakes, so unit
+  /// tests can inject them without a real `CaptureActor` or a live provider.
   init(pausables: [SourceID: any SuspendablePauseResume]) {
-    self.pausables = pausables
+    let fixed = Array(pausables.values)
+    self.activeCaptureActors = { fixed }
   }
 
   /// Start observing sleep/wake/lock notifications. Idempotent-in-spirit but
@@ -181,7 +189,7 @@ public actor PowerObserver {
   var currentState: SuspensionState { state }
 
   private func forEachPausable(_ body: (any SuspendablePauseResume) async throws -> Void) async {
-    for pausable in pausables.values {
+    for pausable in await activeCaptureActors() {
       try? await body(pausable)
     }
   }

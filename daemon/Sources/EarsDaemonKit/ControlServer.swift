@@ -83,6 +83,14 @@ public actor ControlServer {
     captureActors[id] = actor
   }
 
+  /// Drops a source from the lookup — ``EarsDaemon`` calls this when a
+  /// meeting-scoped source's `CaptureActor` is torn down at meeting end, so
+  /// `status`/`sources.list` stop reporting a source that is no longer
+  /// recording. Its `meta.toml` and audio stay on disk (retention's concern).
+  public func unregisterDynamicSource(id: SourceID) {
+    captureActors[id] = nil
+  }
+
   /// Dispatch one call and build its reply. Never throws: domain errors are
   /// rendered as stable-coded ``WireError``s.
   public func handle(_ call: ControlCall) async -> ControlReply {
