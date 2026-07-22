@@ -136,35 +136,35 @@ public struct RealMicSourceProvider: CaptureEngineProvider {
   public func makeCaptureEngine() throws -> CaptureEngine {
     let engine = AVAudioEngine()
     let input = engine.inputNode
-    bindInputDevice(on: input)
-    // Read the format *after* binding: the chosen device dictates the tap
-    // format, so reading it first would capture the default input's format.
+    logIntendedInputDevice()
     let format = input.outputFormat(forBus: 0)
     return CaptureEngine(
       engine: engine, tapNode: input, tapBus: 0, tapFormat: format, mode: .realtime)
   }
 
-  /// Best-effort: pick a device and bind the input node's audio unit to it,
-  /// leaving the engine on the system default input if there is nothing to
-  /// choose or the bind fails. Never throws — capture must still start.
-  private func bindInputDevice(on input: AVAudioInputNode) {
+  /// **Device binding is disabled.** Binding the input node to a chosen device
+  /// via `AUAudioUnit.setDeviceID` crashed AVFoundation: the device/format change
+  /// it induces fires `AVAudioIOUnit`'s internal property listener, which races
+  /// the engine teardown that ``MicCaptureBackend``'s route-change/stall rebuild
+  /// performs and messages a freed engine — `EXC_BAD_ACCESS` in
+  /// `AVAudioIOUnit::IOUnitPropertyListener`, a ~10 s restart loop that flapped a
+  /// connected Bluetooth headset between A2DP and HFP on every relaunch.
+  ///
+  /// Until a crash-safe device-selection path exists (selecting the HAL device
+  /// out-of-band from `AVAudioEngine`, rather than overriding a live input node),
+  /// capture stays on the system default input. ``InputDeviceSelection`` and
+  /// ``CoreAudioInputDeviceEnumerator`` are kept — read-only and safe — so the
+  /// resolved choice is logged for diagnostics and the reselection can be rebuilt
+  /// on top of them.
+  private func logIntendedInputDevice() {
     guard
       let chosen = InputDeviceSelection.choose(
         from: enumerator.inputDevices(),
         preferredUID: deviceUID,
         preferBuiltIn: preferBuiltIn)
-    else {
-      return  // no override; AVAudioEngine follows the system default input
-    }
-    do {
-      try input.auAudioUnit.setDeviceID(chosen.id)
-      Self.log.notice(
-        "mic capture bound to input device \(chosen.name, privacy: .public) (uid \(chosen.uid, privacy: .public), transport \(chosen.transportType, privacy: .public))"
-      )
-    } catch {
-      Self.log.error(
-        "mic capture could not bind to \(chosen.name, privacy: .public); falling back to default input: \(error.localizedDescription, privacy: .public)"
-      )
-    }
+    else { return }
+    Self.log.notice(
+      "mic capture would prefer input device \(chosen.name, privacy: .public) (uid \(chosen.uid, privacy: .public)); device binding disabled — using system default input"
+    )
   }
 }
