@@ -41,6 +41,8 @@ struct TranscribeFollowPipelineTests {
     let dataRoot: URL
     let outputRoot: URL
     let appender: IndexAppender
+    let vadWriter: VADSegmentWriter
+    let sourceID: SourceID
     private let chunkFrames = Mutex<[String: Int]>([:])
 
     init(label: String, sourceID: SourceID, asrRate: Int, created: Instant) throws {
@@ -57,7 +59,26 @@ struct TranscribeFollowPipelineTests {
           created: created),
         dataRoot: dataRoot)
       appender = IndexAppender(
-        fileURL: DataStoreLayout.indexFile(dataRoot: dataRoot, sourceID: sourceID))
+        fileURL: DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: sourceID))
+      vadWriter = VADSegmentWriter(
+        directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: sourceID))
+      self.sourceID = sourceID
+    }
+
+    /// Appends one VAD span to the segmented stream (the split counterpart to
+    /// the chunk/gap events on `appender`).
+    func appendVAD(state: VADState, start: Instant, end: Instant) async throws {
+      try await vadWriter.append(state: state, start: start, end: end)
+    }
+
+    /// `true` once any VAD segment on disk contains `needle` — the split-layout
+    /// replacement for grepping the old single index file.
+    func vadContains(_ needle: String) -> Bool {
+      VADSegmentStore.segmentURLs(
+        directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: sourceID)
+      ).contains { segment in
+        (try? String(contentsOf: segment.url, encoding: .utf8))?.contains(needle) == true
+      }
     }
 
     // `Mutex` is ~Copyable, so it can't be rebound to a local or captured
@@ -168,18 +189,17 @@ struct TranscribeFollowPipelineTests {
     // First chunk lands after attach: speech then a >= 0.5 s silence whose
     // start is the natural-pause boundary at now+1.5.
     try await fixture.appendChunk(start: now, duration: 2, asrRate: asrRate)
-    try await fixture.appender.append(
-      .vad(state: .speech, start: now, end: now.advanced(by: 1.5)))
-    try await fixture.appender.append(
-      .vad(state: .silence, start: now.advanced(by: 1.5), end: now.advanced(by: 2.5)))
+    try await fixture.appendVAD(state: .speech, start: now, end: now.advanced(by: 1.5))
+    try await fixture.appendVAD(
+      state: .silence, start: now.advanced(by: 1.5), end: now.advanced(by: 2.5))
     await harness.waitForStdout(count: 1)
 
     // The ring buffer grows mid-run: a second chunk, another pause.
     try await fixture.appendChunk(start: now.advanced(by: 2), duration: 2, asrRate: asrRate)
-    try await fixture.appender.append(
-      .vad(state: .speech, start: now.advanced(by: 2.5), end: now.advanced(by: 3.5)))
-    try await fixture.appender.append(
-      .vad(state: .silence, start: now.advanced(by: 3.5), end: now.advanced(by: 4.2)))
+    try await fixture.appendVAD(
+      state: .speech, start: now.advanced(by: 2.5), end: now.advanced(by: 3.5))
+    try await fixture.appendVAD(
+      state: .silence, start: now.advanced(by: 3.5), end: now.advanced(by: 4.2))
     await harness.waitForStdout(count: 2)
 
     harness.stop()
@@ -283,10 +303,9 @@ struct TranscribeFollowPipelineTests {
     // One 5 s chunk lands at once (a ring-buffer chunk is far longer than
     // the cap), all speech, with the first natural pause only at 4.5 s.
     try await fixture.appendChunk(start: now, duration: 5, asrRate: asrRate)
-    try await fixture.appender.append(
-      .vad(state: .speech, start: now, end: now.advanced(by: 4.5)))
-    try await fixture.appender.append(
-      .vad(state: .silence, start: now.advanced(by: 4.5), end: now.advanced(by: 5.2)))
+    try await fixture.appendVAD(state: .speech, start: now, end: now.advanced(by: 4.5))
+    try await fixture.appendVAD(
+      state: .silence, start: now.advanced(by: 4.5), end: now.advanced(by: 5.2))
     await harness.waitForStdout(count: 3)
     harness.stop()
     #expect(await run.value == 0)
@@ -325,10 +344,9 @@ struct TranscribeFollowPipelineTests {
 
     await harness.waitForStart()
     try await fixture.appendChunk(start: now, duration: 2, asrRate: asrRate)
-    try await fixture.appender.append(
-      .vad(state: .speech, start: now, end: now.advanced(by: 1.5)))
-    try await fixture.appender.append(
-      .vad(state: .silence, start: now.advanced(by: 1.5), end: now.advanced(by: 2.2)))
+    try await fixture.appendVAD(state: .speech, start: now, end: now.advanced(by: 1.5))
+    try await fixture.appendVAD(
+      state: .silence, start: now.advanced(by: 1.5), end: now.advanced(by: 2.2))
     await harness.waitForStdout(count: 1)
     harness.stop()
     #expect(await run.value == 0)
@@ -353,17 +371,11 @@ struct TranscribeFollowPipelineTests {
 
     await harness.waitForStart()
     try await fixture.appendChunk(start: now, duration: 2, asrRate: asrRate)
-    try await fixture.appender.append(
-      .vad(state: .silence, start: now, end: now.advanced(by: 2.5)))
+    try await fixture.appendVAD(state: .silence, start: now, end: now.advanced(by: 2.5))
     // Wait until the silence boundary has been ingested and processed: the
     // boundary at its start is behind the window start, so the window only
     // closes at end-of-stream — and must skip the decode entirely.
-    await harness.waitUntil { [fixture] in
-      (try? String(
-        contentsOf: DataStoreLayout.indexFile(
-          dataRoot: fixture.dataRoot, sourceID: self.sourceID), encoding: .utf8))?
-        .contains("silence") == true
-    }
+    await harness.waitUntil { [fixture] in fixture.vadContains("silence") }
     harness.stop()
     #expect(await run.value == 0)
 
@@ -383,10 +395,9 @@ struct TranscribeFollowPipelineTests {
 
     await harness.waitForStart()
     try await fixture.appendChunk(start: now, duration: 2, asrRate: asrRate)
-    try await fixture.appender.append(
-      .vad(state: .speech, start: now, end: now.advanced(by: 1.0)))
-    try await fixture.appender.append(
-      .vad(state: .silence, start: now.advanced(by: 1.0), end: now.advanced(by: 2.0)))
+    try await fixture.appendVAD(state: .speech, start: now, end: now.advanced(by: 1.0))
+    try await fixture.appendVAD(
+      state: .silence, start: now.advanced(by: 1.0), end: now.advanced(by: 2.0))
     await harness.waitForStdout(count: 1)
     harness.stop()
     #expect(await run.value == 0)

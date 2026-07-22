@@ -214,6 +214,7 @@ private final class FollowRun {
   private let modelInfo: TranscriptModelInfo
 
   private var tail: IndexTailReader
+  private var vadTail: VADSegmentTailReader
   private var batcher: StepBatcher
   private var delta = StreamingDelta()
   private var partialState = DecoderState()
@@ -283,7 +284,10 @@ private final class FollowRun {
     // processed — a follower that attaches late gets no replay, matching
     // the live feed's own contract; the batch tool covers the past.
     self.tail = IndexTailReader(
-      fileURL: DataStoreLayout.indexFile(dataRoot: dataRoot, sourceID: sourceID),
+      fileURL: DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: sourceID),
+      startAtEnd: true)
+    self.vadTail = VADSegmentTailReader(
+      directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: sourceID),
       startAtEnd: true)
   }
 
@@ -295,10 +299,15 @@ private final class FollowRun {
     let log = dependencies.log
     while true {
       let stopped = dependencies.isStopped()
-      let events = tail.readNewEvents { line in
+      let onMalformed: (String) -> Void = { line in
         log("skipping malformed index line: \(line)")
       }
-      for event in events {
+      let structuralEvents = tail.readNewEvents(onMalformed: onMalformed)
+      let vadEvents = vadTail.readNewEvents(onMalformed: onMalformed)
+      for event in structuralEvents {
+        await ingest(event)
+      }
+      for event in vadEvents {
         await ingest(event)
       }
       await processDueBoundaries()
@@ -307,7 +316,7 @@ private final class FollowRun {
         await finishStream()
         break
       }
-      if events.isEmpty {
+      if structuralEvents.isEmpty && vadEvents.isEmpty {
         await dependencies.sleep(dependencies.pollInterval)
       }
     }

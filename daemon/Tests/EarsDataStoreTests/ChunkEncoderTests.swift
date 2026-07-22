@@ -72,7 +72,7 @@ struct ChunkEncoderTests {
     chunkFileWriterFactory: ChunkFileWriterFactory? = nil
   ) throws -> (ChunkEncoder, IndexAppender) {
     let indexAppender = IndexAppender(
-      fileURL: DataStoreLayout.indexFile(dataRoot: dataRoot, sourceID: "mic"))
+      fileURL: DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: "mic"))
     let encoder = try ChunkEncoder(
       sourceID: "mic",
       dataRoot: dataRoot,

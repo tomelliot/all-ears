@@ -8,7 +8,7 @@ Continuously capture every enabled audio source into its per-source ring buffer,
 
 - Open and manage a capture engine per enabled source (mic, system, per-app, device) and accept pushed audio for `browser:` sources.
 - Encode incoming audio and append time-stamped chunks (native + 16 kHz ASR feeds) to `<data-root>/sources/<id>/`.
-- Run a per-source VAD and append `chunk`/`vad`/`gap`/`evict` events to `index.jsonl`.
+- Run a per-source VAD and append `chunk`/`gap`/`evict` events to the structural index (`chunks.jsonl`) and `vad` spans to the segmented VAD stream (`vad/`), split so a restart parses only the small structural log — see [data formats](../data-formats.md#the-index-chunksjsonl--vad).
 - Enforce each source's time cap by evicting oldest chunks; honour the optional `hard_total_cap_bytes` backstop.
 - Maintain session and meeting descriptors; run app-signal triggers and the `on_close` pipeline.
 - Serve the control plane: query, source management, session lifecycle, live-feed pub/sub, audio ingestion.

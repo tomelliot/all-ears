@@ -114,6 +114,7 @@ public actor CaptureActor {
   private let backend: any CaptureBackend
   private let encoder: ChunkEncoder
   private let indexAppender: IndexAppender
+  private let vadWriter: VADSegmentWriter
   private let vad: any VAD
   private let clock: any NowProviding
   private let eventSink: EventSink?
@@ -180,7 +181,9 @@ public actor CaptureActor {
   ///     or a `SyntheticCaptureBackend` in tests).
   ///   - encoder: This source's chunk writer (already anchored at its start
   ///     instant — see the type doc's dependency note).
-  ///   - indexAppender: This source's shared `index.jsonl` writer.
+  ///   - indexAppender: This source's structural `chunks.jsonl` writer
+  ///     (chunk/gap/evict events).
+  ///   - vadWriter: This source's segmented VAD-stream writer (`vad/`).
   ///   - vad: The voice-activity index for this source.
   ///   - clock: Wall-clock seam; injected so tests never touch real time.
   ///   - eventSink: Where live-feed `vad` state-change events are published
@@ -196,6 +199,7 @@ public actor CaptureActor {
     backend: any CaptureBackend,
     encoder: ChunkEncoder,
     indexAppender: IndexAppender,
+    vadWriter: VADSegmentWriter,
     vad: any VAD,
     clock: any NowProviding = SystemClock(),
     eventSink: EventSink? = nil,
@@ -207,6 +211,7 @@ public actor CaptureActor {
     self.backend = backend
     self.encoder = encoder
     self.indexAppender = indexAppender
+    self.vadWriter = vadWriter
     self.vad = vad
     self.clock = clock
     self.eventSink = eventSink
@@ -439,11 +444,10 @@ public actor CaptureActor {
 
     if let spans = try? vad.detect(in: buffer) {
       for span in spans {
-        try? await indexAppender.append(
-          .vad(
-            state: span.state,
-            start: bufferStart.advanced(by: span.start),
-            end: bufferStart.advanced(by: span.end)))
+        try? await vadWriter.append(
+          state: span.state,
+          start: bufferStart.advanced(by: span.start),
+          end: bufferStart.advanced(by: span.end))
       }
       await publishVADTransition(spans: spans, bufferStart: bufferStart)
     }
@@ -591,6 +595,13 @@ public actor CaptureActor {
         timeCapSeconds: Double(descriptor.timeCapSeconds),
         sourceDirectory: DataStoreLayout.sourceDirectory(dataRoot: dataRoot, sourceID: sourceID),
         indexAppender: indexAppender)
+      // Drop whole VAD segments that have aged past the same time cap — an
+      // unlink, keeping the segmented stream bounded without rewriting a file
+      // a `--follow` tail may be reading.
+      try? VADSegmentStore.evict(
+        directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: sourceID),
+        olderThan: clock.now().advanced(by: -Double(descriptor.timeCapSeconds)))
+
       guard !evicted.isEmpty else { return }
       let evictedSet = Set(evicted)
       knownChunks.removeAll { evictedSet.contains($0) }

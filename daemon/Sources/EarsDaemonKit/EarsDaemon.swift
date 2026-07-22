@@ -294,7 +294,10 @@ public actor EarsDaemon {
     try writeSourceMeta(descriptor, dataRoot: configuration.dataRoot)
 
     let indexAppender = IndexAppender(
-      fileURL: DataStoreLayout.indexFile(
+      fileURL: DataStoreLayout.structuralIndexFile(
+        dataRoot: configuration.dataRoot, sourceID: descriptor.id))
+    let vadWriter = VADSegmentWriter(
+      directory: DataStoreLayout.vadDirectory(
         dataRoot: configuration.dataRoot, sourceID: descriptor.id))
     let encoder = try ChunkEncoder(
       sourceID: descriptor.id,
@@ -314,6 +317,7 @@ public actor EarsDaemon {
       backend: backend,
       encoder: encoder,
       indexAppender: indexAppender,
+      vadWriter: vadWriter,
       vad: configuration.vad,
       clock: clock,
       eventSink: eventSink,

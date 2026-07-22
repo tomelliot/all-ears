@@ -411,20 +411,20 @@ struct CLISmokeTests {
 
     let indexContents =
       (try? String(
-        contentsOfFile: sourceDirectory.appendingPathComponent("index.jsonl").path,
+        contentsOfFile: sourceDirectory.appendingPathComponent("chunks.jsonl").path,
         encoding: .utf8)) ?? ""
     let indexLines = indexContents.split(separator: "\n", omittingEmptySubsequences: true)
     let hasChunkEvent = indexLines.contains { line in
       guard let data = line.data(using: .utf8),
         let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
       else { return false }
-      // index.jsonl discriminates its event kind on the "t" field, per
-      // docs/data-formats.md's "The index (index.jsonl)" section -- distinct
+      // The structural index (chunks.jsonl) discriminates its event kind on the
+      // "t" field, per docs/data-formats.md's "The index" section -- distinct
       // from the structured-log JSON Lines format's "event" field asserted
       // on elsewhere in this file.
       return object["t"] as? String == "chunk"
     }
-    #expect(hasChunkEvent, "expected a 't':'chunk' event in index.jsonl:\n\(indexContents)")
+    #expect(hasChunkEvent, "expected a 't':'chunk' event in chunks.jsonl:\n\(indexContents)")
   }
 
   // MARK: - ears: config show / path (day-one config discovery, subcommand spelling)

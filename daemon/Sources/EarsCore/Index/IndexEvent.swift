@@ -35,6 +35,34 @@ public enum IndexEvent: Sendable, Hashable {
     case .evict(_, let start): start
     }
   }
+
+  /// Which on-disk log this event belongs to once the index is split into a
+  /// small structural log and a segmented VAD stream (see
+  /// `docs/data-formats.md`'s "The index").
+  ///
+  /// The split exists because `vad` events dominate the index by volume
+  /// (measured at ~98% of a long-running mic source), yet are needed only when
+  /// reconstructing a specific time range — never at startup, where only the
+  /// chunk/evict/gap events are consulted to recover the live chunk set. Keeping
+  /// them apart means a daemon restart parses the tiny structural log, not the
+  /// whole history.
+  public var stream: IndexStream {
+    switch self {
+    case .vad: .vad
+    case .chunk, .gap, .evict: .structural
+    }
+  }
+}
+
+/// The two on-disk logs a source's index is split across, keyed by
+/// ``IndexEvent/stream``.
+public enum IndexStream: Sendable, Hashable, CaseIterable {
+  /// `chunk`/`gap`/`evict` — the small, whole-history log read at startup to
+  /// reconstruct the live chunk set. Written to `chunks.jsonl`.
+  case structural
+  /// `vad` — the high-volume speech/silence spans, read only per requested
+  /// range. Written to size/time-rotated segments under `vad/`.
+  case vad
 }
 
 extension IndexEvent: Codable {

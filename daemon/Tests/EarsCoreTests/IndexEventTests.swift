@@ -140,4 +140,13 @@ struct IndexEventTests {
       try decode(json)
     }
   }
+
+  @Test("stream routes vad apart from the structural chunk/gap/evict events")
+  func streamClassification() {
+    let t = Instant(secondsSinceEpoch: 0)
+    #expect(IndexEvent.chunk(start: t, end: t, file: "f", frames: 1).stream == .structural)
+    #expect(IndexEvent.gap(start: t, end: t, reason: "r").stream == .structural)
+    #expect(IndexEvent.evict(file: "f", start: t).stream == .structural)
+    #expect(IndexEvent.vad(state: .speech, start: t, end: t).stream == .vad)
+  }
 }

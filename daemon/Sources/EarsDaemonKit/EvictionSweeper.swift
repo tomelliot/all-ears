@@ -94,7 +94,7 @@ public actor EvictionSweeper {
       // double-write is idempotent: deleteChunkFiles guards file existence and a
       // duplicate `evict` event is inert to every index reader.)
       let indexAppender = IndexAppender(
-        fileURL: DataStoreLayout.indexFile(dataRoot: dataRoot, sourceID: descriptor.id))
+        fileURL: DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: descriptor.id))
       do {
         try await EvictionExecutor.evictFromDisk(
           sourceDirectory: directory,
@@ -102,6 +102,9 @@ public actor EvictionSweeper {
           now: now,
           timeCapSeconds: Double(descriptor.timeCapSeconds),
           indexAppender: indexAppender)
+        try VADSegmentStore.evict(
+          directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: descriptor.id),
+          olderThan: now.advanced(by: -Double(descriptor.timeCapSeconds)))
       } catch {
         log("eviction sweep: source '\(descriptor.id.rawValue)' failed: \(error)")
       }

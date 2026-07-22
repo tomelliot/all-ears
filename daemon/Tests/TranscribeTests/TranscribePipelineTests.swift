@@ -65,12 +65,14 @@ struct TranscribePipelineTests {
     try writer.finish()
 
     let indexAppender = IndexAppender(
-      fileURL: DataStoreLayout.indexFile(dataRoot: dataRoot, sourceID: sourceID))
+      fileURL: DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: sourceID))
     try await indexAppender.append(
       .chunk(
         start: chunkStart, end: chunkStart.advanced(by: chunkDuration), file: "asr/\(filename)",
         frames: sampleCount))
-    try await indexAppender.append(.vad(state: .speech, start: vadSpeechStart, end: vadSpeechEnd))
+    try await VADSegmentWriter(
+      directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: sourceID)
+    ).append(state: .speech, start: vadSpeechStart, end: vadSpeechEnd)
 
     return chunkURL
   }

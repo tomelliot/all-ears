@@ -29,9 +29,28 @@ public enum DataStoreLayout {
     sourceDirectory(dataRoot: dataRoot, sourceID: sourceID).appendingPathComponent("asr")
   }
 
-  /// `<data-root>/sources/<source-id-path-safe>/index.jsonl`.
-  public static func indexFile(dataRoot: URL, sourceID: SourceID) -> URL {
-    sourceDirectory(dataRoot: dataRoot, sourceID: sourceID).appendingPathComponent("index.jsonl")
+  /// `<data-root>/sources/<source-id-path-safe>/chunks.jsonl` — the small
+  /// **structural** index (chunk/gap/evict events), read whole at startup to
+  /// reconstruct the live chunk set. VAD events live apart, under ``vadDirectory``
+  /// (see `docs/data-formats.md`'s "The index"), so this log stays tiny.
+  public static func structuralIndexFile(dataRoot: URL, sourceID: SourceID) -> URL {
+    sourceDirectory(dataRoot: dataRoot, sourceID: sourceID).appendingPathComponent("chunks.jsonl")
+  }
+
+  /// `<data-root>/sources/<source-id-path-safe>/vad/` — the directory of
+  /// size/time-rotated VAD segments (`<timestamp>.jsonl`). Whole segments are
+  /// unlinked once they age past the source's time cap.
+  public static func vadDirectory(dataRoot: URL, sourceID: SourceID) -> URL {
+    sourceDirectory(dataRoot: dataRoot, sourceID: sourceID).appendingPathComponent("vad")
+  }
+
+  /// `<data-root>/sources/<source-id-path-safe>/vad/<timestamp>.jsonl` — one VAD
+  /// segment, named by its first event's start (``FilenameTimestampCodec``) so
+  /// segments sort chronologically by filename and eviction is a filename-only
+  /// decision.
+  public static func vadSegmentFile(dataRoot: URL, sourceID: SourceID, start: Instant) -> URL {
+    vadDirectory(dataRoot: dataRoot, sourceID: sourceID)
+      .appendingPathComponent("\(FilenameTimestampCodec.string(for: start)).jsonl")
   }
 
   /// `<data-root>/sources/<source-id-path-safe>/meta.toml`.
