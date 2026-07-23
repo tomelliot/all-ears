@@ -25,7 +25,10 @@ struct CleanupCLIInputs: Sendable {
 /// `TranscribeRuntime`/`TranscribePipeline` split for the same reason: real
 /// environment/config-file/vocab-file reads live here and nowhere else.
 enum CleanupRuntime {
-  static func run(arguments: EarsCLI.Arguments, inputs: CleanupCLIInputs) async -> Int32 {
+  static func run(
+    arguments: EarsCLI.Arguments, inputs: CleanupCLIInputs,
+    diagnostics: RunDiagnostics = RunDiagnostics()
+  ) async -> RunOutcome {
     let environment = ProcessInfo.processInfo.environment
     let homeDirectory = FileManager.default.homeDirectoryForCurrentUser.path
     let flagsLayer = configLayer(
@@ -45,8 +48,9 @@ enum CleanupRuntime {
     ) {
     case .success(let value): loaded = value
     case .failure(let error):
-      writeStderr(describe(error))
-      return 1
+      let message = describe(error)
+      writeStderr(message)
+      return RunOutcome(exitCode: 1, error: message)
     }
 
     let root = loaded.value
@@ -61,8 +65,9 @@ enum CleanupRuntime {
       ? configuredCommand
       : "llm" + (model.isEmpty ? "" : " -m \(model)")
     guard !command.isEmpty else {
-      writeStderr("error: no [llm] command resolved (backend=\(backend), model='\(model)')")
-      return 1
+      let message = "error: no [llm] command resolved (backend=\(backend), model='\(model)')"
+      writeStderr(message)
+      return RunOutcome(exitCode: 1, error: message)
     }
     let llmBackend = CommandLLMBackend(
       info: LLMBackendInfo(name: backend, model: model.isEmpty ? nil : model), command: command)
@@ -79,15 +84,17 @@ enum CleanupRuntime {
         globalPath: stringValue(root, ["vocab", "global"]), extraPath: inputs.vocabPath,
         dataRoot: dataRoot) : []
 
-    return await CleanupPipeline.run(
+    let code = await CleanupPipeline.run(
       inputs: CleanupPipeline.Inputs(
         transcriptPath: inputs.transcriptPath,
         out: inputs.out,
         systemPrompt: systemPrompt,
         vocabulary: vocabulary
       ),
-      dependencies: .production(llmBackend: llmBackend)
+      dependencies: .production(
+        llmBackend: llmBackend, onError: { diagnostics.recordError($0) })
     )
+    return diagnostics.outcome(exitCode: code)
   }
 
   /// `--prompt <file>` (a literal path, resolved as-given) overrides

@@ -36,13 +36,31 @@ enum TranscribePipeline {
     var loadOptions: LoadOptions
     var log: @Sendable (String) -> Void
     var writeStderr: @Sendable (String) -> Void
+    /// Structured headline counts for the final `run.summary` (segments,
+    /// words, sources consulted, output path), surfaced so the *log* — not
+    /// just the human-readable stdout/stderr line — carries them, and an
+    /// empty-but-successful run (`segments=0 words=0`) is distinguishable from
+    /// a run that failed (issue #25). Optional: unit tests that only assert
+    /// exit codes leave it `nil`.
+    var onSummary: (@Sendable ([LogField]) -> Void)? = nil
 
     /// The real backend: ``ParakeetTranscriber``, FluidAudio-backed Parakeet
     /// on the ANE/Metal (`docs/specs/model-interface.md`'s "Backend
     /// 1 -- native"), loaded once per run in ``TranscribePipeline/run``
     /// below with `loadOptions` resolved from `[transcribe].model`/`compute`
     /// config (``TranscribeRuntime``).
-    static func production(loadOptions: LoadOptions = LoadOptions()) -> Dependencies {
+    ///
+    /// `onError`/`onSummary` are the structured-logging seams
+    /// ``TranscribeRuntime`` wires to a ``RunDiagnostics``: `onError` observes
+    /// every `error: …` line the pipeline writes to stderr (the last one wins,
+    /// becoming the summary's `error` field), `onSummary` receives the final
+    /// counts. Both default to `nil`, so this factory behaves exactly as
+    /// before for any caller that doesn't need them.
+    static func production(
+      loadOptions: LoadOptions = LoadOptions(),
+      onError: (@Sendable (String) -> Void)? = nil,
+      onSummary: (@Sendable ([LogField]) -> Void)? = nil
+    ) -> Dependencies {
       Dependencies(
         clock: SystemClock(),
         transcriberFactory: { ParakeetTranscriber() },
@@ -52,7 +70,9 @@ enum TranscribePipeline {
         },
         writeStderr: { line in
           FileHandle.standardError.write(Data((line + "\n").utf8))
-        }
+          onError?(line)
+        },
+        onSummary: onSummary
       )
     }
   }
@@ -331,6 +351,14 @@ enum TranscribePipeline {
         + "speech_seconds=\(speechSeconds) duration_seconds=\(requestedRange.duration) "
         + "output=\(paths.markdown.path)"
     )
+    dependencies.onSummary?([
+      LogField("segments", .int(document.segments.count)),
+      LogField("words", .int(document.frontmatter.wordCount)),
+      LogField("sources", .int(sourceIDs.count)),
+      LogField("speech_seconds", .double(speechSeconds)),
+      LogField("duration_seconds", .double(requestedRange.duration)),
+      LogField("output", .string(paths.markdown.path)),
+    ])
 
     return 0
   }

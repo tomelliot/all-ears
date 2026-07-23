@@ -286,7 +286,11 @@ let package = Package(
     // logic worth unit testing in isolation.
     .testTarget(
       name: "CLISmokeTests",
-      dependencies: ["EarsCore", "earsd", "ears"]
+      // Also depends on the `transcribe` executable so the one-shot tools'
+      // `run.summary` outcome logging is smoke-tested end to end against a
+      // real spawned binary (a forced-failure run must log a failure summary,
+      // not `status=ok`) — see `TranscribeRunSummarySmokeTests`.
+      dependencies: ["EarsCore", "earsd", "ears", "transcribe"]
     ),
     .testTarget(
       name: "EarsIPCTests",

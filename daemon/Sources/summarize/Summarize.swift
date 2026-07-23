@@ -5,11 +5,13 @@ import Foundation
 /// Reads one or more transcripts and writes summaries from configured prompts.
 /// See `docs/specs/llm-stages.md`.
 ///
-/// Every invocation still runs `EarsCLI.run(tool:version:arguments:)` first,
-/// unchanged -- the day-one config/logging contract every tool satisfies.
-/// A normal invocation (neither `--print-config` nor `--config-path`) then
-/// runs ``SummarizeRuntime``: it resolves the LLM backend and the requested
-/// `[[summarize.preset]]` entries, and summarizes `transcripts`.
+/// Every invocation runs through `EarsCLI.run(tool:version:arguments:work:)` --
+/// the day-one config/logging contract every tool satisfies. The real work is
+/// the call's `work` closure, so the final `run.summary` is logged after it
+/// completes and reflects its true outcome, never a premature `status=ok`
+/// (issue #25). A normal invocation (neither `--print-config` nor
+/// `--config-path`) runs ``SummarizeRuntime``: it resolves the LLM backend and
+/// the requested `[[summarize.preset]]` entries, and summarizes `transcripts`.
 @main
 struct Summarize: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
@@ -64,25 +66,38 @@ struct Summarize: AsyncParsableCommand {
       logFile: logFile
     )
 
-    let exitCode = await EarsCLI.run(tool: "summarize", version: "0.1.0", arguments: arguments)
-    guard exitCode == 0 else { throw ExitCode(exitCode) }
-    guard !printConfig, !configPath else { return }
+    // Snapshot the flags into locals the `@Sendable` work closure captures.
+    let transcripts = self.transcripts
+    let preset = self.preset
+    let allPresets = self.allPresets
+    let out = self.out
+    let model = self.model
 
-    guard !transcripts.isEmpty else {
-      FileHandle.standardError.write(Data("error: at least one transcript path is required\n".utf8))
-      throw ExitCode(1)
-    }
-
-    let summarizeExitCode = await SummarizeRuntime.run(
-      arguments: arguments,
-      inputs: SummarizeCLIInputs(
-        transcriptPaths: transcripts,
-        presetNames: preset,
-        allPresets: allPresets,
-        out: out,
-        model: model
+    // The real run happens inside `work`, between `run.start` and
+    // `run.summary`; the summary reflects the outcome we return here, never a
+    // premature `status=ok` (issue #25). The `--print-config`/`--config-path`
+    // fast paths return before `work` runs.
+    let diagnostics = RunDiagnostics()
+    let exitCode = await EarsCLI.run(
+      tool: "summarize", version: "0.1.0", arguments: arguments
+    ) { _ in
+      guard !transcripts.isEmpty else {
+        let message = "error: at least one transcript path is required"
+        FileHandle.standardError.write(Data((message + "\n").utf8))
+        return RunOutcome(exitCode: 1, error: message)
+      }
+      return await SummarizeRuntime.run(
+        arguments: arguments,
+        inputs: SummarizeCLIInputs(
+          transcriptPaths: transcripts,
+          presetNames: preset,
+          allPresets: allPresets,
+          out: out,
+          model: model
+        ),
+        diagnostics: diagnostics
       )
-    )
-    guard summarizeExitCode == 0 else { throw ExitCode(summarizeExitCode) }
+    }
+    guard exitCode == 0 else { throw ExitCode(exitCode) }
   }
 }
