@@ -143,6 +143,17 @@ export default defineBackground(() => {
           meetings.participantLeft(portId, msg.participantId);
           participantPorts.delete(msg.participantId);
           return;
+        case "capture-failed":
+          // A participant's capture died mid-call (e.g. the Meet decoder gave
+          // up). The daemon otherwise just sees the source fall silent; log it
+          // loudly here so the recorded gap is attributable to a capture
+          // failure, not a quiet speaker. The participant stays in the roster
+          // (no stream close) — a later renegotiated track re-adopts and
+          // resumes capture on its own.
+          console.error(
+            `[ears][bg] capture failed for ${msg.participantId} (${msg.platform}): ${msg.reason}`,
+          );
+          return;
         case "meeting-started":
           meetings.meetingStarted(portId, msg.platform, msg.externalMeetingId);
           return;

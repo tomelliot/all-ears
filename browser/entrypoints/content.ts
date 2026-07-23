@@ -121,6 +121,15 @@ function relay(msg: MainMessage, port: ReconnectingPort, state: RelayState): voi
     case "status":
       console.debug(`[ears][relay] status: ${msg.text}`);
       break;
+    case "capture-failed": {
+      // The participant is still in the call but their capture pipeline died;
+      // forward it (with the platform learned at join) so the background can
+      // attribute the audio gap. Not a participant-left: don't drop the roster.
+      const platform = state.participants.get(msg.participantId)?.platform;
+      console.warn(`[ears][relay] capture-failed ${msg.participantId} gen${msg.generation}: ${msg.reason}`);
+      if (platform) port.post({ type: "capture-failed", participantId: msg.participantId, platform, reason: msg.reason });
+      break;
+    }
     case "meeting-started":
       state.liveMeeting = { platform: msg.platform, externalMeetingId: msg.externalMeetingId };
       port.post({

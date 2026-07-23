@@ -23,6 +23,12 @@ export type MainMessage =
   | { kind: "participant-left"; participantId: ParticipantId; generation: number }
   | { kind: "pcm"; participantId: ParticipantId; generation: number; samples: Int16Array }
   | { kind: "status"; text: string }
+  // A participant's capture pipeline died for good (e.g. the Meet decoder gave
+  // up after exhausting its restart budget). Distinct from participant-left: the
+  // participant is still in the call, but their audio after this point is lost.
+  // Forwarded to the background so the gap is attributable rather than looking
+  // like the source merely went quiet (issue #22).
+  | { kind: "capture-failed"; participantId: ParticipantId; generation: number; reason: string }
   // Fired once per call (not per participant): the platform's own meeting id
   // resolved (Meet's spaces/<space> segment — see identity/meet-meeting-id.ts),
   // and the call ended (capture toggled off / teardown). May arrive after
@@ -102,6 +108,8 @@ export type PortMessage =
   // the background upserts onto the daemon meeting's roster.
   | { type: "joined"; participantId: ParticipantId; platform: Platform; displayName?: string }
   | { type: "left"; participantId: ParticipantId }
+  // A participant's capture died mid-call (see MainMessage "capture-failed").
+  | { type: "capture-failed"; participantId: ParticipantId; platform: Platform; reason: string }
   | { type: "meeting-started"; platform: Platform; externalMeetingId: string }
   | { type: "meeting-ended"; platform: Platform; externalMeetingId: string };
 

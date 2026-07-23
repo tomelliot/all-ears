@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  DECODER_HEALTHY_FRAMES,
+  DECODER_MAX_RESTARTS,
+  DECODER_RESTART_COOLDOWN_MS,
   LinearResampler,
   MeetDecodeSource,
   RingBuffer,
@@ -178,13 +181,18 @@ describe("silentReport", () => {
 
 // A fake WebCodecs AudioDecoder whose `error` callback the test drives on
 // demand. Every construction (including a post-error rebuild) records itself.
+// decode() synchronously fires the output callback, modelling a real decoder
+// that emits a decoded frame per chunk — so the source's health counter (frames
+// decoded since rebuild) advances the way it does in production.
 class FakeDecoder {
   static instances: FakeDecoder[] = [];
+  readonly output: (frame: unknown) => void;
   readonly error: (err: Error) => void;
   configured = false;
   closed = false;
   decoded: unknown[] = [];
   constructor(init: { output: (frame: unknown) => void; error: (err: Error) => void }) {
+    this.output = init.output;
     this.error = init.error;
     FakeDecoder.instances.push(this);
   }
@@ -193,6 +201,7 @@ class FakeDecoder {
   }
   decode(chunk: unknown): void {
     this.decoded.push(chunk);
+    this.output({}); // a real decoder emits a decoded frame here
   }
   close(): void {
     this.closed = true;
@@ -232,6 +241,11 @@ describe("MeetDecodeSource decoder recovery", () => {
     return s;
   }
 
+  /** Feed n live encoded frames to the current listener. */
+  function feed(n: number): void {
+    for (let i = 0; i < n; i++) listener!(aFrame());
+  }
+
   beforeEach(() => {
     FakeDecoder.instances = [];
     clock = 0;
@@ -241,28 +255,54 @@ describe("MeetDecodeSource decoder recovery", () => {
     src = makeSource();
   });
 
-  it("restarts the decoder in place on a single error — capture continues, not fatal", () => {
+  it("rebuilds immediately when a healthy decoder hits an isolated error — capture continues, not fatal", () => {
     src.start();
     expect(FakeDecoder.instances).toHaveLength(1);
     const first = FakeDecoder.instances[0]!;
+    feed(DECODER_HEALTHY_FRAMES); // decoder proves healthy
 
     first.error(DECODING_ERROR);
 
     expect(fatals).toEqual([]); // recovered, no participant-left/joined churn
     expect(first.closed).toBe(true); // old decoder torn down
-    expect(FakeDecoder.instances).toHaveLength(2); // fresh one built
+    expect(FakeDecoder.instances).toHaveLength(2); // fresh one built at once
     expect(FakeDecoder.instances[1]!.configured).toBe(true);
 
     // The same encoded-audio listener keeps feeding the fresh decoder.
-    listener!(aFrame());
+    feed(1);
     expect(FakeDecoder.instances[1]!.decoded).toHaveLength(1);
     expect(subscribeCalls).toEqual([expect.any(Function)]); // never re-subscribed
   });
 
-  it("treats a decode() throw the same as a decoder error (restart in place)", () => {
+  it("a poisoned burst cannot exhaust the restart budget in under a second", () => {
+    src.start();
+    FakeDecoder.instances.at(-1)!.error(DECODING_ERROR); // barren → cooldown, no rebuild yet
+    expect(FakeDecoder.instances).toHaveLength(1);
+
+    // Meet floods poisoned frames every 20ms; all land inside the first second.
+    for (clock = 20; clock < 1000; clock += 20) feed(1);
+
+    expect(fatals).toEqual([]); // did NOT give up in <1s …
+    expect(FakeDecoder.instances).toHaveLength(1); // … because the frames were dropped, not re-fed
+  });
+
+  it("resumes at the next decodable frame after the cooldown elapses", () => {
+    src.start();
+    FakeDecoder.instances.at(-1)!.error(DECODING_ERROR); // barren → cooldown
+    feed(1); // within cooldown → dropped
+    expect(FakeDecoder.instances).toHaveLength(1);
+
+    clock = DECODER_RESTART_COOLDOWN_MS; // cooldown elapsed
+    feed(1); // rebuilds and decodes on the fresh decoder
+    expect(FakeDecoder.instances).toHaveLength(2);
+    expect(FakeDecoder.instances[1]!.decoded).toHaveLength(1);
+    expect(fatals).toEqual([]);
+  });
+
+  it("treats a decode() throw the same as a decoder error (barren → cooldown → rebuild)", () => {
     class ThrowOnceDecoder extends FakeDecoder {
       override decode(chunk: unknown): void {
-        // Throw only on the first (errored) instance; rebuilt ones decode fine.
+        // Throw only on the first instance; rebuilt ones decode fine.
         if (FakeDecoder.instances[0] === this) throw new Error("bad state");
         super.decode(chunk);
       }
@@ -277,34 +317,67 @@ describe("MeetDecodeSource decoder recovery", () => {
     };
     const s = new MeetDecodeSource({ id: "t" } as unknown as MediaStreamTrack, () => {}, (r) => fatals.push(r), deps);
     s.start();
-    listener!(aFrame()); // decode throws → restart, not fatal
+    listener!(aFrame()); // decode throws → barren → cooldown, not fatal
+    expect(fatals).toEqual([]);
+    expect(FakeDecoder.instances).toHaveLength(1);
 
+    clock = DECODER_RESTART_COOLDOWN_MS;
+    listener!(aFrame()); // rebuild → decodes fine
     expect(fatals).toEqual([]);
     expect(FakeDecoder.instances).toHaveLength(2);
   });
 
-  it("gives up (fatal exactly once) when the decoder keeps dying past the budget", () => {
+  it("gives up (fatal exactly once) only after sustained barren restarts across seconds", () => {
     src.start();
-    // Drive errors well past the 5-restart budget; each error hits the newest decoder.
-    for (let i = 0; i < 12; i++) {
-      FakeDecoder.instances.at(-1)!.error(DECODING_ERROR);
+    FakeDecoder.instances.at(-1)!.error(DECODING_ERROR); // first barren → cooldown
+
+    // Each cooldown boundary yields exactly one restart that immediately dies barren.
+    for (let i = 0; i <= DECODER_MAX_RESTARTS; i++) {
+      clock += DECODER_RESTART_COOLDOWN_MS;
+      feed(1); // rebuild attempt (or the final give-up)
+      FakeDecoder.instances.at(-1)!.error(DECODING_ERROR); // dies barren again
     }
+
     expect(fatals).toHaveLength(1);
     expect(fatals[0]).toContain("giving up");
-    // 1 initial + exactly 5 restarts, then fatal (no further rebuilds).
-    expect(FakeDecoder.instances).toHaveLength(6);
+    // Budget was time-gated: give-up took at least MAX cooldowns of wall time.
+    expect(clock).toBeGreaterThanOrEqual(DECODER_MAX_RESTARTS * DECODER_RESTART_COOLDOWN_MS);
+    // 1 initial + exactly MAX restarts, then fatal (no further rebuilds).
+    expect(FakeDecoder.instances).toHaveLength(DECODER_MAX_RESTARTS + 1);
     // Fatal path stopped the source: the tee was unsubscribed.
     expect(subscribeCalls.at(-1)).toBeNull();
   });
 
+  it("resets the restart budget after a recovery — distinct incidents don't accumulate", () => {
+    src.start();
+    // Eight separate incidents (far more than the budget). The first death is
+    // barren (spends/clears a restart slot, which a full recovery then wipes);
+    // every later death lands on a decoder that recovered to full health, so it
+    // rebuilds immediately without spending the budget. None of them add up to a
+    // give-up.
+    for (let incident = 0; incident < 8; incident++) {
+      FakeDecoder.instances.at(-1)!.error(DECODING_ERROR);
+      clock += DECODER_RESTART_COOLDOWN_MS;
+      feed(1); // rebuild path (immediate for a healthy decoder; post-cooldown for the barren one)
+      feed(DECODER_HEALTHY_FRAMES); // decoder proves healthy → budget resets
+    }
+    expect(fatals).toEqual([]);
+  });
+
   it("resets the restart budget once the sliding window passes", () => {
     src.start();
-    for (let i = 0; i < 5; i++) FakeDecoder.instances.at(-1)!.error(DECODING_ERROR);
-    expect(fatals).toEqual([]); // 5 restarts, still within budget
-
-    clock = 31_000; // advance past the 30s window
+    // Five barren restarts, each spaced a cooldown apart, all within the window.
     FakeDecoder.instances.at(-1)!.error(DECODING_ERROR);
-    expect(fatals).toEqual([]); // fresh budget — restarted, not fatal
+    for (let i = 0; i < DECODER_MAX_RESTARTS - 1; i++) {
+      clock += DECODER_RESTART_COOLDOWN_MS;
+      feed(1);
+      FakeDecoder.instances.at(-1)!.error(DECODING_ERROR);
+    }
+    expect(fatals).toEqual([]); // at budget, not over
+
+    clock += 31_000; // advance past the 30s window before the next restart
+    feed(1); // window pruned → restarts, not fatal
+    expect(fatals).toEqual([]);
   });
 
   it("stays fatal when the decoder constructor is unavailable", () => {
