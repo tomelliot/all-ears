@@ -61,7 +61,8 @@ struct TranscribeRunSummarySmokeTests {
     let url: URL
     init() {
       url = FileManager.default.temporaryDirectory
-        .appendingPathComponent("TranscribeRunSummarySmokeTests-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent(
+          "TranscribeRunSummarySmokeTests-\(UUID().uuidString)", isDirectory: true)
       try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }
     func write(_ contents: String, named name: String) -> String {
