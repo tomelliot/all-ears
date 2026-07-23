@@ -22,6 +22,19 @@ The ASR backend is currently fixed: Parakeet via FluidAudio on the Apple Neural 
 
 Multiple sources are transcribed independently, then merged for output — keeping sources separate through the model is what preserves you-vs-them attribution.
 
+## Meeting mode (`--meeting <id>`)
+
+`--meeting <id>` transcribes one daemon-owned meeting: it reads `meeting.toml`, unions the meeting's transcription intervals into the read range (paused spans are skipped exactly like silence), and takes the meeting's own source list and roster (so real participant names flow straight into speaker labels).
+
+**Per-source store lookup order.** A meeting's audio can live in two places, and `--meeting` resolves each source independently:
+
+- the **per-meeting copy** under `meetings/<id>/sources/<source>/` — the authoritative copy for an ended meeting, since retention can evict the global ring independently;
+- the **global ring** under `<data-root>/sources/<source>/` — the only copy for a source with no per-meeting directory (e.g. the locally-captured `mic`, which the ring records for whichever meeting is active).
+
+The rule: **prefer the per-meeting copy when it holds chunks in range, and fall back to the ring only where it doesn't** (all-ears issue #20). A source found in neither store contributes nothing — it does **not** fail the whole meeting, so the other sources still transcribe.
+
+**Diagnosability.** Every store consulted is logged per source (its path and what it held — chunk count and speech-interval count, or "no data"), the chosen store is logged, and a run that ends with `segments=0` logs a one-line reason per source (`no chunks in range`, `chunks but no speech intervals`, or `store missing`). The chosen store per source is also recorded in the transcript's `audio_stores` frontmatter, so a wrong-store read is visible after the fact.
+
 ## Streaming mode (`--follow <source>`)
 
 - Tails the live source's index, reading newly-written chunks as they land.
@@ -58,6 +71,8 @@ Options:
   --last <dur>             range ending now (e.g. 30m, 2h)
   --from/--to <ts>         explicit ISO-8601 range
   --session <id>           resolve range, sources, and vocab from a session
+  --meeting <id>           union a meeting's intervals into one transcript
+                           (per-source store lookup: per-meeting copy, ring fallback)
   --follow <id>            attach to a live source and stream finalised segments
   --json                   (follow) emit JSON segment lines to stdout
   --out <path>             override the output transcript path

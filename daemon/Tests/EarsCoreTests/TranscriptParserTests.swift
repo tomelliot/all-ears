@@ -153,6 +153,35 @@ struct TranscriptParserTests {
     #expect(parsed.diarization == TranscriptDiarizationInfo(enabled: false))
   }
 
+  @Test("round-trips the per-source audio_stores record for a --meeting transcript")
+  func roundTripsAudioStores() throws {
+    var frontmatter = Self.standupFrontmatter()
+    frontmatter.meeting = "0d5e-meeting"
+    frontmatter.audioStores = [
+      TranscriptAudioStore(source: "mic", store: "ring"),
+      TranscriptAudioStore(source: "browser:meet:speaker-1", store: "meeting"),
+      TranscriptAudioStore(source: "system", store: "none"),
+    ]
+    let document = TranscriptDocument(frontmatter: frontmatter, segments: [])
+    let markdown = TranscriptRenderer.renderMarkdown(document)
+
+    #expect(
+      markdown.contains(
+        "audio_stores: [\"mic=ring\", \"browser:meet:speaker-1=meeting\", \"system=none\"]"))
+    let parsed = try TranscriptParser.parseFrontmatter(markdown)
+    #expect(parsed.audioStores == frontmatter.audioStores)
+  }
+
+  @Test("a transcript with no audio_stores line parses to an empty record")
+  func absentAudioStoresParsesEmpty() throws {
+    let document = TranscriptDocument(frontmatter: Self.standupFrontmatter(), segments: [])
+    let markdown = TranscriptRenderer.renderMarkdown(document)
+
+    #expect(!markdown.contains("audio_stores"))
+    let parsed = try TranscriptParser.parseFrontmatter(markdown)
+    #expect(parsed.audioStores.isEmpty)
+  }
+
   @Test("round-trips empty vocab")
   func roundTripsEmptyVocab() throws {
     let frontmatter = Self.standupFrontmatter(vocab: [])
