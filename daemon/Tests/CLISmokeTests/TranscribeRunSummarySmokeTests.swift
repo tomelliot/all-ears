@@ -97,7 +97,7 @@ struct TranscribeRunSummarySmokeTests {
       """,
       named: "config.toml")
 
-    let result = try runTranscribe([
+    let result = try Self.runTranscribe([
       "--config", configPath, "--log-file", logPath, "--last", "1m", "--source", "mic",
     ])
 
