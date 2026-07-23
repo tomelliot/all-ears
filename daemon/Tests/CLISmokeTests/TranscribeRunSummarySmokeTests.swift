@@ -62,9 +62,7 @@ struct TranscribeRunSummarySmokeTests {
     init() {
       url = FileManager.default.temporaryDirectory
         .appendingPathComponent(
-          "TranscribeRunSummarySmokeTests-\(UUID().uuidString)",
-          isDirectory: true
-        )
+          "TranscribeRunSummarySmokeTests-\(UUID().uuidString)", isDirectory: true)
       try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }
     func write(_ contents: String, named name: String) -> String {
@@ -99,7 +97,7 @@ struct TranscribeRunSummarySmokeTests {
       """,
       named: "config.toml")
 
-    let result = try runTranscribe([
+    let result = try Self.runTranscribe([
       "--config", configPath, "--log-file", logPath, "--last", "1m", "--source", "mic",
     ])
 
