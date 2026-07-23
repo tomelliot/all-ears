@@ -578,8 +578,7 @@ struct TranscribePipelineTests {
     // per-source outcome: `mic` read from no store, the browser source from the
     // per-meeting copy.
     #expect(markdown.contains("speaker one speaking"))
-    #expect(
-      markdown.contains("audio_stores: [\"mic=none\", \"browser:meet:speaker-1=meeting\"]"))
+    #expect(markdown.contains("audio_stores: [\"mic=none\", \"browser:meet:speaker-1=meeting\"]"))
   }
 
   @Test(

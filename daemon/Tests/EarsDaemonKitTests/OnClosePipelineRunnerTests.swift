@@ -12,11 +12,23 @@ import Testing
 /// its "actual error message unrecoverable".
 @Suite("OnClosePipelineRunner")
 struct OnClosePipelineRunnerTests {
-  /// Collects the runner's log lines in order.
-  private final class LogCollector: Sendable {
-    private let lines = Mutex<[String]>([])
-    var log: @Sendable (String) -> Void { { line in self.lines.withLock { $0.append(line) } } }
-    var snapshot: [String] { lines.withLock { $0 } }
+  /// Thread-safe collector for the runner's `@Sendable` `log` closure, so a
+  /// test can assert on the diagnostic lines it emits, in order.
+  private final class LogCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+
+    func append(_ line: String) {
+      lock.lock()
+      defer { lock.unlock() }
+      lines.append(line)
+    }
+
+    func snapshot() -> [String] {
+      lock.lock()
+      defer { lock.unlock() }
+      return lines
+    }
   }
 
   /// A scripted ``OnClosePipelineRunner/ProcessRunner`` that returns a fixed
@@ -46,7 +58,7 @@ struct OnClosePipelineRunnerTests {
     let logs = LogCollector()
     let runner = ScriptedRunner([SpawnOutcome(exitCode: 0)])
     let pipeline = OnClosePipelineRunner(
-      outputRoot: Self.outputRoot, runProcess: runner.runner, log: logs.log)
+      outputRoot: Self.outputRoot, runProcess: runner.runner, log: { logs.append($0) })
 
     let succeeded = await pipeline.runMeetingTranscribe(
       meetingID: "b7acc61f", context: "meeting-end")
@@ -56,10 +68,10 @@ struct OnClosePipelineRunnerTests {
     #expect(runner.calls.first?.arguments == ["--meeting", "b7acc61f"])
     // The spawn record names the full argv, keyed by the meeting id.
     #expect(
-      logs.snapshot.contains {
+      logs.snapshot().contains {
         $0.contains("spawning transcribe --meeting b7acc61f") && $0.contains("meeting 'b7acc61f'")
       })
-    #expect(logs.snapshot.contains { $0.contains("transcribe succeeded for meeting 'b7acc61f'") })
+    #expect(logs.snapshot().contains { $0.contains("transcribe succeeded for meeting 'b7acc61f'") })
   }
 
   @Test("a failed meeting transcribe logs the exit code and the captured stderr, returns false")
@@ -69,14 +81,13 @@ struct OnClosePipelineRunnerTests {
       SpawnOutcome(exitCode: 1, stderr: "error: unknown source 'mic': no data found")
     ])
     let pipeline = OnClosePipelineRunner(
-      outputRoot: Self.outputRoot, runProcess: runner.runner, log: logs.log)
+      outputRoot: Self.outputRoot, runProcess: runner.runner, log: { logs.append($0) })
 
     let succeeded = await pipeline.runMeetingTranscribe(
       meetingID: "b7acc61f", context: "meeting-end")
 
     #expect(!succeeded)
-    let failure = try #require(
-      logs.snapshot.first { $0.contains("transcribe failed (exit 1)") })
+    let failure = try #require(logs.snapshot().first { $0.contains("transcribe failed (exit 1)") })
     // Keyed by meeting id, and carries the child's real error message.
     #expect(failure.contains("meeting 'b7acc61f'"))
     #expect(failure.contains("stderr: error: unknown source 'mic'"))
@@ -87,12 +98,12 @@ struct OnClosePipelineRunnerTests {
     let logs = LogCollector()
     let runner = ScriptedRunner([SpawnOutcome(exitCode: 2, stderr: "   \n")])
     let pipeline = OnClosePipelineRunner(
-      outputRoot: Self.outputRoot, runProcess: runner.runner, log: logs.log)
+      outputRoot: Self.outputRoot, runProcess: runner.runner, log: { logs.append($0) })
 
     _ = await pipeline.runMeetingTranscribe(meetingID: "55815f35", context: "meeting-end")
 
     #expect(
-      logs.snapshot.contains {
+      logs.snapshot().contains {
         $0.contains("transcribe failed (exit 2)") && $0.contains("no stderr captured")
       })
   }
@@ -108,7 +119,7 @@ struct OnClosePipelineRunnerTests {
       SpawnOutcome(exitCode: 1, stderr: "error: cleanup backend timed out"),
     ])
     let pipeline = OnClosePipelineRunner(
-      outputRoot: Self.outputRoot, runProcess: runner.runner, log: logs.log)
+      outputRoot: Self.outputRoot, runProcess: runner.runner, log: { logs.append($0) })
 
     let descriptor = SessionDescriptor(
       schema: 1, id: "2026-07-23T14-00-00Z_call", slug: "call",
@@ -120,12 +131,10 @@ struct OnClosePipelineRunnerTests {
       context: "trigger 'meetings'")
 
     #expect(runner.calls.map(\.name) == ["transcribe", "cleanup"])
-    #expect(
-      logs.snapshot.contains {
-        $0.contains("stage 'cleanup' failed (exit 1)")
-          && $0.contains("stderr: error: cleanup backend timed out")
-          && $0.contains("stopping the chain")
-      })
+    let failure = try #require(
+      logs.snapshot().first { $0.contains("stage 'cleanup' failed (exit 1)") })
+    #expect(failure.contains("stderr: error: cleanup backend timed out"))
+    #expect(failure.contains("stopping the chain"))
   }
 
   // MARK: - bounded stderr
