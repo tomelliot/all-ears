@@ -37,23 +37,28 @@ private final class FakeTracker: RunningApplicationTracking, @unchecked Sendable
 
 /// Records every `(name, arguments)` pair a scripted ``AppSignalTriggerObserver
 /// .ProcessRunner`` fake was called with, and lets a test script each call's
-/// exit code.
+/// exit code (and, optionally, the stderr it "captured").
 private final class FakeProcessRunner: @unchecked Sendable {
   private struct State {
     var calls: [(name: String, arguments: [String])] = []
     var exitCodes: [Int32] = []
+    var stderr: String = ""
   }
   private let state = Mutex(State())
 
-  init(exitCodes: [Int32]) {
-    state.withLock { $0.exitCodes = exitCodes }
+  init(exitCodes: [Int32], stderr: String = "") {
+    state.withLock {
+      $0.exitCodes = exitCodes
+      $0.stderr = stderr
+    }
   }
 
   var runner: AppSignalTriggerObserver.ProcessRunner {
     { name, arguments in
       self.state.withLock { s in
         s.calls.append((name, arguments))
-        return s.exitCodes.isEmpty ? 0 : s.exitCodes.removeFirst()
+        let exitCode = s.exitCodes.isEmpty ? 0 : s.exitCodes.removeFirst()
+        return SpawnOutcome(exitCode: exitCode, stderr: exitCode == 0 ? "" : s.stderr)
       }
     }
   }
@@ -128,7 +133,7 @@ struct AppSignalTriggerObserverTests {
 
     let observer = AppSignalTriggerObserver(
       rules: [Self.meetingsRule], sessions: registry, outputRoot: dataRoot, tracker: tracker,
-      runProcess: { _, _ in 0 })
+      runProcess: { _, _ in SpawnOutcome(exitCode: 0) })
     await observer.start()
 
     await observer.handle(.vad(source: "app:com.other.app", state: .speech, t: clock.now()))
@@ -213,7 +218,7 @@ struct AppSignalTriggerObserverTests {
 
     let observer = AppSignalTriggerObserver(
       rules: [Self.meetingsRule], sessions: registry, outputRoot: dataRoot, tracker: tracker,
-      runProcess: { _, _ in 0 })
+      runProcess: { _, _ in SpawnOutcome(exitCode: 0) })
     await observer.start()
 
     tracker.setLivePIDs([111], forBundleID: "us.zoom.xos")

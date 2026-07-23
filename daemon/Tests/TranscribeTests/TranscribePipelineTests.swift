@@ -595,6 +595,81 @@ struct TranscribePipelineTests {
   }
 
   @Test(
+    "--meeting with one source that has data and one that has none transcribes the former, exits 0, and reports the missing source in the log and transcript metadata"
+  )
+  func meetingMissingOneSourceTranscribesRest() async throws {
+    // The issue's exact shape: `meeting.toml` lists `mic` plus a browser
+    // source, but `mic` was misrouted (issue #19) and has no data in either
+    // store. The browser source's per-meeting audio is present. The run must
+    // transcribe the browser source, exit 0 (never exit-1-with-no-message,
+    // never a silent exit-0-empty), and name `mic` as missing in both the log
+    // and the transcript's per-source `audio_stores` record (issue #21).
+    let dataRoot = makeTempDirectory("meeting-partial")
+    let outputRoot = makeTempDirectory("meeting-partial-output")
+    let meetingID = "b7acc61f"
+
+    let meeting = Meeting(
+      id: meetingID,
+      title: "call",
+      state: .ended,
+      started: now.advanced(by: -20),
+      ended: now,
+      intervals: [MeetingInterval(start: now.advanced(by: -20), end: now)],
+      sources: ["mic", "browser:meet:speaker-1"])
+    try MeetingStore.write(meeting, dataRoot: dataRoot)
+
+    // Only the browser source has audio (its authoritative per-meeting copy);
+    // `mic` has no directory in the per-meeting tree or the ring.
+    try await writeFixtureSource(
+      sourceID: "browser:meet:speaker-1",
+      dataRoot: DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: meetingID),
+      chunkStart: now.advanced(by: -20), chunkDuration: 20,
+      vadSpeechStart: now.advanced(by: -10), vadSpeechEnd: now.advanced(by: -8))
+
+    let logs = LogCollector()
+    let scripted = ScriptedTranscriber(results: [
+      [Segment(start: 0, end: 2, text: "speaker one speaking")]
+    ])
+
+    let exitCode = await TranscribePipeline.run(
+      inputs: .init(meeting: meetingID, sourceIDs: [], out: nil),
+      dataRoot: dataRoot,
+      outputRoot: outputRoot,
+      backendName: "fluidaudio",
+      dependencies: .init(
+        clock: ManualClock(now),
+        transcriberFactory: { scripted },
+        loadOptions: LoadOptions(),
+        log: { logs.append($0) },
+        writeStderr: { line in Issue.record("unexpected stderr: \(line)") }
+      )
+    )
+
+    // The remaining source transcribed and the run succeeded — not a failure.
+    #expect(exitCode == 0)
+    #expect(scripted.recordedCalls.count == 1)
+
+    let lines = logs.snapshot()
+    // The missing source is named, non-silently, with its no-data reason...
+    #expect(lines.contains { $0.contains("meeting \(meetingID) source mic: no audio store found") })
+    // The run produced segments, so it is not an empty run at all.
+    #expect(!lines.contains { $0.contains("run.empty:") })
+    // ...and the run summary's honest resolved/missing counts distinguish this
+    // from silence (issue #21).
+    #expect(lines.contains { $0.contains("sources_resolved=1 sources_missing=1") })
+
+    let paths = OutputPathResolution.resolve(
+      outputRoot: outputRoot, requestedStart: now.advanced(by: -20),
+      sourceIDs: ["mic", "browser:meet:speaker-1"], explicitOut: nil, sessionSlug: meetingID)
+    let markdown = try outputText(at: paths.markdown)
+    // The transcript carries the transcribed text and, in metadata, the
+    // per-source outcome: `mic` read from no store, the browser source from the
+    // per-meeting copy.
+    #expect(markdown.contains("speaker one speaking"))
+    #expect(markdown.contains("audio_stores: [\"mic=none\", \"browser:meet:speaker-1=meeting\"]"))
+  }
+
+  @Test(
     "--meeting reads per-meeting chunks even when the ring also holds the source (per-meeting is authoritative)"
   )
   func meetingPrefersPerMeetingOverRing() async throws {
