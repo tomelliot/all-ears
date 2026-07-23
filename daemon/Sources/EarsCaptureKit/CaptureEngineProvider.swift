@@ -106,15 +106,14 @@ public enum CaptureEngineError: Error, Sendable {
 /// The production ``CaptureEngineProvider``: taps the real microphone input node
 /// of a fresh real-time `AVAudioEngine`.
 ///
-/// **Input-device selection.** Rather than always following the system default
-/// input, this binds the engine to a chosen device via ``InputDeviceSelection``:
-/// an explicitly configured `deviceUID` when present, otherwise (by default) the
-/// built-in mic. That default is what keeps a connected Bluetooth headset out of
-/// the capture path — opening a Bluetooth input would force the whole device off
-/// A2DP onto the hands-free profile and wreck its playback quality for as long as
-/// `earsd` holds the mic open (see ``AudioInputDevice``). Selection is
-/// best-effort: if no device matches, or binding fails, the engine falls back to
-/// the system default input, exactly as before.
+/// **Input-device selection.** By default the engine follows the system default
+/// input — whatever device the user has selected, Bluetooth included. Recording
+/// is meeting-scoped and brief, so holding a Bluetooth mic open for a call is
+/// acceptable; there is no built-in-mic preference. When a `deviceUID` is
+/// explicitly configured, this binds the engine to that specific device via
+/// ``InputDeviceSelection``. Selection is best-effort: if the named device
+/// isn't present, or binding fails, the engine falls back to the system default
+/// input.
 ///
 /// **Crash-safe binding.** The bind sets the HAL device on the input node's
 /// audio unit (`kAudioOutputUnitProperty_CurrentDevice`) on a **fresh,
@@ -136,27 +135,20 @@ public enum CaptureEngineError: Error, Sendable {
 /// metadata only; it does not open an input or trigger a TCC prompt.)
 public struct RealMicSourceProvider: CaptureEngineProvider {
   private let deviceUID: String
-  private let preferBuiltIn: Bool
   private let enumerator: any AudioInputDeviceEnumerating
   private static let log = Logger(subsystem: "net.tomelliot.ears", category: "capture")
 
   /// - Parameters:
   ///   - deviceUID: A specific Core Audio device UID to bind to. Empty (the
-  ///     default) means "no explicit device"; selection then falls to
-  ///     `preferBuiltIn`.
-  ///   - preferBuiltIn: When no `deviceUID` matches, prefer the built-in mic
-  ///     over the system default input. Defaults to `true` so a connected
-  ///     Bluetooth headset is never captured — and therefore never downgraded —
-  ///     unless the user explicitly names it.
+  ///     default) means "no explicit device": the engine follows the system
+  ///     default input.
   ///   - enumerator: The device-enumeration seam; the real Core Audio one by
   ///     default, overridable in tests.
   public init(
     deviceUID: String = "",
-    preferBuiltIn: Bool = true,
     enumerator: any AudioInputDeviceEnumerating = CoreAudioInputDeviceEnumerator()
   ) {
     self.deviceUID = deviceUID
-    self.preferBuiltIn = preferBuiltIn
     self.enumerator = enumerator
   }
 
@@ -179,8 +171,7 @@ public struct RealMicSourceProvider: CaptureEngineProvider {
   func resolvedInputDevice() -> AudioInputDevice? {
     InputDeviceSelection.choose(
       from: enumerator.inputDevices(),
-      preferredUID: deviceUID,
-      preferBuiltIn: preferBuiltIn)
+      preferredUID: deviceUID)
   }
 
   /// Bind `input` to the resolved device (if any) **before** the engine starts
@@ -217,7 +208,7 @@ public struct RealMicSourceProvider: CaptureEngineProvider {
       return false
     }
     Self.log.notice(
-      "mic capture bound input device \(chosen.name, privacy: .public) (uid \(chosen.uid, privacy: .public)); a connected Bluetooth headset stays in A2DP"
+      "mic capture bound configured input device \(chosen.name, privacy: .public) (uid \(chosen.uid, privacy: .public))"
     )
     return true
   }

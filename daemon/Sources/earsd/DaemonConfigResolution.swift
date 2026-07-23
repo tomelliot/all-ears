@@ -71,8 +71,7 @@ enum DaemonConfigResolution {
       storeNative: bool(earsd, "store_native", default: true),
       channels: int(earsd, "channels", default: 1),
       codec: string(earsd, "codec", default: "aac"),
-      bitrate: int(earsd, "bitrate", default: 64_000),
-      defaultTimeCapSeconds: int(earsd, "default_time_cap_seconds", default: 7_200)
+      bitrate: int(earsd, "bitrate", default: 64_000)
     )
 
     var descriptors: [SourceDescriptor] = []
@@ -96,6 +95,8 @@ enum DaemonConfigResolution {
       ? ["mic"]
       : stringArray(meetingsTable, "local_sources").map { SourceID($0) }
 
+    let retentionTable = nestedTable(earsd, "retention")
+
     let configuration = EarsDaemonConfiguration(
       sources: descriptors,
       dataRoot: URL(fileURLWithPath: dataRoot.isEmpty ? "." : dataRoot),
@@ -104,9 +105,12 @@ enum DaemonConfigResolution {
       vad: vad,
       codec: defaults.codec,
       bitrate: defaults.bitrate,
-      defaultTimeCapSeconds: defaults.defaultTimeCapSeconds,
       evictionSweepIntervalSeconds: Double(
         int(earsd, "eviction_sweep_interval_s", default: 60)),
+      evictAfterTranscriptSeconds: Double(
+        int(retentionTable, "evict_after_transcript_seconds", default: 7_200)),
+      maxAudioAgeSeconds: Double(
+        int(retentionTable, "max_audio_age_seconds", default: 604_800)),
       ingestWebSocket: resolveIngestWebSocket(earsd),
       controlWebSocket: resolveControlWebSocket(earsd),
       meetingIngestCloseGraceSeconds: Double(
@@ -224,7 +228,6 @@ enum DaemonConfigResolution {
     var channels: Int
     var codec: String
     var bitrate: Int
-    var defaultTimeCapSeconds: Int
   }
 
   private static func resolveSource(
@@ -278,7 +281,6 @@ enum DaemonConfigResolution {
 
     let label = string(fields, "label", default: "")
     let deviceUID = string(fields, "device_uid", default: "")
-    let timeCapSeconds = int(fields, "time_cap_seconds", default: defaults.defaultTimeCapSeconds)
 
     return .included(
       SourceDescriptor(
@@ -293,7 +295,6 @@ enum DaemonConfigResolution {
         channels: defaults.channels,
         codec: defaults.codec,
         bitrate: defaults.bitrate,
-        timeCapSeconds: timeCapSeconds,
         created: now
       ))
   }

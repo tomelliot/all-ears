@@ -1,4 +1,4 @@
-/// Pure, dependency-free logic shared across the All Ears suite: ring-buffer and
+/// Pure, dependency-free logic shared across the All Ears suite: audio-index and
 /// time-cap math, VAD-index reading, transcript rendering, config merge logic, log
 /// record schema, and the protocol seams (`CaptureBackend`, `Transcriber`,
 /// `Diarizer`, `VAD`, `PermissionProviding`).

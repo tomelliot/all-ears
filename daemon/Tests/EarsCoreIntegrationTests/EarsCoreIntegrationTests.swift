@@ -8,11 +8,11 @@ import Testing
 /// Chunk files are zero-byte placeholders — Phase 0 does no codec work, so
 /// only the paths need to exist, not real audio.
 ///
-/// This is the "fixture ring buffer" the roadmap's Phase 0 exit criterion
+/// This is the fixture source directory the roadmap's Phase 0 exit criterion
 /// names: a real directory on disk that `EarsCore`'s pure index types read
 /// back through actual file I/O, rather than an in-memory `[IndexEvent]`
-/// literal (which is what `IndexLogTests`/`RangeReconstructionTests`/
-/// `RingBufferEvictionTests` already exercise at tier 0).
+/// literal (which is what `IndexLogTests`/`RangeReconstructionTests` already
+/// exercise at tier 0).
 private final class SourceFixture {
   let sourceDirectory: URL
   let indexFileURL: URL
@@ -39,7 +39,6 @@ private final class SourceFixture {
       asr_sample_rate = 16000
       channels = 1
       codec = "aac"
-      time_cap_seconds = 7200
       created = "2026-07-17T08:00:00Z"
       """
     try? metaTOML.write(
@@ -56,18 +55,18 @@ private final class SourceFixture {
 
 /// Tier-1 integration tests, per `docs/engineering-practices.md`'s layered
 /// test strategy: `EarsCore`'s already-unit-tested index logic (``IndexLog``,
-/// ``RangeReconstructor``, ``RingBufferEviction``), read and exercised
-/// end-to-end against a fixture ring buffer directory on disk. This is the
-/// roadmap's Phase 0 exit criterion — "a fixture ring buffer can be created
-/// and read by EarsCore" — made literal and green.
+/// ``RangeReconstructor``), read and exercised end-to-end against a fixture
+/// source directory on disk. This is the roadmap's Phase 0 exit criterion —
+/// "a fixture source directory can be created and read by EarsCore" — made
+/// literal and green.
 ///
 /// The value here is proving the pieces compose against something shaped
 /// like a real fixture directory; per-case edge behaviour (clipping at
-/// boundaries, malformed lines, cutoff-exact retention, ...) is already
-/// covered at tier 0 in `IndexLogTests`/`RangeReconstructionTests`/
-/// `RingBufferEvictionTests` and is deliberately not re-tested here.
-@Suite("Fixture ring buffer")
-struct FixtureRingBufferTests {
+/// boundaries, malformed lines, ...) is already covered at tier 0 in
+/// `IndexLogTests`/`RangeReconstructionTests` and is deliberately not
+/// re-tested here.
+@Suite("Fixture source directory")
+struct FixtureSourceDirectoryTests {
   /// 2026-07-17T10:30:00Z, matching the epoch base the tier-0 index tests
   /// use, so timestamps in this fixture read the same way.
   private let base = Instant(secondsSinceEpoch: 1_784_284_200)
@@ -190,32 +189,5 @@ struct FixtureRingBufferTests {
     #expect(trailing.chunks.isEmpty)
     #expect(trailing.vadSpans.isEmpty)
     #expect(trailing.gaps.isEmpty)
-  }
-
-  @Test(
-    "eviction math over the fixture's chunk list evicts the two oldest at a given time cap, ignoring the prior evict record"
-  )
-  func evictionOverFixtureChunks() throws {
-    let events = try parsedFixtureEvents()
-
-    // The fixture's one `evict` event is itself a record of a past
-    // deletion, not a live chunk -- it must not appear in the chunk list
-    // eviction math operates over.
-    let chunks = events.compactMap { event -> IndexedChunk? in
-      guard case .chunk(let start, let end, let file, let frames) = event else { return nil }
-      return IndexedChunk(range: TimeRange(start: start, end: end), file: file, frames: frames)
-    }
-    #expect(chunks.count == 4)
-
-    // now = the last chunk's end (base+132); a 60s cap sets the cutoff at
-    // base+72, aging out the two chunks that end at base+30 and base+60.
-    let now = base.advanced(by: 132)
-    let evicted = RingBufferEviction.chunksToEvict(chunks, now: now, timeCapSeconds: 60)
-
-    #expect(
-      evicted.map(\.file) == [
-        "chunks/2026-07-17T10-30-00Z.m4a",
-        "chunks/2026-07-17T10-30-30Z.m4a",
-      ])
   }
 }

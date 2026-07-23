@@ -4,10 +4,10 @@ import Foundation
 
 /// `transcribe --file`'s pipeline: transcribe one or more standalone audio
 /// files (a `.m4a` voice memo, an exported meeting recording, ...) that never
-/// went through the capture daemon's ring buffer.
+/// went through the capture daemon's store.
 ///
 /// The file-input sibling of ``TranscribePipeline``. It shares every leaf that
-/// isn't ring-buffer-specific -- the injected ``TranscribePipeline/Dependencies``
+/// isn't capture-store-specific -- the injected ``TranscribePipeline/Dependencies``
 /// (clock + ``Transcriber`` factory + `loadOptions`), ``TranscriptAssembly``,
 /// ``TranscriptRenderer``, and ``AtomicFileIO`` -- and swaps only the audio
 /// source: ``FileAudioReader`` in place of ``SegmentedAudioReader``. It reads

@@ -30,7 +30,6 @@ struct SourceSpecTests {
     #expect(spec.channels == nil)
     #expect(spec.codec == nil)
     #expect(spec.bitrate == nil)
-    #expect(spec.timeCapSeconds == nil)
   }
 
   @Test("decodes a fully-populated spec with meta.toml-style snake_case keys")
@@ -39,7 +38,7 @@ struct SourceSpecTests {
       {
         "id":"app:us.zoom.xos","class":"app","label":"Zoom","device_uid":"",
         "native_sample_rate":48000,"asr_sample_rate":16000,"store_native":true,
-        "channels":1,"codec":"aac","bitrate":64000,"time_cap_seconds":7200
+        "channels":1,"codec":"aac","bitrate":64000
       }
       """
     let spec = try JSONDecoder().decode(SourceSpec.self, from: Data(json.utf8))
@@ -55,8 +54,7 @@ struct SourceSpecTests {
           storeNative: true,
           channels: 1,
           codec: "aac",
-          bitrate: 64000,
-          timeCapSeconds: 7200
+          bitrate: 64000
         ))
   }
 

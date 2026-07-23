@@ -2,18 +2,18 @@ import EarsCore
 import EarsCoreTestSupport
 import EarsDataStore
 import Foundation
-import Synchronization
 import Testing
 
 @testable import EarsDaemonKit
 
-/// Tests the daemon-owned time-cap sweep — the fix for eviction only ever
-/// applying to the continuously-capturing mic. The decisive case is a source
-/// with **no live actor** (a stopped browser/meeting source, or one left on
-/// disk after a restart): the sweep must still expire its aged recordings.
+/// Tests the daemon-owned, meeting-driven retention sweep: an ended meeting's
+/// audio (`meetings/<id>/sources/`) is deleted once its deadline passes —
+/// `transcript_completed + evict_after_transcript_seconds` when a transcript
+/// succeeded, else `ended + max_audio_age_seconds` — while `meeting.toml` and
+/// `events.jsonl` are kept forever, and live meetings are never touched.
 @Suite("EvictionSweeper")
 struct EvictionSweeperTests {
-  private let startEpoch = 1_000_000.0
+  private let base = Instant(secondsSinceEpoch: 1_000_000)
 
   private func makeDataRoot() throws -> URL {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -22,84 +22,133 @@ struct EvictionSweeperTests {
     return dir
   }
 
-  /// Persists a browser source's `meta.toml` and empty `asr/` chunk files named
-  /// for `starts`, returning the source-relative chunk paths.
-  @discardableResult
-  private func seedSource(
-    id: SourceID, timeCapSeconds: Int, starts: [Double], dataRoot: URL
-  ) throws -> [String] {
-    let descriptor = SourceDescriptor(
-      schema: 1, id: id, sourceClass: .browser, label: "",
-      nativeSampleRate: 16_000, asrSampleRate: 16_000, storeNative: false,
-      channels: 1, codec: "aac", bitrate: 64_000, timeCapSeconds: timeCapSeconds,
-      created: Instant(secondsSinceEpoch: startEpoch))
-    try SourceMetaStore.write(descriptor, dataRoot: dataRoot)
+  /// Persists one meeting: `meeting.toml` + `events.jsonl` at the global root,
+  /// and a `sources/<sid>/asr/` chunk file under the meeting's directory.
+  private func seedMeeting(
+    id: String,
+    state: MeetingState,
+    ended: Instant?,
+    transcriptCompleted: Instant?,
+    dataRoot: URL
+  ) throws {
+    let meeting = Meeting(
+      id: id,
+      title: "call",
+      state: state,
+      started: base,
+      ended: ended,
+      intervals: [MeetingInterval(start: base, end: ended)],
+      sources: ["mic"],
+      transcriptCompleted: transcriptCompleted)
+    try MeetingStore.write(meeting, dataRoot: dataRoot)
+    try MeetingEventLog.append(
+      MeetingEventLog.Entry(t: ISO8601InstantCodec.format(base), event: "started"),
+      dataRoot: dataRoot, meetingID: id)
 
-    let asrDirectory = DataStoreLayout.asrDirectory(dataRoot: dataRoot, sourceID: id)
+    let meetingRoot = DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: id)
+    let asrDirectory = DataStoreLayout.asrDirectory(dataRoot: meetingRoot, sourceID: "mic")
     try FileManager.default.createDirectory(at: asrDirectory, withIntermediateDirectories: true)
-    var files: [String] = []
-    for start in starts {
-      let filename = FilenameTimestampCodec.string(for: Instant(secondsSinceEpoch: start)) + ".m4a"
-      try Data().write(to: asrDirectory.appendingPathComponent(filename))
-      files.append("asr/\(filename)")
-    }
-    return files
+    try Data("audio".utf8).write(to: asrDirectory.appendingPathComponent("chunk.m4a"))
   }
 
-  private func remainingASRFiles(id: SourceID, dataRoot: URL) throws -> [String] {
-    try FileManager.default.contentsOfDirectory(
-      atPath: DataStoreLayout.asrDirectory(dataRoot: dataRoot, sourceID: id).path)
+  private func sourcesDirectory(id: String, dataRoot: URL) -> URL {
+    DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: id)
+      .appendingPathComponent("sources")
   }
 
-  @Test("expires a source that has no live actor")
-  func expiresActorlessSource() async throws {
+  private func audioExists(id: String, dataRoot: URL) -> Bool {
+    FileManager.default.fileExists(atPath: sourcesDirectory(id: id, dataRoot: dataRoot).path)
+  }
+
+  private func makeSweeper(dataRoot: URL, clock: ManualClock) -> EvictionSweeper {
+    EvictionSweeper(
+      dataRoot: dataRoot,
+      clock: clock,
+      intervalSeconds: 60,
+      evictAfterTranscriptSeconds: 100,
+      maxAudioAgeSeconds: 1_000,
+      log: { _ in })
+  }
+
+  @Test("a transcribed meeting's audio is deleted at completion + evict_after, and not before")
+  func evictsTranscribedMeetingAtDeadline() async throws {
     let dataRoot = try makeDataRoot()
-    let id: SourceID = "browser:call-abc"
-    try seedSource(
-      id: id, timeCapSeconds: 100, starts: [startEpoch, startEpoch + 30, startEpoch + 60],
-      dataRoot: dataRoot)
+    let ended = base.advanced(by: 600)
+    let completed = base.advanced(by: 700)
+    try seedMeeting(
+      id: "m1", state: .ended, ended: ended, transcriptCompleted: completed, dataRoot: dataRoot)
 
-    // Clock well past the newest chunk: the whole (stopped) source is behind
-    // its cap. No actor exists, so `evictThroughActors` handles nothing.
-    let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch + 100_000))
-    let sweeper = EvictionSweeper(
-      dataRoot: dataRoot, clock: clock, intervalSeconds: 60, log: { _ in },
-      evictThroughActors: { _ in [] })
+    let clock = ManualClock(completed.advanced(by: 99))
+    let sweeper = makeSweeper(dataRoot: dataRoot, clock: clock)
 
+    // One second before the deadline: nothing is deleted.
+    await sweeper.sweepOnce()
+    #expect(audioExists(id: "m1", dataRoot: dataRoot))
+
+    // At the deadline: the meeting's audio is gone, its records are kept.
+    clock.advance(by: 1)
+    await sweeper.sweepOnce()
+    #expect(!audioExists(id: "m1", dataRoot: dataRoot))
+    #expect(
+      FileManager.default.fileExists(
+        atPath: DataStoreLayout.meetingTomlFile(dataRoot: dataRoot, meetingID: "m1").path))
+    #expect(
+      FileManager.default.fileExists(
+        atPath: MeetingEventLog.fileURL(dataRoot: dataRoot, meetingID: "m1").path))
+  }
+
+  @Test("a never-transcribed meeting's audio survives to ended + max_audio_age, then is deleted")
+  func evictsUntranscribedMeetingAtHardCap() async throws {
+    let dataRoot = try makeDataRoot()
+    let ended = base.advanced(by: 600)
+    try seedMeeting(
+      id: "m2", state: .ended, ended: ended, transcriptCompleted: nil, dataRoot: dataRoot)
+
+    // Well past the transcript deadline (which doesn't apply — no transcript
+    // ever completed) but before the hard cap: audio is retained so a failed
+    // transcription can still be retried.
+    let clock = ManualClock(ended.advanced(by: 999))
+    let sweeper = makeSweeper(dataRoot: dataRoot, clock: clock)
+    await sweeper.sweepOnce()
+    #expect(audioExists(id: "m2", dataRoot: dataRoot))
+
+    clock.advance(by: 1)
+    await sweeper.sweepOnce()
+    #expect(!audioExists(id: "m2", dataRoot: dataRoot))
+    #expect(
+      FileManager.default.fileExists(
+        atPath: DataStoreLayout.meetingTomlFile(dataRoot: dataRoot, meetingID: "m2").path))
+  }
+
+  @Test("a live (non-ended) meeting is never evicted, no matter how old")
+  func neverEvictsLiveMeeting() async throws {
+    let dataRoot = try makeDataRoot()
+    try seedMeeting(
+      id: "m3", state: .active, ended: nil, transcriptCompleted: nil, dataRoot: dataRoot)
+
+    let clock = ManualClock(base.advanced(by: 1_000_000))
+    let sweeper = makeSweeper(dataRoot: dataRoot, clock: clock)
     await sweeper.sweepOnce()
 
-    #expect(try remainingASRFiles(id: id, dataRoot: dataRoot).isEmpty)
-    let events = IndexLog.parse(
-      try await IndexAppender(
-        fileURL: DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: id)
-      ).readContents()
-    ).events
-    #expect(events.count == 3)
-    #expect(events.allSatisfy { if case .evict = $0 { return true } else { return false } })
+    #expect(audioExists(id: "m3", dataRoot: dataRoot))
   }
 
-  @Test("routes a live source through its actor rather than touching disk")
-  func routesLiveSourceThroughActor() async throws {
+  @Test("a meeting whose audio is already gone sweeps cleanly (idempotent)")
+  func sweepIsIdempotent() async throws {
     let dataRoot = try makeDataRoot()
-    let id: SourceID = "browser:live"
-    try seedSource(
-      id: id, timeCapSeconds: 100, starts: [startEpoch, startEpoch + 30], dataRoot: dataRoot)
+    let ended = base.advanced(by: 600)
+    let completed = base.advanced(by: 700)
+    try seedMeeting(
+      id: "m4", state: .ended, ended: ended, transcriptCompleted: completed, dataRoot: dataRoot)
 
-    let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch + 100_000))
-    // Claim the id was handled by a live actor. The sweep must then leave its
-    // files alone — the actor (not the disk path) owns that source's index.
-    let routed = Mutex<[SourceID]>([])
-    let sweeper = EvictionSweeper(
-      dataRoot: dataRoot, clock: clock, intervalSeconds: 60, log: { _ in },
-      evictThroughActors: { ids in
-        routed.withLock { $0.append(contentsOf: ids) }
-        return ids
-      })
-
+    let clock = ManualClock(completed.advanced(by: 10_000))
+    let sweeper = makeSweeper(dataRoot: dataRoot, clock: clock)
     await sweeper.sweepOnce()
-
-    #expect(routed.withLock { $0 } == [id])
-    // Files untouched by the sweep's disk path (the fake actor deleted nothing).
-    #expect(try remainingASRFiles(id: id, dataRoot: dataRoot).count == 2)
+    #expect(!audioExists(id: "m4", dataRoot: dataRoot))
+    // A second pass over the same (already-evicted) meeting is a no-op.
+    await sweeper.sweepOnce()
+    #expect(
+      FileManager.default.fileExists(
+        atPath: DataStoreLayout.meetingTomlFile(dataRoot: dataRoot, meetingID: "m4").path))
   }
 }

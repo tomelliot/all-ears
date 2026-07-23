@@ -23,7 +23,6 @@ struct SourceDescriptorTOMLTests {
     channels: 1,
     codec: "aac",
     bitrate: 64000,
-    timeCapSeconds: 7200,
     created: Instant(secondsSinceEpoch: 1_784_284_200)  // 2026-07-17T10:30:00Z
   )
 
@@ -44,7 +43,6 @@ struct SourceDescriptorTOMLTests {
           "channels": .int(1),
           "codec": .string("aac"),
           "bitrate": .int(64000),
-          "time_cap_seconds": .int(7200),
           "created": .string("2026-07-17T10-30-00Z"),
         ])
     )
@@ -65,7 +63,6 @@ struct SourceDescriptorTOMLTests {
         channels = 1
         codec = "aac"
         bitrate = 64000
-        time_cap_seconds = 7200
         created = "2026-07-17T10-30-00Z"
         """
     )
@@ -106,7 +103,6 @@ struct SourceDescriptorTOMLTests {
       channels: 1,
       codec: "aac",
       bitrate: 64000,
-      timeCapSeconds: 7200,
       created: Instant(secondsSinceEpoch: 0)
     )
 

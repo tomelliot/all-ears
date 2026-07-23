@@ -2,14 +2,14 @@
 
 ## `earsd` — one job
 
-Continuously capture every enabled audio source into its per-source ring buffer, maintain the VAD index, keep session and meeting records, and expose the control plane. `earsd` is the **only writer** to the ring buffer and is **never in the read path**.
+Capture each active meeting's audio sources under the meeting's own directory, maintain the VAD index, keep session and meeting records, enforce transcript-driven retention, and expose the control plane. `earsd` is the **only writer** to the audio store and is **never in the read path**.
 
 ### Responsibilities
 
-- Open and manage a capture engine per enabled source (mic, system, per-app, device) and accept pushed audio for `browser:` sources.
-- Encode incoming audio and append time-stamped chunks (native + 16 kHz ASR feeds) to `<data-root>/sources/<id>/`.
-- Run a per-source VAD and append `chunk`/`gap`/`evict` events to the structural index (`chunks.jsonl`) and `vad` spans to the segmented VAD stream (`vad/`), split so a restart parses only the small structural log — see [data formats](../data-formats.md#the-index-chunksjsonl--vad).
-- Enforce each source's time cap by evicting oldest chunks; honour the optional `hard_total_cap_bytes` backstop.
+- Open and manage a capture engine per source a meeting names (mic, system, per-app, device) and accept pushed audio for `browser:` sources — built when a meeting starts, torn down when its last meeting ends. The daemon boots idle and records nothing between meetings.
+- Encode incoming audio and append time-stamped chunks (native + 16 kHz ASR feeds) to `<data-root>/meetings/<meeting-id>/sources/<id>/`.
+- Run a per-source VAD and append `chunk`/`gap` events to the structural index (`chunks.jsonl`) and `vad` spans to the segmented VAD stream (`vad/`) — see [data formats](../data-formats.md#the-index-chunksjsonl--vad).
+- Enforce transcript-driven retention: delete an ended meeting's audio once its deadline passes (below).
 - Maintain session and meeting descriptors; run app-signal triggers and the `on_close` pipeline.
 - Serve the control plane: query, source management, session lifecycle, live-feed pub/sub, audio ingestion.
 
@@ -20,11 +20,11 @@ Continuously capture every enabled audio source into its per-source ring buffer,
 
 ### Audio capture
 
-- **Mic / device:** `AVAudioEngine` input bound to a chosen device rather than always following the system default. Selection (`InputDeviceSelection`): an explicit `device_uid` when present, else (by default) the **built-in** mic, else the system default. This keeps a connected Bluetooth headset out of the capture path — opening its input would force the whole device off A2DP onto the hands-free profile (mono, 8–16 kHz), collapsing playback quality for as long as the daemon runs — and costs nothing, since the far end of a call is captured losslessly by the system/app process tap and the built-in mic hears the local speaker anyway. **Crash-safe binding:** the device is set on the input node's audio unit (`kAudioOutputUnitProperty_CurrentDevice`) on a fresh, not-yet-started engine, *before* the tap is installed and `start()` runs — never on a live node via `AUAudioUnit.setDeviceID`, which crashed AVFoundation (`AVAudioIOUnit::IOUnitPropertyListener` use-after-free racing the route-change/stall rebuild). Binding still provokes one self-induced `AVAudioEngineConfigurationChange` at start, so the backend suppresses configuration-change rebuilds within a short settle window after each (re)build; genuine route changes outside that window rebuild as before. Binding is best-effort — no selection, an inaccessible audio unit, or a failed HAL set all fall back to the system default input. Needs the real-hardware verification pass (below) before it is trusted in a release.
+- **Mic / device:** `AVAudioEngine` input follows the system default input by default — whatever device the user has selected, Bluetooth included. Recording is meeting-scoped and brief, so holding a Bluetooth mic open for a call is acceptable and there is no built-in-mic preference. Selection (`InputDeviceSelection`): an explicit `device_uid` binds that specific device; with none set, the engine stays on the system default. **Crash-safe binding:** the device is set on the input node's audio unit (`kAudioOutputUnitProperty_CurrentDevice`) on a fresh, not-yet-started engine, *before* the tap is installed and `start()` runs — never on a live node via `AUAudioUnit.setDeviceID`, which crashed AVFoundation (`AVAudioIOUnit::IOUnitPropertyListener` use-after-free racing the route-change/stall rebuild). Binding still provokes one self-induced `AVAudioEngineConfigurationChange` at start, so the backend suppresses configuration-change rebuilds within a short settle window after each (re)build; genuine route changes outside that window rebuild as before. Binding is best-effort — no `device_uid`, an inaccessible audio unit, or a failed HAL set all fall back to the system default input. Needs the real-hardware verification pass (below) before it is trusted in a release.
 - **System / per-app audio:** Core Audio **process taps** (`CATap`, macOS 14.4+): build a `CATapDescription` → `AudioHardwareCreateProcessTap` → wrap in a private auto-start **tap-only aggregate device** (no sub-device, to avoid duplicate/echo audio) for a clean IO proc. The tap's format is read from `kAudioTapPropertyFormat`, never assumed. ScreenCaptureKit is rejected for this: it can't isolate per-app audio and forces a screen-recording prompt.
   - **Per-app scoping** (`app:<bundle-id>`) uses the tap's process-inclusion list: the daemon resolves a bundle id to its live PIDs, tracks process launch/exit, and rebuilds the inclusion list as the app's processes come and go. Inclusion/exclusion semantics are covered by integration tests; full isolation verification needs an opt-in test on real hardware with the permission granted.
 - **Browser audio:** binary PCM pushed over the ingest WebSocket (below) into `browser:<label>` sources via a push-fed capture backend.
-- **Realtime → worker hand-off:** the IO-proc is allocation-free and only publishes into the per-source lock-free SPSC RAM ring ([architecture](../architecture.md#two-buffers-kept-distinct)); a separate worker drains it to encode and write chunks. A dropped-sample counter is logged; sustained backpressure fails the stream rather than buffering unbounded.
+- **Realtime → worker hand-off:** the IO-proc is allocation-free and only publishes into the per-source lock-free SPSC RAM buffer ([architecture](../architecture.md#two-stores-kept-distinct)); a separate worker drains it to encode and write chunks. A dropped-sample counter is logged; sustained backpressure fails the stream rather than buffering unbounded.
 - **Sources stay separately labelled to the very end** — mixing mic + system into one stream would discard you-vs-them attribution.
 
 ### Device-route resilience
@@ -39,11 +39,11 @@ Continuously capture every enabled audio source into its per-source ring buffer,
 - On denial, the error names the exact pane — macOS 15's "System Audio Recording Only" sub-pane — rather than failing generically.
 - Missing permission for a source logs an error and **disables just that source**, never the daemon.
 
-### Ring buffer maintenance
+### Storage maintenance and retention
 
 - Chunks are fixed-duration (default 30 s), written atomically (temp + rename) then indexed. On flush, `fsync` both the file and its directory; on an encode failure, keep the partial chunk.
-- Eviction: a daemon-owned periodic sweep (default every 60 s, independent of capture activity) deletes, for **every** source, chunks whose end is older than `now - time_cap` and emits `evict` — so stopped and idle sources (an ended meeting, a disabled source) are expired too, not just the continuously-capturing mic. Sources with a live capture actor are evicted through it (single index writer); actor-less sources are evicted straight from disk, deciding aged-out chunks from their filenames. If `hard_total_cap_bytes > 0`, evict oldest across sources until under budget.
-- On startup after downtime, emit a `gap` event covering the uncaptured interval.
+- Retention is per-meeting, driven by `[earsd.retention]`: a daemon-owned periodic sweep (default every 60 s) deletes an **ended** meeting's whole `sources/` directory once `transcript_completed + evict_after_transcript_seconds` has passed — or, when no transcript ever completed, once `ended + max_audio_age_seconds` has (so a failed transcription can be retried up to that point). `meeting.toml` and `events.jsonl` are never deleted; transcripts under `<output-root>` are never deleted. Live meetings are never touched.
+- The transcript-completion marker is stamped by the daemon when the meeting-end auto-transcribe exits 0 (persisted as `transcript_completed` in `meeting.toml`), so retention survives restarts.
 
 ### VAD
 

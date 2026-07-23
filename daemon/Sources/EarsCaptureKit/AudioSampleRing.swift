@@ -2,7 +2,7 @@ import AVFoundation
 import CoreAudio
 import Synchronization
 
-/// A fixed-capacity single-producer/single-consumer (SPSC) RAM ring buffer that
+/// A fixed-capacity single-producer/single-consumer (SPSC) RAM circular buffer that
 /// the realtime audio tap callback publishes mono PCM samples into and a separate
 /// worker drains. This is the *realtime jitter buffer* from
 /// `docs/architecture.md`'s "Two buffers, kept distinct" — milliseconds-to-seconds

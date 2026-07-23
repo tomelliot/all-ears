@@ -11,7 +11,7 @@
 /// A field declaring `elementSchema` (an array-of-tables field, e.g.
 /// `[[earsd.source]]`) validates each element of the array against that
 /// nested schema, reporting errors with an indexed path segment
-/// (`earsd.source[1].time_cap_seconds`) so a precise element is identifiable.
+/// (`earsd.source[1].device_uid`) so a precise element is identifiable.
 /// An element that isn't itself a table is reported as a type mismatch at the
 /// indexed path.
 public func validateConfig(_ value: ConfigValue, against schema: ConfigSchema) -> [ConfigError] {

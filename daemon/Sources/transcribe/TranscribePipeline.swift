@@ -5,7 +5,7 @@ import Foundation
 
 /// `transcribe`'s actual pipeline, per `docs/specs/transcribe.md`'s
 /// "Behaviour" section: resolve the requested range and sources, read each
-/// source's real ring-buffer audio into decoded, natural-pause-segmented
+/// source's real captured audio into decoded, natural-pause-segmented
 /// slices (``SegmentedAudioReader``, the composition root already merged on
 /// this base -- it resolves each source's `meta.toml` for the ASR sample
 /// rate and reads the real, codec-decoded `asr/` chunk files itself), run
@@ -22,7 +22,7 @@ import Foundation
 /// `transcribe`'s actual behaviour -- is directly unit-testable against a
 /// fixture data root and an injected fake ``Transcriber`` with no
 /// environment-variable or config-file setup at all, per
-/// `docs/engineering-practices.md`'s tier-1 "fixture ring buffer on disk"
+/// `docs/engineering-practices.md`'s tier-1 "fixture audio store on disk"
 /// strategy.
 enum TranscribePipeline {
   /// Everything real production code has to fake to test this type: the
@@ -163,6 +163,22 @@ enum TranscribePipeline {
     }
     let requestedRange = resolved.range
 
+    // Audio is meeting-scoped: `--meeting M` reads it under meetings/M/, and
+    // `--session` under meetings/<slug>/ (sessions are materialized with
+    // slug = meeting id). Only the audio moves — meeting.toml/session.toml
+    // are still read from the global data root above. The ad-hoc flags
+    // (--last/--from/--to) have no meeting context and keep the global root;
+    // there is no global audio store any more, so they only find audio a
+    // caller staged there deliberately.
+    let audioRoot: URL
+    if let meetingID = inputs.meeting {
+      audioRoot = DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: meetingID)
+    } else if let slug = resolved.sessionSlug {
+      audioRoot = DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: slug)
+    } else {
+      audioRoot = dataRoot
+    }
+
     // --session's sources override any --source flags; otherwise --source
     // is required, exactly as before.
     let sourceIDs = resolved.sourceIDs ?? inputs.sourceIDs.map { SourceID($0) }
@@ -183,7 +199,7 @@ enum TranscribePipeline {
     // SegmentedAudioReader's own clear error below, not a misleading
     // "unknown source".
     for sourceID in sourceIDs {
-      let sourceDirectory = DataStoreLayout.sourceDirectory(dataRoot: dataRoot, sourceID: sourceID)
+      let sourceDirectory = DataStoreLayout.sourceDirectory(dataRoot: audioRoot, sourceID: sourceID)
       guard FileManager.default.fileExists(atPath: sourceDirectory.path) else {
         dependencies.writeStderr(
           "error: unknown source '\(sourceID.rawValue)': no data found under \(sourceDirectory.path)"
@@ -201,7 +217,7 @@ enum TranscribePipeline {
       return 1
     }
 
-    let audioReader = SegmentedAudioReader(dataRoot: dataRoot)
+    let audioReader = SegmentedAudioReader(dataRoot: audioRoot)
     var transcriptions: [SourceTranscription] = []
     var speechSeconds: Double = 0
 

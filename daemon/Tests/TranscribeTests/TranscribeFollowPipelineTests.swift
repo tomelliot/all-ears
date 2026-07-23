@@ -55,7 +55,7 @@ struct TranscribeFollowPipelineTests {
         SourceDescriptor(
           schema: 1, id: sourceID, sourceClass: sourceID.sourceClass ?? .mic,
           label: sourceID.rawValue, nativeSampleRate: asrRate, asrSampleRate: asrRate,
-          storeNative: false, channels: 1, codec: "aac", bitrate: 64_000, timeCapSeconds: 7_200,
+          storeNative: false, channels: 1, codec: "aac", bitrate: 64_000,
           created: created),
         dataRoot: dataRoot)
       appender = IndexAppender(
@@ -194,7 +194,7 @@ struct TranscribeFollowPipelineTests {
       state: .silence, start: now.advanced(by: 1.5), end: now.advanced(by: 2.5))
     await harness.waitForStdout(count: 1)
 
-    // The ring buffer grows mid-run: a second chunk, another pause.
+    // The audio store grows mid-run: a second chunk, another pause.
     try await fixture.appendChunk(start: now.advanced(by: 2), duration: 2, asrRate: asrRate)
     try await fixture.appendVAD(
       state: .speech, start: now.advanced(by: 2.5), end: now.advanced(by: 3.5))
@@ -300,7 +300,7 @@ struct TranscribeFollowPipelineTests {
     let run = launch(fixture: fixture, dependencies: dependencies)
 
     await harness.waitForStart()
-    // One 5 s chunk lands at once (a ring-buffer chunk is far longer than
+    // One 5 s chunk lands at once (a capture chunk is far longer than
     // the cap), all speech, with the first natural pause only at 4.5 s.
     try await fixture.appendChunk(start: now, duration: 5, asrRate: asrRate)
     try await fixture.appendVAD(state: .speech, start: now, end: now.advanced(by: 4.5))

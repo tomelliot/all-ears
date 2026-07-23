@@ -2,43 +2,18 @@ import AVFoundation
 import CoreAudio
 
 /// One microphone-class input device the system currently exposes, reduced to
-/// just what ``InputDeviceSelection`` needs to choose between them: its Core
-/// Audio object id (to bind an engine to), its stable UID (to match a
-/// configured `device_uid`), a human name (for logging), and its transport
-/// type (to tell a built-in mic from a Bluetooth headset).
-///
-/// **Why transport type matters here.** A Bluetooth headset cannot run
-/// high-quality A2DP output *and* offer a mic input at the same time — the
-/// profiles are mutually exclusive. The moment any process opens the headset's
-/// input, macOS forces the whole device onto the hands-free profile (mono,
-/// 8–16 kHz, in both directions) and its playback collapses to call quality.
-/// Because `earsd` holds the mic open continuously, capturing a Bluetooth
-/// input would pin the user's headphones in that degraded profile for as long
-/// as they are connected. Preferring the built-in mic (`docs/specs/capture-daemon.md`'s
-/// "Mic / device") sidesteps this entirely: the far end of any call is already
-/// captured losslessly by the system/app process tap, and the built-in mic
-/// hears the local speaker perfectly well while they wear headphones.
+/// just what ``InputDeviceSelection`` needs to match a configured `device_uid`:
+/// its Core Audio object id (to bind an engine to), its stable UID (to match
+/// the configured `device_uid`), and a human name (for logging).
 public struct AudioInputDevice: Sendable, Equatable {
   public let id: AudioObjectID
   public let uid: String
   public let name: String
-  public let transportType: UInt32
 
-  public init(id: AudioObjectID, uid: String, name: String, transportType: UInt32) {
+  public init(id: AudioObjectID, uid: String, name: String) {
     self.id = id
     self.uid = uid
     self.name = name
-    self.transportType = transportType
-  }
-
-  /// The Mac's own microphone (or line input), never a Bluetooth device.
-  public var isBuiltIn: Bool { transportType == kAudioDeviceTransportTypeBuiltIn }
-
-  /// A Bluetooth headset/earbud — the transport whose input forces the A2DP →
-  /// hands-free downgrade this whole seam exists to avoid.
-  public var isBluetooth: Bool {
-    transportType == kAudioDeviceTransportTypeBluetooth
-      || transportType == kAudioDeviceTransportTypeBluetoothLE
   }
 }
 
@@ -50,27 +25,21 @@ public enum InputDeviceSelection {
   /// Resolve the device to bind, or `nil` to leave the engine on the system
   /// default input.
   ///
-  /// Order of preference:
-  /// 1. An explicitly configured `preferredUID` that is currently present —
-  ///    the user named a device, so honour it even if it is Bluetooth.
-  /// 2. Otherwise, when `preferBuiltIn`, the built-in mic — avoiding the
-  ///    Bluetooth A2DP downgrade (see ``AudioInputDevice``).
-  /// 3. Otherwise `nil` — no override; the engine follows the system default
-  ///    input (the historical behaviour, and the only option on a Mac with no
-  ///    built-in mic and no configured device).
+  /// Recording is meeting-scoped and brief, so there is no reason to steer away
+  /// from any particular transport: the daemon simply follows whatever input
+  /// the user has selected as the system default (Bluetooth included), unless
+  /// they explicitly name a device.
+  ///
+  /// - A `preferredUID` that is currently present binds that device.
+  /// - Anything else (no `preferredUID`, or one that isn't connected) returns
+  ///   `nil`: the engine follows the system default input.
   public static func choose(
     from devices: [AudioInputDevice],
-    preferredUID: String,
-    preferBuiltIn: Bool
+    preferredUID: String
   ) -> AudioInputDevice? {
     let trimmed = preferredUID.trimmingCharacters(in: .whitespacesAndNewlines)
-    if !trimmed.isEmpty, let match = devices.first(where: { $0.uid == trimmed }) {
-      return match
-    }
-    if preferBuiltIn, let builtIn = devices.first(where: { $0.isBuiltIn }) {
-      return builtIn
-    }
-    return nil
+    guard !trimmed.isEmpty else { return nil }
+    return devices.first(where: { $0.uid == trimmed })
   }
 }
 
@@ -83,10 +52,10 @@ public protocol AudioInputDeviceEnumerating: Sendable {
 
 /// The production ``AudioInputDeviceEnumerating``: walks
 /// `kAudioHardwarePropertyDevices`, keeps those with at least one input
-/// channel, and reads each one's UID, name, and transport type. Every Core
-/// Audio failure degrades to "skip this device" / "return what we have" rather
-/// than throwing — device selection is a best-effort optimisation over the
-/// default input, never a hard requirement for capture to start.
+/// channel, and reads each one's UID and name. Every Core Audio failure
+/// degrades to "skip this device" / "return what we have" rather than throwing
+/// — device selection is a best-effort optimisation over the default input,
+/// never a hard requirement for capture to start.
 public struct CoreAudioInputDeviceEnumerator: AudioInputDeviceEnumerating {
   public init() {}
 
@@ -98,8 +67,7 @@ public struct CoreAudioInputDeviceEnumerator: AudioInputDeviceEnumerating {
       return AudioInputDevice(
         id: id,
         uid: uid,
-        name: stringProperty(id, kAudioObjectPropertyName) ?? uid,
-        transportType: transportType(id))
+        name: stringProperty(id, kAudioObjectPropertyName) ?? uid)
     }
   }
 
@@ -145,19 +113,6 @@ public struct CoreAudioInputDeviceEnumerator: AudioInputDeviceEnumerating {
     let list = UnsafeMutableAudioBufferListPointer(
       raw.assumingMemoryBound(to: AudioBufferList.self))
     return list.contains { $0.mNumberChannels > 0 }
-  }
-
-  private func transportType(_ id: AudioObjectID) -> UInt32 {
-    var address = AudioObjectPropertyAddress(
-      mSelector: kAudioDevicePropertyTransportType,
-      mScope: kAudioObjectPropertyScopeGlobal,
-      mElement: kAudioObjectPropertyElementMain)
-    var transport: UInt32 = 0
-    var dataSize = UInt32(MemoryLayout<UInt32>.size)
-    guard AudioObjectGetPropertyData(id, &address, 0, nil, &dataSize, &transport) == noErr else {
-      return kAudioDeviceTransportTypeUnknown
-    }
-    return transport
   }
 
   private func stringProperty(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector)

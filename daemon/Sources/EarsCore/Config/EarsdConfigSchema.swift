@@ -15,8 +15,6 @@
 public enum EarsdConfigSchema {
   public static let defaults: ConfigValue = .table([
     "earsd": .table([
-      "default_time_cap_seconds": .int(7200),
-      "hard_total_cap_bytes": .int(0),
       "chunk_seconds": .int(30),
       "codec": .string("aac"),
       "bitrate": .int(64000),
@@ -42,6 +40,10 @@ public enum EarsdConfigSchema {
       "meetings": .table([
         "ingest_close_grace_s": .int(120),
         "local_sources": .array([.string("mic")]),
+      ]),
+      "retention": .table([
+        "evict_after_transcript_seconds": .int(7200),
+        "max_audio_age_seconds": .int(604800),
       ]),
       "source": .array([
         .table([
@@ -70,7 +72,6 @@ public enum EarsdConfigSchema {
       "class": ConfigSchema.Field(type: .string),
       "device_uid": ConfigSchema.Field(type: .string),
       "label": ConfigSchema.Field(type: .string),
-      "time_cap_seconds": ConfigSchema.Field(type: .int),
       "enabled": ConfigSchema.Field(type: .bool),
     ]
   )
@@ -105,8 +106,6 @@ public enum EarsdConfigSchema {
         type: .table,
         children: ConfigSchema(
           fields: [
-            "default_time_cap_seconds": ConfigSchema.Field(type: .int),
-            "hard_total_cap_bytes": ConfigSchema.Field(type: .int),
             "chunk_seconds": ConfigSchema.Field(type: .int),
             "codec": ConfigSchema.Field(type: .string),
             "bitrate": ConfigSchema.Field(type: .int),
@@ -164,6 +163,20 @@ public enum EarsdConfigSchema {
                 fields: [
                   "ingest_close_grace_s": ConfigSchema.Field(type: .int),
                   "local_sources": ConfigSchema.Field(type: .array),
+                ]
+              )
+            ),
+            // Transcript-driven retention: evict a meeting's audio this many
+            // seconds after its transcript completes successfully, or — for a
+            // meeting whose transcript never completed — this many seconds
+            // after it ended, whichever deadline comes first. Transcripts are
+            // never evicted. See `EvictionSweeper`.
+            "retention": ConfigSchema.Field(
+              type: .table,
+              children: ConfigSchema(
+                fields: [
+                  "evict_after_transcript_seconds": ConfigSchema.Field(type: .int),
+                  "max_audio_age_seconds": ConfigSchema.Field(type: .int),
                 ]
               )
             ),

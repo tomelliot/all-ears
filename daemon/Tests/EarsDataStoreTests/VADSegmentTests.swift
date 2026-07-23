@@ -67,33 +67,6 @@ struct VADSegmentTests {
     #expect(!starts.contains(200))
   }
 
-  @Test("lastKnownEnd reports the newest segment's latest end")
-  func lastKnownEndReadsNewest() async throws {
-    let dir = makeDir()
-    let writer = VADSegmentWriter(directory: dir, maxSegmentBytes: 80, maxSegmentSeconds: 1_000_000)
-    try await writer.append(state: .speech, start: at(0), end: at(1))
-    try await writer.append(state: .speech, start: at(50), end: at(60))
-    #expect(VADSegmentStore.lastKnownEnd(directory: dir) == at(60))
-  }
-
-  @Test("evict unlinks fully-aged segments but never the newest")
-  func evictsAgedSegments() async throws {
-    let dir = makeDir()
-    let writer = VADSegmentWriter(directory: dir, maxSegmentBytes: 80, maxSegmentSeconds: 1_000_000)
-    // Three segments starting at 0, ~1, ~2 (byte cap forces rollover each append).
-    try await writer.append(state: .speech, start: at(0), end: at(1))
-    try await writer.append(state: .speech, start: at(1_000), end: at(1_001))
-    try await writer.append(state: .speech, start: at(2_000), end: at(2_001))
-    #expect(VADSegmentStore.segmentURLs(directory: dir).count == 3)
-
-    // Cutoff past the second segment's start: the first is fully older (the
-    // next segment starts before the cutoff); the newest is always kept.
-    let removed = try VADSegmentStore.evict(directory: dir, olderThan: at(1_500))
-    #expect(removed.count == 1)
-    let remaining = VADSegmentStore.segmentURLs(directory: dir).map(\.start)
-    #expect(remaining == [at(1_000), at(2_000)])
-  }
-
   @Test("a restart resumes into the newest existing segment")
   func resumesNewestSegment() async throws {
     let dir = makeDir()

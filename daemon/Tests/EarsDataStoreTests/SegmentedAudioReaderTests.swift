@@ -43,7 +43,7 @@ struct SegmentedAudioReaderTests {
       SourceDescriptor(
         schema: 1, id: "mic", sourceClass: .mic, label: "Mic",
         nativeSampleRate: sampleRate, asrSampleRate: sampleRate, storeNative: true, channels: 1,
-        codec: "aac", bitrate: 64000, timeCapSeconds: 7200, created: instant(-7200)),
+        codec: "aac", bitrate: 64000, created: instant(-7200)),
       dataRoot: dataRoot)
 
     let asrDirectory = DataStoreLayout.asrDirectory(dataRoot: dataRoot, sourceID: "mic")

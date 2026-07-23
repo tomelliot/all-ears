@@ -8,14 +8,14 @@ The default loop for all product code is red → green → refactor: write a fai
 
 ### The pure-core split makes TDD cheap
 
-All logic with no I/O lives in the pure `EarsCore` library: ring-buffer/time-cap math, VAD-index reading and range reconstruction, segment merging, streaming-delta emission, frontmatter serialisation, config layering. These are deterministic functions tested in isolation — no daemon, no device, no model. This is the single largest maintainability lever in the codebase.
+All logic with no I/O lives in the pure `EarsCore` library: VAD-index reading and range reconstruction, segment merging, streaming-delta emission, frontmatter serialisation, config layering. These are deterministic functions tested in isolation — no daemon, no device, no model. This is the single largest maintainability lever in the codebase.
 
 ### Layered test strategy
 
 | Tier | Scope | Rule |
 |------|-------|------|
 | **0 — pure units** | `EarsCore` logic, no I/O | Strict test-first. No behaviour ships without a failing test first. |
-| **1 — integration** | Tools against a **fixture ring buffer** on disk, no daemon running | Test-first for the contract: given these chunks + index, `transcribe` produces this transcript. |
+| **1 — integration** | Tools against a **fixture audio store** on disk, no daemon running | Test-first for the contract: given these chunks + index, `transcribe` produces this transcript. |
 | **2 — hardware/model shims** | Core Audio capture, Core ML/ANE inference, process taps | The only place test-first is relaxed — a device IO-proc can't be meaningfully unit-tested. Test the protocol with a mock; keep the real shim thin and verify it end-to-end (some tap tests are opt-in and need real hardware + permission). |
 | **3 — end-to-end** | `capture → transcribe → cleanup → summarize` over real audio fixtures | Smoke-level; asserts the pipeline wires together and outputs are well-formed. |
 

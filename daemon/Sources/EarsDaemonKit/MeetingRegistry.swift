@@ -30,11 +30,17 @@ public enum MeetingRegistryError: Error, Sendable, Hashable {
 /// start via ``loadFromDisk()``, which is what lets a meeting survive a
 /// daemon restart.
 ///
-/// ## Intervals are marks, never capture control
+/// ## Capture is meeting-scoped
 ///
-/// Pausing closes the open interval; resuming opens a new one. Nothing here
-/// references a `CaptureActor` — the ring buffer and ingest streams are
-/// untouched by design.
+/// Recording is bounded by a meeting's existence: `meeting.start` starts
+/// capture of the meeting's sources (via the injected ``startCapture`` seam,
+/// which `EarsDaemon` wires to build-and-start the relevant `CaptureActor`s),
+/// and `meeting.end` stops and tears them down (``stopCapture``). Browser
+/// (`browser:*`) sources are driven by their ingest streams instead, so the
+/// capture seams no-op on them; the daemon-side controller only manages the
+/// config-declared local sources (mic, system, app) a meeting names. Pause and
+/// resume remain *marks* over that recording — pausing closes the open
+/// interval, resuming opens a new one — and do not stop capture.
 ///
 /// ## Orphaned meetings
 ///
@@ -83,6 +89,17 @@ public actor MeetingRegistry {
   /// exist. `{ [] }` (the default) injects nothing, matching a registry built
   /// with no local sources.
   private let knownSourceIDs: @Sendable () async -> Set<SourceID>
+  /// Starts capture for a meeting's sources (build-and-start the relevant
+  /// `CaptureActor`s), keyed by meeting id so concurrent meetings sharing a
+  /// source are ref-counted daemon-side. Called on `meeting.start` and on
+  /// restart recovery for a still-active meeting. `EarsDaemon` supplies the
+  /// real implementation; the default no-op keeps registry-only tests (no
+  /// daemon) unchanged.
+  private let startCapture: @Sendable (String, [SourceID]) async -> Void
+  /// Stops and tears down capture for a meeting's sources, released daemon-side
+  /// by the same ref-count. Called on `meeting.end` (before the ended hook, so
+  /// each source's final chunk is flushed to disk before transcription runs).
+  private let stopCapture: @Sendable (String, [SourceID]) async -> Void
 
   /// Live (active/paused) and recently-ended meetings, keyed by id. Ended
   /// meetings from *before* this boot stay on disk only.
@@ -114,6 +131,8 @@ public actor MeetingRegistry {
     onEnded: EndedHook? = nil,
     localBrowserSources: [SourceID] = [],
     knownSourceIDs: @escaping @Sendable () async -> Set<SourceID> = { [] },
+    startCapture: @escaping @Sendable (String, [SourceID]) async -> Void = { _, _ in },
+    stopCapture: @escaping @Sendable (String, [SourceID]) async -> Void = { _, _ in },
     log: @escaping @Sendable (String) -> Void = { _ in }
   ) {
     self.dataRoot = dataRoot
@@ -126,6 +145,8 @@ public actor MeetingRegistry {
     self.onEnded = onEnded
     self.localBrowserSources = localBrowserSources
     self.knownSourceIDs = knownSourceIDs
+    self.startCapture = startCapture
+    self.stopCapture = stopCapture
     self.log = log
   }
 
@@ -134,8 +155,10 @@ public actor MeetingRegistry {
   /// Reloads every non-ended meeting from disk — called once at daemon
   /// start. An `active` meeting with an open interval survives a restart
   /// as-is; a reloaded *browser* meeting whose streams don't return starts
-  /// its orphan grace clock from daemon boot.
-  public func loadFromDisk() {
+  /// its orphan grace clock from daemon boot. A still-active meeting resumes
+  /// capture of its (config-declared) sources, so a daemon restart mid-meeting
+  /// keeps recording rather than silently going idle.
+  public func loadFromDisk() async {
     for meeting in MeetingStore.readAll(
       dataRoot: dataRoot,
       onSkip: { [log] id, error in log("meeting registry: skipping meetings/\(id): \(error)") })
@@ -146,6 +169,9 @@ public actor MeetingRegistry {
       }
       if meeting.isBrowserMeeting {
         scheduleGraceExpiry(meetingID: meeting.id)
+      }
+      if meeting.state == .active {
+        await startCapture(meeting.id, meeting.sources)
       }
     }
   }
@@ -168,6 +194,9 @@ public actor MeetingRegistry {
         await publish(&existing)
       }
       meetings[existing.id] = existing
+      // Idempotent daemon-side: re-declaring the same meeting only starts
+      // capture for sources it hasn't already claimed.
+      await startCapture(existing.id, existing.sources)
       return existing
     }
 
@@ -199,6 +228,7 @@ public actor MeetingRegistry {
     if let identity {
       byIdentity[identity] = meeting.id
     }
+    await startCapture(meeting.id, meeting.sources)
     return meeting
   }
 
@@ -235,10 +265,31 @@ public actor MeetingRegistry {
     }
     graceGeneration[meeting.id] = nil
 
+    // Stop and tear down capture before the ended hook runs, so each source's
+    // in-progress chunk is flushed and indexed to disk before transcription
+    // reads it. Browser sources are already stopped by their ingest close; the
+    // controller no-ops on those and stops the meeting's local sources.
+    await stopCapture(meeting.id, meeting.sources)
+
     if let onEnded {
       await onEnded(meeting, sessions)
     }
     return meeting
+  }
+
+  /// Records that this meeting's transcript completed **successfully** at
+  /// `at` — the durable marker the retention sweeper keys off. Idempotent; a
+  /// later successful re-transcription moves the marker forward. A no-op for an
+  /// unknown meeting (nothing to mark).
+  public func markTranscriptCompleted(id: String, at: Instant) {
+    guard var meeting = knownMeeting(id) else { return }
+    meeting.transcriptCompleted = at
+    do {
+      try persist(meeting)
+    } catch {
+      log("meeting \(id): persisting transcript-completed marker failed: \(error)")
+    }
+    meetings[meeting.id] = meeting
   }
 
   /// `meeting.pause`: closes the open interval. No-op success if already
@@ -339,6 +390,13 @@ public actor MeetingRegistry {
   /// Closed history is read from disk, not the socket.
   public func list() -> [Meeting] {
     meetings.values.sorted { $0.started < $1.started }
+  }
+
+  /// The live meeting id declared under `identity`, or `nil` when no live
+  /// meeting has it — how `EarsDaemon.openIngestSource` resolves an ingest
+  /// stream's membership tag to the meeting directory its audio lands in.
+  public func meetingID(for identity: MeetingIdentity) -> String? {
+    byIdentity[identity]
   }
 
   /// `meeting.get`: a live/recent meeting, or (falling back) one read from

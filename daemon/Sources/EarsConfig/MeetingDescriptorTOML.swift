@@ -28,6 +28,7 @@ public enum MeetingDescriptorTOML {
       "state": .string(meeting.state.rawValue),
       "started": .string(formatInstant(meeting.started)),
       "ended": .string(meeting.ended.map(formatInstant) ?? ""),
+      "transcript_completed": .string(meeting.transcriptCompleted.map(formatInstant) ?? ""),
       "trigger": .string(meeting.trigger.rawValue),
       "sources": .array(meeting.sources.map { .string($0.rawValue) }),
       "interval": .array(
@@ -78,6 +79,14 @@ public enum MeetingDescriptorTOML {
       ended = parsed
     } else {
       ended = nil
+    }
+
+    let transcriptCompleted: Instant?
+    if let raw = fields.optionalString("transcript_completed") {
+      guard let parsed = parseInstant(raw) else { throw .invalidField("transcript_completed") }
+      transcriptCompleted = parsed
+    } else {
+      transcriptCompleted = nil
     }
 
     let identity: MeetingIdentity?
@@ -135,7 +144,8 @@ public enum MeetingDescriptorTOML {
       intervals: intervals,
       attendees: attendees,
       sources: sources,
-      trigger: trigger)
+      trigger: trigger,
+      transcriptCompleted: transcriptCompleted)
   }
 
   /// Standard colon-separated ISO-8601 UTC, whole seconds.

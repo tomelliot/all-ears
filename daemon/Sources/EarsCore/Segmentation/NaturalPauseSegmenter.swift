@@ -6,7 +6,7 @@
 ///
 /// Pure function of the already-computed VAD spans and a duration -- no I/O,
 /// no audio bytes -- so silence-skipping and natural-pause splitting are
-/// both tier-0 testable without a fixture ring buffer.
+/// both tier-0 testable without a fixture source directory.
 public enum NaturalPauseSegmenter {
   /// - Parameters:
   ///   - vadSpans: A range's VAD spans, in any order (as

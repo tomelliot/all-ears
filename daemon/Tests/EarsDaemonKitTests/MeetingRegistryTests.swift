@@ -292,6 +292,53 @@ struct MeetingRegistryTests {
     #expect(hookCount.withLock { $0 } == 1)
   }
 
+  // MARK: - meeting-scoped capture
+
+  @Test("capture starts on meeting start and stops on meeting end")
+  func meetingScopesCapture() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let startCalls = Mutex<[[SourceID]]>([])
+    let stopCalls = Mutex<[[SourceID]]>([])
+    let ids = Mutex(0)
+    let registry = MeetingRegistry(
+      dataRoot: dataRoot,
+      clock: clock,
+      makeID: {
+        ids.withLock { next in
+          next += 1
+          return "meeting-\(next)"
+        }
+      },
+      startCapture: { _, sources in startCalls.withLock { $0.append(sources) } },
+      stopCapture: { _, sources in stopCalls.withLock { $0.append(sources) } })
+
+    let meeting = try await registry.start(
+      MeetingStartParams(title: "standup", sources: ["mic"]))
+    #expect(startCalls.withLock { $0 } == [["mic"]])
+    #expect(stopCalls.withLock { $0 }.isEmpty)
+
+    _ = try await registry.end(id: meeting.id)
+    #expect(stopCalls.withLock { $0 } == [["mic"]])
+  }
+
+  @Test("markTranscriptCompleted records the completion instant durably")
+  func marksTranscriptCompleted() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let registry = makeRegistry(dataRoot: dataRoot, clock: clock)
+    let meeting = try await registry.start(MeetingStartParams(title: "standup"))
+    _ = try await registry.end(id: meeting.id)
+    #expect(try await registry.get(id: meeting.id).transcriptCompleted == nil)
+
+    await registry.markTranscriptCompleted(id: meeting.id, at: base.advanced(by: 300))
+
+    #expect(try await registry.get(id: meeting.id).transcriptCompleted == base.advanced(by: 300))
+    // Durable: read straight back off disk.
+    let reloaded = try MeetingStore.read(meetingID: meeting.id, dataRoot: dataRoot)
+    #expect(reloaded.transcriptCompleted == base.advanced(by: 300))
+  }
+
   // MARK: - rename / attendee
 
   @Test("rename is a compare-and-set under if_rev")

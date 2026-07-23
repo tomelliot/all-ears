@@ -1,28 +1,30 @@
 # Data formats
 
-This document defines the on-disk contract. Because the ring buffer layout *is* the read API, these formats are stable interfaces: tools depend on them, so they are versioned and changed deliberately.
+This document defines the on-disk contract. Because the storage layout *is* the read API, these formats are stable interfaces: tools depend on them, so they are versioned and changed deliberately.
 
 ## Directory layout
 
 ```
 <data-root>/                         # default: ~/Library/Application Support/ears
-  sources/
-    <source-id>/                     # e.g. mic, system, app_us.zoom.xos, browser_meet_jane
-      meta.toml                      # source descriptor (class, device, sample rate, codec)
-      chunks/                        # native-rate listenable copy (default 48kHz mono)
-        2026-07-17T10-30-00Z.<ext>   # time-stamped compressed audio chunk
-        2026-07-17T10-30-30Z.<ext>
-      asr/                           # derived 16kHz mono feed the transcriber consumes
-        2026-07-17T10-30-00Z.<ext>
-      chunks.jsonl                   # structural index: chunk/gap/evict, read whole at startup
-      vad/                           # segmented VAD stream (speech/silence spans)
-        2026-07-17T10-30-00Z.jsonl   # one size/time-rotated segment, named by first event
+  meetings/
+    <uuid>/                          # one directory per meeting — audio is meeting-scoped
+      meeting.toml                   # meeting record (identity, state, intervals, roster);
+                                     #   kept forever, never evicted
+      events.jsonl                   # append-only meeting timeline; kept forever
+      sources/                       # AUDIO — deleted as one unit by retention
+        <source-id>/                 # e.g. mic, system, browser_meet_jane
+          meta.toml                  # source descriptor (class, device, sample rate, codec)
+          chunks/                    # native-rate listenable copy (default 48kHz mono)
+            2026-07-17T10-30-00Z.<ext>   # time-stamped compressed audio chunk
+            2026-07-17T10-30-30Z.<ext>
+          asr/                       # derived 16kHz mono feed the transcriber consumes
+            2026-07-17T10-30-00Z.<ext>
+          chunks.jsonl               # structural index: chunk/gap events
+          vad/                       # segmented VAD stream (speech/silence spans)
+            2026-07-17T10-30-00Z.jsonl   # one size/time-rotated segment, named by first event
   sessions/
     2026-07-17T10-30-00Z_standup/    # session id: start-timestamp + slug
       session.toml                   # session descriptor (sources, range, trigger, state)
-  meetings/
-    <uuid>/
-      meeting.toml                   # meeting identity (platform, external id)
   vocab/
     global.txt                       # global known-word list
     <session-id>.txt                 # optional per-session vocabulary
@@ -40,12 +42,19 @@ This document defines the on-disk contract. Because the ring buffer layout *is* 
 
 `<source-id>` is the source's stable id with characters unsafe for paths replaced by `_` (e.g. `app:us.zoom.xos` → `app_us.zoom.xos`). The id itself, as used on the socket and in metadata, keeps its natural form.
 
+Audio is **meeting-scoped**: a source records only while a meeting names it, and everything it writes lands under that meeting's own `sources/` tree. Two consequences:
+
+- **Transcripts** (under `<output-root>`) are never evicted — they are the durable artifact.
+- **Retention is a per-meeting delete.** Once an ended meeting's transcript has been complete for `evict_after_transcript_seconds` (default 2 h) — or, if no transcript ever completed, once the meeting has been over for `max_audio_age_seconds` (default 7 days) — the daemon deletes the whole `meetings/<uuid>/sources/` directory. `meeting.toml` and `events.jsonl` survive as the meeting's record. See `[earsd.retention]` in [configuration](./configuration.md).
+
+A known, accepted limitation: two *concurrent* meetings that share one locally-captured source (e.g. the mic) reuse the first meeting's capture, so the second meeting's audio for that source lands in the first meeting's directory. Sequential meetings are unaffected — each gets its own directory.
+
 ## Audio chunks
 
 - Fixed-duration chunks (default 30 s), named by their UTC start instant, ISO-8601 with `:` replaced by `-`.
 - Compressed: AAC in an M4A container, or Opus. Codec and bitrate are per-source config, recorded in `meta.toml`.
 - Chunk boundaries are a storage detail, independent of speech. Speech spans live in the index and may cross chunk boundaries.
-- Chunks older than the source's time cap are deleted oldest-first; deletion is logged and indexed. The cap is enforced across daemon restarts: on startup the daemon recovers the still-on-disk chunk set from the index and evicts anything already aged out, so chunks written by an earlier run don't outlive the cap.
+- Chunks are never deleted individually. A meeting's audio grows for the meeting's duration and is deleted as one directory by transcript-driven retention (see above).
 - Written atomically (temp + rename); on flush, `fsync` both the file and its directory.
 
 ### Dual-rate storage
@@ -71,7 +80,6 @@ store_native = true
 channels = 1
 codec = "aac"
 bitrate = 64000
-time_cap_seconds = 7200  # this source's ring-buffer window
 created = "2026-07-17T10-30-00Z"
 ```
 
@@ -79,8 +87,8 @@ created = "2026-07-17T10-30-00Z"
 
 The index is split across two logs, both append-only JSON Lines (one event per line, ordered by time), because `vad` events outnumber the rest by roughly 50-to-1 yet are consulted only when reconstructing a specific range:
 
-- **`chunks.jsonl` — the structural log.** `chunk`/`gap`/`evict` events. Small, and read whole at startup to recover the live chunk set. Nothing else is needed to answer "which audio exists".
-- **`vad/<timestamp>.jsonl` — the segmented VAD stream.** `vad` speech/silence spans, written to segments that roll over on a byte cap (~8 MB) or a wall-clock span (~1 h), each named by its first event's start. A range read opens only the segments overlapping the range; eviction drops whole aged-out segments by `unlink`, so this stream stays bounded without ever rewriting a file a `--follow` reader may be tailing.
+- **`chunks.jsonl` — the structural log.** `chunk`/`gap` events. Small, and read whole to recover the chunk set. Nothing else is needed to answer "which audio exists".
+- **`vad/<timestamp>.jsonl` — the segmented VAD stream.** `vad` speech/silence spans, written to segments that roll over on a byte cap (~8 MB) or a wall-clock span (~1 h), each named by its first event's start. A range read opens only the segments overlapping the range.
 
 It maps wall-clock time to audio and records speech activity so transcription can skip silence. Event types:
 
@@ -94,16 +102,13 @@ It maps wall-clock time to audio and records speech activity so transcription ca
 
 // a capture gap (daemon down, device lost, pause)
 {"t":"gap","start":"2026-07-17T10:31:00Z","end":"2026-07-17T10:31:12Z","reason":"daemon_restart"}
-
-// eviction of an aged-out chunk
-{"t":"evict","file":"chunks/2026-07-17T08-30-00Z.m4a","start":"2026-07-17T08:30:00Z"}
 ```
 
 A reader reconstructs available audio for any range from `chunk` events, uses `vad` spans to skip silence, and honours `gap` events as known-missing. Both logs are append-only, so `tail -f chunks.jsonl` and `tail -f vad/*.jsonl` show live capture.
 
 ## Sessions (`session.toml`)
 
-A session is metadata over the ring buffer — a named time range across one or more sources — not a separate recording.
+A session is metadata over the recorded audio — a named time range across one or more sources — not a separate recording.
 
 
 ```toml
@@ -117,7 +122,7 @@ state = "closed"                  # open | closed
 trigger = "app-signal"            # app-signal | manual | browser-extension
 trigger_detail = "us.zoom.xos"
 vocab = "vocab/2026-07-17T10-30-00Z_standup.txt"  # optional
-pre_roll_seconds = 0              # seconds of already-buffered ring audio a
+pre_roll_seconds = 0              # seconds of already-captured audio a
                                    # `transcribe --session` read widens this
                                    # session's range backward by; never
                                    # shifts `start` itself. 0 = no widening.

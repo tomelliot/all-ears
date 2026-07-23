@@ -32,7 +32,6 @@ struct DaemonConfigResolutionTests {
       "asr_sample_rate": .int(16_000),
       "store_native": .bool(true),
       "channels": .int(1),
-      "default_time_cap_seconds": .int(7_200),
       "vad": .table(["speech_pad_ms": .int(300), "min_silence_ms": .int(700)]),
       "source": .array(sources),
     ]
@@ -61,7 +60,6 @@ struct DaemonConfigResolutionTests {
     #expect(mic.channels == 1)
     #expect(mic.codec == "aac")
     #expect(mic.bitrate == 64_000)
-    #expect(mic.timeCapSeconds == 7_200)
     #expect(mic.created == now)
   }
 
@@ -173,19 +171,6 @@ struct DaemonConfigResolutionTests {
     )
     #expect(result.configuration.sources.isEmpty)
     #expect(result.skipped.map(\.id) == ["weird"])
-  }
-
-  @Test("a per-source time_cap_seconds override wins over the [earsd] default")
-  func perSourceTimeCapOverride() {
-    let result = DaemonConfigResolution.resolve(
-      config: config(sources: [
-        .table([
-          "id": .string("mic"), "class": .string("mic"), "time_cap_seconds": .int(3_600),
-        ])
-      ]),
-      now: now
-    )
-    #expect(result.configuration.sources.first?.timeCapSeconds == 3_600)
   }
 
   @Test("a per-source label and device_uid are carried through")

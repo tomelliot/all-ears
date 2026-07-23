@@ -1,6 +1,6 @@
 /// Fixed-cadence batcher for streaming decode: accumulates arbitrarily-sized
 /// incoming audio buffers and releases fixed-size model steps, decoupling
-/// chunk-arrival cadence (30 s ring-buffer chunks, bursty ingest pushes) from
+/// chunk-arrival cadence (30 s capture chunks, bursty ingest pushes) from
 /// the model's per-step compute budget — the `StepBatcher` role named in
 /// `docs/specs/transcribe.md`'s append-only delta contract.
 ///

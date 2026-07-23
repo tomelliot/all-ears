@@ -117,28 +117,24 @@ enum EarsdRuntime {
     }
 
     // Registered immediately after construction, *before* `daemon.start()`
-    // -- not after it succeeds. `daemon.start()` begins buffering real audio
-    // (each source's `CaptureActor.start()`) before it binds the control
-    // socket, so a `SIGTERM` landing anywhere during `start()` -- including
-    // the narrow window after the socket is already visible on disk but
-    // before this line used to run -- must still reach `daemon.stop()` so
-    // any already-captured audio gets flushed, rather than being silently
+    // -- not after it succeeds. The daemon boots idle (capture is
+    // meeting-scoped), but `start()` can still resume recording: a meeting
+    // left active on disk reloads and restarts its sources' capture during
+    // `start()`'s `loadFromDisk()`. So a `SIGTERM` landing anywhere during
+    // `start()` -- including the window after the socket is visible on disk
+    // but before this line used to run -- must still reach `daemon.stop()`,
+    // so any already-captured audio gets flushed rather than being silently
     // dropped by the old race where `handle.stopIfStarted()` found nothing
-    // registered yet and just called `exit(0)`. (`CLISmokeTests`'
-    // `normalRunWithSyntheticBackendWritesRealFilesToDisk` -- the first test
-    // to spawn a real `earsd` with real audio actually flowing -- caught
-    // this by sending `SIGTERM` the instant the socket appeared.)
+    // registered yet and just called `exit(0)`.
     //
     // Safe even though this can now let a concurrent `stop()` interleave
-    // with an in-flight `start()` on the same actor (Swift actor
-    // reentrancy): whatever `stop()` tears down stays torn down, because
-    // the `SIGTERM` handler's `exit(0)` terminates the whole process
-    // immediately afterward -- there is no window left for `start()` to
-    // resume and "revive" anything. `EarsDaemon.stop()` is also safe to
-    // call before `start()` has done anything at all: every `CaptureActor`
-    // already exists (built in `EarsDaemon.init()`) but starts `.disabled`,
-    // so `stop()`'s per-actor teardown is a no-op until a source has
-    // actually started.
+    // with an in-flight `start()` (Swift actor reentrancy): whatever `stop()`
+    // tears down stays torn down, because the `SIGTERM` handler's `exit(0)`
+    // terminates the whole process immediately afterward -- there is no
+    // window left for `start()` to resume and "revive" anything.
+    // `EarsDaemon.stop()` is also safe to call before `start()` has built
+    // any `CaptureActor` at all: with no live actors, its per-actor teardown
+    // is simply a no-op.
     await handle.set(daemon)
 
     do {
