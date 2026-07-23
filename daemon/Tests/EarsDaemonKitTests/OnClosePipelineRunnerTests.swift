@@ -147,8 +147,8 @@ struct OnClosePipelineRunnerTests {
 
   @Test("bounded stderr keeps the tail of an over-long message and marks the truncation")
   func boundedStderrLongKeepsTail() {
-    let long = String(repeating: "x", count: OnClosePipelineRunner.maxStderrLogBytes + 500)
-      + "TAIL-MARKER"
+    let padding = String(repeating: "x", count: OnClosePipelineRunner.maxStderrLogBytes + 500)
+    let long = padding + "TAIL-MARKER"
     let bounded = OnClosePipelineRunner.boundedStderr(long)
     #expect(bounded.hasPrefix("…(truncated) "))
     #expect(bounded.hasSuffix("TAIL-MARKER"))
