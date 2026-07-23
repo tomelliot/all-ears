@@ -1,4 +1,5 @@
 import EarsCore
+import EarsLogging
 import Foundation
 
 /// Accumulates a source's incoming native-rate ``AudioBuffer``s and rolls
@@ -73,6 +74,17 @@ public actor ChunkEncoder {
   private let resampler: ChunkResampler
   private let indexAppender: IndexAppender
   private let chunkFileWriterFactory: ChunkFileWriterFactory
+  /// Opens a just-finalized chunk for the post-write validity check — the same
+  /// ``ChunkFileReading`` seam ``AsrChunkRangeReader`` reads through, so the
+  /// check exercises exactly the code path `transcribe` will later use.
+  private let chunkFileReaderFactory: ChunkFileReaderFactory
+  /// Wall-clock seam for stamping the finalization log. Injected; never read on
+  /// the chunk-timeline path (see the type's "Chunk rollover" doc).
+  private let clock: any NowProviding
+  /// The structured sink the finalization log fans out through — the shared
+  /// daemon ``LogRecordSink``, so a chunk that fails its post-write open check
+  /// is flagged in the same JSON-Lines + stderr stream as the rest of capture.
+  private let logSink: any LogRecordSink
 
   private var pendingBuffers: [AudioBuffer] = []
   private var accumulatedDuration: Double = 0
@@ -96,6 +108,16 @@ public actor ChunkEncoder {
   ///   - indexAppender: The source's shared index writer.
   ///   - chunkFileWriterFactory: Defaults to the real `AVAudioFile`-backed
   ///     writer; tests inject a fake to exercise partial-write handling.
+  ///   - chunkFileReaderFactory: The reader used for the post-write open check
+  ///     on each finalized ASR chunk. Defaults to the real
+  ///     ``AVFoundationChunkFileReader`` — the same decoder `transcribe` reads
+  ///     through — so an unreadable chunk is flagged at write time, not at
+  ///     transcription time (all-ears issue #26). Tests inject a fake.
+  ///   - clock: Wall-clock seam for the finalization log's timestamp; injected
+  ///     so tests never touch real time. Defaults to ``SystemClock``.
+  ///   - logSink: The structured sink the finalization log writes through.
+  ///     Defaults to ``NoOpLogRecordSink`` so existing call sites and tests
+  ///     that don't assert on logging compile and behave unchanged.
   public init(
     sourceID: SourceID,
     dataRoot: URL,
@@ -107,7 +129,10 @@ public actor ChunkEncoder {
     chunkSeconds: Double,
     startInstant: Instant,
     indexAppender: IndexAppender,
-    chunkFileWriterFactory: @escaping ChunkFileWriterFactory = AVFoundationChunkFileWriter.make
+    chunkFileWriterFactory: @escaping ChunkFileWriterFactory = AVFoundationChunkFileWriter.make,
+    chunkFileReaderFactory: @escaping ChunkFileReaderFactory = AVFoundationChunkFileReader.make,
+    clock: any NowProviding = SystemClock(),
+    logSink: any LogRecordSink = NoOpLogRecordSink()
   ) throws {
     guard
       let resampler = ChunkResampler(
@@ -126,6 +151,9 @@ public actor ChunkEncoder {
     self.resampler = resampler
     self.indexAppender = indexAppender
     self.chunkFileWriterFactory = chunkFileWriterFactory
+    self.chunkFileReaderFactory = chunkFileReaderFactory
+    self.clock = clock
+    self.logSink = logSink
     self.chunkStart = startInstant
   }
 
@@ -234,6 +262,16 @@ public actor ChunkEncoder {
         : DataStoreLayout.relativeChunkPath(subdirectory: .asr, filename: filename)
       try await indexAppender.append(
         .chunk(start: start, end: end, file: relativeFile, frames: canonicalFrames))
+      // Prove the chunk that just landed is actually readable, at write time.
+      // `transcribe` always decodes the `asr/` feed, so that is the file whose
+      // unreadability poisons a run — open it now with the same reader and log
+      // the result, so a chunk `ExtAudioFileOpenURL` will later refuse is
+      // flagged here, in the capture log, not six meetings later as an opaque
+      // transcribe abort (all-ears issue #26).
+      await logChunkFinalized(
+        file: asrFinalURL,
+        declaredSampleRate: asrSettings.sampleRate,
+        indexedFrames: canonicalFrames)
     }
 
     pendingBuffers = []
@@ -243,6 +281,56 @@ public actor ChunkEncoder {
     if nativeFailed || asrFailed {
       throw DataStoreError.partialChunkWrite(nativeFailed: nativeFailed, asrFailed: asrFailed)
     }
+  }
+
+  /// Opens the finalized ASR chunk for reading (the post-write validity check)
+  /// and logs `capture.chunk_finalized` with the file, its declared sample
+  /// rate, the decoded frame count the open check saw, and the native-domain
+  /// `indexedFrames`. A clean open logs at `debug` (per-chunk, quiet in normal
+  /// runs); a failed open logs at `error` with the underlying reason, so an
+  /// unreadable chunk surfaces loudly the moment it is written.
+  private func logChunkFinalized(file: URL, declaredSampleRate: Int, indexedFrames: Int) async {
+    var openOK = false
+    var decodedFrames = 0
+    var openError: String?
+    do {
+      let reader = try chunkFileReaderFactory(file)
+      decodedFrames = reader.frameCount
+      openOK = true
+    } catch {
+      openError = String(describing: error)
+    }
+
+    var fields: [LogField] = [
+      LogField("source", .string(sourceID.rawValue)),
+      LogField("file", .string(file.path)),
+      LogField("declared_sample_rate", .int(declaredSampleRate)),
+      LogField("indexed_frames", .int(indexedFrames)),
+      LogField("decoded_frames", .int(decodedFrames)),
+      LogField("open_check", .string(openOK ? "ok" : "failed")),
+    ]
+    if let openError {
+      fields.append(LogField("error", .string(openError)))
+    }
+    await log(event: "capture.chunk_finalized", level: openOK ? .debug : .error, fields: fields)
+  }
+
+  /// Forwards one structured ``LogRecord`` to the shared ``LogRecordSink``,
+  /// stamped with the encoder's clock and the capture subsystem/category (the
+  /// same category ``CaptureActor`` logs its rate-change/drop events under, so
+  /// chunk finalization joins that one capture stream). `try?` because a
+  /// log-write failure must never take down the encode path.
+  private func log(event: String, level: LogLevel, fields: [LogField]) async {
+    try? await logSink.log(
+      LogRecord(
+        ts: clock.now(),
+        level: level,
+        tool: "earsd",
+        subsystem: "net.tomelliot.ears",
+        category: "earsd.capture",
+        pid: ProcessInfo.processInfo.processIdentifier,
+        event: event,
+        fields: fields))
   }
 
   /// Writes one feed (native or ASR) for a chunk: creates a writer via

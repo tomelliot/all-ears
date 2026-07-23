@@ -84,7 +84,9 @@ struct CaptureActorTests {
       storeNative: descriptor.storeNative,
       chunkSeconds: chunkSeconds,
       startInstant: clock.now(),
-      indexAppender: indexAppender
+      indexAppender: indexAppender,
+      clock: clock,
+      logSink: logSink
     )
     return CaptureActor(
       descriptor: descriptor,
@@ -180,12 +182,15 @@ struct CaptureActorTests {
     #expect(!asrEntries.isEmpty)
   }
 
-  @Test("a mid-stream device rate flip still produces one contiguous chunk")
+  @Test("a mid-stream device rate flip finalizes at the boundary into contiguous chunks")
   func midStreamRateFlipStaysContiguous() async throws {
     let dataRoot = try makeDataRoot()
     let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
-    // 0.5s at the native 48k, then 0.5s after the device drops to 16k. Both
-    // normalize to 48k, so the two half-seconds still roll into one 1.0s chunk.
+    // 0.5s at the native 48k, then 0.5s after the device drops to 16k. The flip
+    // is made an explicit chunk boundary (all-ears issue #26): the first
+    // half-second finalizes at the old rate, the second starts a fresh chunk —
+    // so every chunk file is single-rate, and the two chunks abut with no gap
+    // and no overlap.
     let actor = try makeActor(
       dataRoot: dataRoot, clock: clock,
       buffers: [
@@ -196,24 +201,30 @@ struct CaptureActorTests {
 
     try await actor.start()
     await actor.drainForTesting()
-    await actor.stop()  // finalize the pending chunk (see normalizesOffRateBuffers)
+    await actor.stop()  // finalize the post-flip pending chunk (see normalizesOffRateBuffers)
 
     let events = try indexEvents(dataRoot: dataRoot)
     let chunks = events.compactMap { event -> (Instant, Instant)? in
       if case .chunk(let s, let e, _, _) = event { return (s, e) }
       return nil
     }
-    #expect(chunks.count == 1)
-    let chunk = try #require(chunks.first)
-    let chunkStart = chunk.0
-    let chunkEnd = chunk.1
-    #expect(chunkStart == Instant(secondsSinceEpoch: startEpoch))
+    .sorted { $0.0 < $1.0 }
+    // The flip splits the two half-seconds into two chunks, boundary at the flip.
+    #expect(chunks.count == 2)
+    let first = try #require(chunks.first)
+    let second = try #require(chunks.last)
+    #expect(first.0 == Instant(secondsSinceEpoch: startEpoch))
+    // Contiguous: the first chunk's end is exactly the second chunk's start (no
+    // gap where the rate changed, no overlap).
+    #expect(second.0 == first.1)
+    let overallStart = first.0
+    let overallEnd = second.1
 
-    // The whole point: VAD coverage runs contiguously across the rate flip. Both
+    // VAD coverage still runs contiguously across the boundary: both
     // fully-voiced half-seconds normalize to 48k on one timeline, so the spans
-    // start at the chunk start, run to its end, and leave no gap where the rate
-    // changed. (Exact end is warmup-dependent, so it's tied to the chunk's own
-    // bounds, not a nominal 1.0s.)
+    // start at the first chunk's start, run to the last chunk's end, and leave
+    // no gap where the rate changed. (Exact end is warmup-dependent, so it's
+    // tied to the chunks' own bounds, not a nominal 1.0s.)
     let vads = events.compactMap { event -> (Instant, Instant)? in
       if case .vad(_, let s, let e) = event { return (s, e) }
       return nil
@@ -222,8 +233,8 @@ struct CaptureActorTests {
     #expect(!vads.isEmpty)
     let earliest = try #require(vads.first).0
     let latest = try #require(vads.map(\.1).max())
-    #expect(abs(earliest.interval(since: chunkStart)) < 0.01)
-    #expect(abs(latest.interval(since: chunkEnd)) < 0.01)
+    #expect(abs(earliest.interval(since: overallStart)) < 0.01)
+    #expect(abs(latest.interval(since: overallEnd)) < 0.01)
     for (prev, next) in zip(vads, vads.dropFirst()) {
       #expect(next.0 <= prev.1.advanced(by: 0.01))  // no gap between consecutive spans
     }
@@ -256,6 +267,47 @@ struct CaptureActorTests {
     #expect(flipRecord.fields.contains(LogField("from", .int(48_000))))
     #expect(flipRecord.fields.contains(LogField("target", .int(nativeRate))))
     #expect(flipRecord.fields.contains(LogField("source", .string("mic"))))
+    // The flip finalizes the 0.5s chunk still accumulating at the old rate, so
+    // the logged action names that boundary — never a silent continue-in-place.
+    #expect(flipRecord.fields.contains(LogField("action", .string("chunk_finalized"))))
+
+    // The baseline record (the first buffer establishing 48k) is not a flip:
+    // there is no prior chunk to finalize, so its action says so.
+    let baseline = try #require(
+      changes.first(where: { $0.fields.contains(LogField("from", .int(0))) }))
+    #expect(baseline.fields.contains(LogField("action", .string("baseline"))))
+  }
+
+  @Test("a rate flip finalizes the current chunk at the old rate as a boundary")
+  func rateFlipFinalizesChunkAtBoundary() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
+    // chunkSeconds 30 so nothing rolls over on duration alone: the ONLY thing
+    // that can finalize the first 0.5s chunk before the stream ends is the
+    // rate-flip boundary. Two 48k halves would leave a single pending chunk;
+    // flipping to 16k mid-stream must instead split them at the flip.
+    let actor = try makeActor(
+      dataRoot: dataRoot, clock: clock,
+      buffers: [
+        makeBuffer(seconds: 0.5),
+        makeBuffer(seconds: 0.5, sampleRate: 16_000),
+      ],
+      chunkSeconds: 30)
+
+    try await actor.start()
+    await actor.drainForTesting()
+
+    // Before any stop/flush, exactly one chunk exists — the pre-flip one the
+    // boundary finalized. Without the boundary logic nothing would be indexed
+    // yet (both halves still pending in one 30s chunk).
+    let chunks = try chunkEvents(dataRoot: dataRoot).compactMap { event -> (Instant, Instant)? in
+      if case .chunk(let s, let e, _, _) = event { return (s, e) }
+      return nil
+    }
+    #expect(chunks.count == 1)
+    let chunk = try #require(chunks.first)
+    #expect(chunk.0 == Instant(secondsSinceEpoch: startEpoch))
+    await actor.stop()
   }
 
   @Test("an encode failure is logged loudly and the consume loop survives it")

@@ -13,7 +13,7 @@ The ASR backend is currently fixed: Parakeet via FluidAudio on the Apple Neural 
 
 ## Behaviour (batch)
 
-1. Resolve the requested range to chunks via each source's `index.jsonl`; honour `gap` events as known-missing (logged, not fatal).
+1. Resolve the requested range to chunks via each source's `index.jsonl`; honour `gap` events as known-missing (logged, not fatal). A chunk file that won't open/decode (e.g. an `.m4a` `ExtAudioFileOpenURL` refuses) is skipped and logged per-chunk (`chunk.unreadable: source=… file=… error=…`), degrading only its own span — the surrounding chunks still transcribe, rather than one unreadable file aborting the whole run.
 2. Use `vad` spans to feed only speech to the model, preserving true timestamps across skipped gaps.
 3. **Segment at natural pauses, not fixed cuts:** audio is grouped into model inputs bounded by VAD silence, with a short pre-roll before each utterance onset so the first word isn't clipped. (Storage chunks stay fixed-length; this segmentation is a transcription-time concern.)
 4. Run the ASR backend, producing timed segments with word timings/confidence where available.

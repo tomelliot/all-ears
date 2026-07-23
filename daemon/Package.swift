@@ -90,6 +90,7 @@ let package = Package(
       dependencies: [
         "EarsCore",
         "EarsConfig",
+        "EarsLogging",
       ]
     ),
 

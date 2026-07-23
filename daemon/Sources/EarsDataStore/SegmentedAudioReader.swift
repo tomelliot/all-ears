@@ -52,11 +52,23 @@ public struct SegmentedAudioReader: Sendable {
     public var slices: [AudioSlice]
     public var chunksInRange: Int
     public var speechIntervals: Int
+    /// Chunk files in the range that wouldn't open/decode and were skipped
+    /// (deduplicated by filename). Empty on the healthy path; a non-empty list
+    /// is what the caller logs per-chunk so a corrupt chunk is a visible,
+    /// contained degradation rather than an opaque whole-run failure
+    /// (all-ears issue #26).
+    public var unreadableChunks: [AsrChunkRangeReader.UnreadableChunk]
 
-    public init(slices: [AudioSlice], chunksInRange: Int, speechIntervals: Int) {
+    public init(
+      slices: [AudioSlice],
+      chunksInRange: Int,
+      speechIntervals: Int,
+      unreadableChunks: [AsrChunkRangeReader.UnreadableChunk] = []
+    ) {
       self.slices = slices
       self.chunksInRange = chunksInRange
       self.speechIntervals = speechIntervals
+      self.unreadableChunks = unreadableChunks
     }
   }
 
@@ -82,15 +94,26 @@ public struct SegmentedAudioReader: Sendable {
       dataRoot: dataRoot, sourceID: sourceID, asrSampleRate: descriptor.asrSampleRate,
       readerFactory: readerFactory)
 
-    let slices = try windows.map { window -> AudioSlice in
+    var slices: [AudioSlice] = []
+    // A chunk overlapping several segment windows would otherwise be reported
+    // once per window; dedupe by filename so each unreadable chunk is logged
+    // once per read.
+    var unreadableByFile: [String: AsrChunkRangeReader.UnreadableChunk] = [:]
+    var unreadableOrder: [String] = []
+    for window in windows {
       let absoluteRange = TimeRange(
         start: requested.start.advanced(by: window.start),
         end: requested.start.advanced(by: window.end))
-      let audio = try chunkReader.read(absoluteRange, chunks: reconstructed.chunks)
-      return AudioSlice(audio: audio, range: absoluteRange)
+      let stitched = try chunkReader.readReporting(absoluteRange, chunks: reconstructed.chunks)
+      slices.append(AudioSlice(audio: stitched.audio, range: absoluteRange))
+      for unreadable in stitched.unreadableChunks where unreadableByFile[unreadable.file] == nil {
+        unreadableByFile[unreadable.file] = unreadable
+        unreadableOrder.append(unreadable.file)
+      }
     }
     return RangeAudioReport(
-      slices: slices, chunksInRange: counts.chunks, speechIntervals: counts.speech)
+      slices: slices, chunksInRange: counts.chunks, speechIntervals: counts.speech,
+      unreadableChunks: unreadableOrder.compactMap { unreadableByFile[$0] })
   }
 
   /// What ``probe(source:range:)`` reports: whether this source's directory

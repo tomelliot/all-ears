@@ -355,7 +355,9 @@ public actor EarsDaemon {
       storeNative: descriptor.storeNative,
       chunkSeconds: configuration.chunkSeconds,
       startInstant: clock.now(),
-      indexAppender: indexAppender)
+      indexAppender: indexAppender,
+      clock: clock,
+      logSink: logSink)
 
     return CaptureActor(
       descriptor: descriptor,

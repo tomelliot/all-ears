@@ -32,6 +32,8 @@ Capture each active meeting's audio sources under the meeting's own directory, m
 - Derive frame count from the live `AudioBuffer` layout, not `ASBD.mBytesPerFrame`.
 - Watch for default-device changes and rebuild the engine (with backoff), preserving the open chunk file.
 - Debounce Bluetooth format-change notifications and dispose the audio unit before releasing the callback context, to survive AirPods-style route flaps.
+- **Input sample-rate switch mid-recording** (e.g. a Bluetooth headset engaging HFP at 16 kHz, replacing the 48 kHz built-in mic): every incoming buffer is normalised to the source's configured native rate before VAD/encode, and the switch is made an **explicit chunk boundary** — the chunk accumulating at the old rate is finalized and the new rate starts a fresh, single-rate chunk (the resampler's converter is rebuilt for the new input rate). The `capture.input_rate_changed` log records the action taken (`chunk_finalized`/`converter_rebuilt`/`baseline`), never a silent continue-in-place, which previously produced an `.m4a` `ExtAudioFileOpenURL` later refused to open.
+- **Post-write validity check:** each finalized chunk's `asr/` file is reopened with the same decoder `transcribe` uses, and `capture.chunk_finalized` logs its path, declared sample rate, frame count, and the open-check result — so an unreadable chunk is flagged at write time, not at transcription time.
 
 ### Permissions and TCC probing
 

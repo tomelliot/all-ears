@@ -224,6 +224,94 @@ struct TranscribePipelineTests {
   }
 
   @Test(
+    "an unreadable chunk is logged per-chunk and skipped; the surrounding audio still transcribes (issue #26)"
+  )
+  func unreadableChunkDoesNotAbortRun() async throws {
+    let dataRoot = makeTempDirectory("unreadable-chunk")
+    let outputRoot = makeTempDirectory("unreadable-chunk-output")
+
+    try SourceMetaStore.write(
+      SourceDescriptor(
+        schema: 1, id: "mic", sourceClass: .mic, label: "mic", nativeSampleRate: 48000,
+        asrSampleRate: asrSampleRate, storeNative: true, channels: 1, codec: "aac", bitrate: 64000,
+        created: now.advanced(by: -20)),
+      dataRoot: dataRoot)
+
+    let asrDirectory = DataStoreLayout.asrDirectory(dataRoot: dataRoot, sourceID: "mic")
+    try FileManager.default.createDirectory(at: asrDirectory, withIntermediateDirectories: true)
+    let indexAppender = IndexAppender(
+      fileURL: DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: "mic"))
+
+    // A healthy AAC chunk covering [-20, -10).
+    let goodStart = now.advanced(by: -20)
+    let goodSamples = (0..<(asrSampleRate * 10)).map { index in
+      Float(sin(2.0 * Double.pi * 440.0 * Double(index) / Double(asrSampleRate)) * 0.5)
+    }
+    let goodFilename = FilenameTimestampCodec.string(for: goodStart) + ".m4a"
+    let goodWriter = try AVFoundationChunkFileWriter(
+      url: asrDirectory.appendingPathComponent(goodFilename),
+      settings: ChunkAudioSettings(codec: "aac", sampleRate: asrSampleRate, bitrate: 64000))
+    try goodWriter.write(samples: goodSamples)
+    try goodWriter.finish()
+    try await indexAppender.append(
+      .chunk(
+        start: goodStart, end: now.advanced(by: -10), file: "asr/\(goodFilename)",
+        frames: asrSampleRate * 10))
+
+    // A corrupt chunk covering [-10, 0): a real file on disk that is not a
+    // valid audio container, so AVAudioFile (ExtAudioFileOpenURL) refuses it —
+    // exactly the Bluetooth-rate-switch-poisoned m4a the issue describes.
+    let corruptStart = now.advanced(by: -10)
+    let corruptFilename = FilenameTimestampCodec.string(for: corruptStart) + ".m4a"
+    try Data([UInt8](repeating: 0x41, count: 4096)).write(
+      to: asrDirectory.appendingPathComponent(corruptFilename))
+    try await indexAppender.append(
+      .chunk(
+        start: corruptStart, end: now, file: "asr/\(corruptFilename)", frames: asrSampleRate * 10))
+
+    // One continuous speech span crossing the good→corrupt boundary.
+    try await VADSegmentWriter(
+      directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: "mic")
+    ).append(state: .speech, start: now.advanced(by: -15), end: now.advanced(by: -5))
+
+    let scripted = ScriptedTranscriber(results: [
+      [Segment(start: 0, end: 2, text: "survived the corrupt chunk")]
+    ])
+    let logs = LogCollector()
+
+    let exitCode = await TranscribePipeline.run(
+      inputs: .init(last: "20s", sourceIDs: ["mic"], out: nil),
+      dataRoot: dataRoot,
+      outputRoot: outputRoot,
+      backendName: "fluidaudio",
+      dependencies: .init(
+        clock: ManualClock(now),
+        transcriberFactory: { scripted },
+        loadOptions: LoadOptions(),
+        log: { logs.append($0) },
+        writeStderr: { line in Issue.record("unexpected stderr: \(line)") }
+      )
+    )
+
+    // The run succeeds instead of aborting on the unreadable chunk, and the
+    // surviving (good-chunk) audio still reaches the transcriber and the file.
+    #expect(exitCode == 0)
+    #expect(scripted.recordedCalls.count == 1)
+    let paths = OutputPathResolution.resolve(
+      outputRoot: outputRoot, requestedStart: now.advanced(by: -20), sourceIDs: ["mic"],
+      explicitOut: nil)
+    #expect(try outputText(at: paths.markdown).contains("survived the corrupt chunk"))
+
+    // The corrupt chunk is named in a per-chunk log line, not swallowed.
+    let lines = logs.snapshot()
+    #expect(
+      lines.contains {
+        $0.contains("chunk.unreadable:") && $0.contains("source=mic")
+          && $0.contains("file=\(corruptFilename)")
+      })
+  }
+
+  @Test(
     "--session resolves range/sources from a real session.toml fixture, with no --source needed")
   func sessionEndToEnd() async throws {
     let dataRoot = makeTempDirectory("session")
