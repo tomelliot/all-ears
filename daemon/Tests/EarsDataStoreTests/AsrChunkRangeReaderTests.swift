@@ -210,9 +210,8 @@ struct AsrChunkRangeReaderTests {
     // The poisoned chunk contributes nothing; before + after still stitch, in
     // order, with only the middle span missing.
     #expect(result.audio.samples == (0..<20).map { Float($0) } + (0..<20).map { Float($0) })
-    #expect(result.unreadableChunks == [
-      AsrChunkRangeReader.UnreadableChunk(file: "poison-mid.pcm", error: "poisoned")
-    ])
+    let expected = [AsrChunkRangeReader.UnreadableChunk(file: "poison-mid.pcm", error: "poisoned")]
+    #expect(result.unreadableChunks == expected)
 
     // The non-reporting entry point returns the same surviving audio and does
     // NOT throw — one corrupt chunk no longer aborts the whole read.

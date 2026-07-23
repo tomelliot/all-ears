@@ -219,9 +219,8 @@ struct SegmentedAudioReaderTests {
     let report = try reader.read(source: "mic", range: range(0, 4))
 
     // The poisoned chunk is reported once, by basename, and does not throw.
-    #expect(report.unreadableChunks == [
-      AsrChunkRangeReader.UnreadableChunk(file: "poison.pcm", error: "poisoned")
-    ])
+    let expected = [AsrChunkRangeReader.UnreadableChunk(file: "poison.pcm", error: "poisoned")]
+    #expect(report.unreadableChunks == expected)
     // The good chunk's audio still made it into the slice (pre-roll clamps the
     // start to frame 2 of the first chunk); the poisoned tail is simply absent.
     #expect(report.slices.count == 1)
