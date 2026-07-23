@@ -31,7 +31,8 @@ struct MeetingRegistryTests {
     sleep: (@Sendable (Double) async -> Void)? = nil,
     onEnded: MeetingRegistry.EndedHook? = nil,
     localBrowserSources: [SourceID] = [],
-    knownSourceIDs: @escaping @Sendable () async -> Set<SourceID> = { [] }
+    knownSourceIDs: @escaping @Sendable () async -> Set<SourceID> = { [] },
+    log: (@Sendable (String) -> Void)? = nil
   ) -> MeetingRegistry {
     let ids = Mutex(0)
     return MeetingRegistry(
@@ -48,7 +49,8 @@ struct MeetingRegistryTests {
       sleep: sleep ?? { _ in },
       onEnded: onEnded,
       localBrowserSources: localBrowserSources,
-      knownSourceIDs: knownSourceIDs)
+      knownSourceIDs: knownSourceIDs,
+      log: log ?? { _ in })
   }
 
   // MARK: - start
@@ -509,6 +511,77 @@ struct MeetingRegistryTests {
     let timeline = MeetingEventLog.readAll(dataRoot: dataRoot, meetingID: meeting.id)
     #expect(timeline.map(\.event).contains("attendee_joined"))
     #expect(timeline.last?.event == "attendee_left")
+  }
+
+  @Test("every attendee upsert logs what it received and what it stored (issue #23)")
+  func attendeeUpsertLogsProvenance() async throws {
+    let dataRoot = try makeDataRoot()
+    let logs = Mutex<[String]>([])
+    let registry = makeRegistry(
+      dataRoot: dataRoot, clock: ManualClock(base),
+      log: { line in logs.withLock { $0.append(line) } })
+    let meeting = try await registry.start(MeetingStartParams(platform: "meet", externalID: "a"))
+
+    // A name-only upsert: "sent" this time.
+    _ = try await registry.upsertAttendee(
+      MeetingAttendeeParams(
+        meeting: meeting.id, id: "spaces/s/devices/445", displayName: "Tom Elliot"))
+    // A source-only upsert for a different attendee: name "never sent".
+    _ = try await registry.upsertAttendee(
+      MeetingAttendeeParams(meeting: meeting.id, id: "speaker-1", source: "browser:meet:speaker-1"))
+
+    let upsertLogs = logs.withLock { $0 }.filter { $0.hasPrefix("meeting.attendee upsert:") }
+    #expect(upsertLogs.count == 2)
+    // The name-bearing upsert records the received and stored name.
+    #expect(
+      upsertLogs.contains {
+        $0.contains("attendee=spaces/s/devices/445") && $0.contains("new=true")
+          && $0.contains("recv_display_name=\"Tom Elliot\"")
+          && $0.contains("stored_display_name=\"Tom Elliot\"")
+      })
+    // The source-only upsert shows the name was never sent (recv/stored both `-`),
+    // distinguishing "never sent" from "sent but not merged".
+    #expect(
+      upsertLogs.contains {
+        $0.contains("attendee=speaker-1") && $0.contains("recv_display_name=-")
+          && $0.contains("stored_display_name=-")
+          && $0.contains("recv_source=\"browser:meet:speaker-1\"")
+      })
+  }
+
+  @Test("meeting end logs a roster summary naming unresolved attendees (issue #23)")
+  func endLogsRosterSummary() async throws {
+    let dataRoot = try makeDataRoot()
+    let logs = Mutex<[String]>([])
+    let registry = makeRegistry(
+      dataRoot: dataRoot, clock: ManualClock(base),
+      log: { line in logs.withLock { $0.append(line) } })
+    let meeting = try await registry.start(MeetingStartParams(platform: "meet", externalID: "a"))
+
+    // Fully resolved: name + source.
+    _ = try await registry.upsertAttendee(
+      MeetingAttendeeParams(
+        meeting: meeting.id, id: "spaces/s/devices/445", displayName: "Tom Elliot",
+        source: "browser:meet:spaces-s-devices-445"))
+    // Named but never tied to a track (no source).
+    _ = try await registry.upsertAttendee(
+      MeetingAttendeeParams(meeting: meeting.id, id: "spaces/s/devices/446", displayName: "Tom E"))
+    // A captured track that never resolved a name (source but no name).
+    _ = try await registry.upsertAttendee(
+      MeetingAttendeeParams(meeting: meeting.id, id: "speaker-1", source: "browser:meet:speaker-1"))
+
+    _ = try await registry.end(id: meeting.id)
+
+    let summary = try #require(
+      logs.withLock { $0 }.first { $0.hasPrefix("meeting.end roster summary:") })
+    #expect(summary.contains("attendees=3"))
+    #expect(summary.contains("with_name=2"))
+    #expect(summary.contains("with_source=2"))
+    // Both partially-resolved attendees are named explicitly with what's missing.
+    #expect(summary.contains("spaces/s/devices/446(name=yes,source=no)"))
+    #expect(summary.contains("speaker-1(name=no,source=yes)"))
+    // The fully-resolved attendee is not listed as unresolved.
+    #expect(!summary.contains("spaces/s/devices/445("))
   }
 
   // MARK: - restart recovery

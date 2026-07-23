@@ -1,5 +1,5 @@
 import { registerAdapter, type PlatformAdapter } from "./adapter";
-import type { ParticipantId } from "../protocol";
+import type { ParticipantId, RosterEntry } from "../protocol";
 import { setCollectionsListener } from "../rtc-hook";
 import type { CollectionsSpeakingEvent } from "./meet-collections";
 import { SpeakingCorrelator, type CorrelatorMatch } from "./meet-correlator";
@@ -236,6 +236,28 @@ function clean(value: string | null | undefined): string | undefined {
 }
 
 /**
+ * The newly-resolved or changed (id → name) pairs in `names` that `emitted`
+ * hasn't seen yet, as roster entries — and mutates `emitted` to record them.
+ * Pure and side-effect-scoped to `emitted` so it unit-tests without a DOM: the
+ * adapter calls it on every tile re-scan and forwards only the delta, so a
+ * participant's name reaches the daemon once (not once per 3s poll) and a
+ * corrected name (Meet swaps a placeholder for the real one) re-emits. Empty
+ * names are already excluded upstream (only truthy names enter `names`).
+ */
+export function rosterDelta(
+  names: ReadonlyMap<ParticipantId, string>,
+  emitted: Map<ParticipantId, string>,
+): RosterEntry[] {
+  const fresh: RosterEntry[] = [];
+  for (const [id, name] of names) {
+    if (emitted.get(id) === name) continue;
+    emitted.set(id, name);
+    fresh.push({ participantId: id, displayName: name });
+  }
+  return fresh;
+}
+
+/**
  * Find the media element rendering `track`. Strongest signal first: an element
  * whose srcObject contains the track itself (by identity, then id). Falls back
  * to an element rendering the same MediaStream — Meet bundles a participant's
@@ -308,6 +330,10 @@ class MeetAdapter implements PlatformAdapter {
    * doesn't re-fire the callback. */
   private readonly upgradedTracks = new Map<string, ParticipantId>();
   private identifyCb: ((track: MediaStreamTrack, id: ParticipantId) => void) | null = null;
+  private rosterCb: ((entries: RosterEntry[]) => void) | null = null;
+  /** id → name already emitted via onRoster, so each tile re-scan pushes only
+   * the delta (see rosterDelta). */
+  private readonly emittedNames = new Map<ParticipantId, string>();
 
   constructor() {
     // Latest-registration-wins, same handoff pattern as rtc-hook.ts's own
@@ -339,6 +365,28 @@ class MeetAdapter implements PlatformAdapter {
     this.identifyCb = cb;
   }
 
+  onRoster(cb: (entries: RosterEntry[]) => void): void {
+    this.rosterCb = cb;
+  }
+
+  /**
+   * Re-scan the participant tiles and emit any newly-resolved names via
+   * onRoster. Called periodically by the capture reconciler so the roster is
+   * harvested even for participants who never speak (the collections-datachannel
+   * correlation only fires on speaking onsets, so a silent participant's name
+   * would otherwise never reach the daemon — issue #23). Best-effort: a broken
+   * DOM degrades to no roster, never throws into the capture path.
+   */
+  pollIdentities(): void {
+    if (this.disposed) return;
+    try {
+      this.tilesDirty = true; // force a re-scan even when no mutation fired since last poll
+      this.refreshNamesIfDirty();
+    } catch {
+      // best-effort — identity harvesting must never affect capture
+    }
+  }
+
   /** audio-tap.ts calls this unconditionally on every track's audio-domain
    * speaking edge. Best-effort: never throws into the capture path. */
   onTrackSpeaking(track: MediaStreamTrack, speaking: boolean): void {
@@ -367,11 +415,22 @@ class MeetAdapter implements PlatformAdapter {
     if (!match || match.confirmations < CONFIRM_THRESHOLD) return;
     if (this.upgradedTracks.get(match.trackKey) === match.deviceId) return; // already pushed
     const track = this.liveTracksById.get(match.trackKey);
-    if (!track) return; // track ended before confirmation landed
+    if (!track) {
+      // The correlation confirmed, but the track it points at is already gone —
+      // log the failed join so an unresolved attendee is traceable to "matched
+      // but no track" rather than looking like the correlator never fired (#23).
+      console.debug(
+        `[ears][identity] Meet join failed: no live track for device ${match.deviceId} ` +
+          `(track ${match.trackKey} ended before ${match.confirmations}-turn confirmation landed)`,
+      );
+      return;
+    }
     this.upgradedTracks.set(match.trackKey, match.deviceId);
+    const name = this.names.get(match.deviceId);
     console.debug(
-      `[ears][identity] Meet identity upgraded via collections datachannel: track ${match.trackKey} → ${match.deviceId} ` +
-        `(${match.confirmations} confirming turns)`,
+      `[ears][identity] Meet identity join: track ${match.trackKey} → ${match.deviceId}` +
+        `${name ? ` "${name}"` : " (name not yet resolved from tiles)"} ` +
+        `via collections datachannel (${match.confirmations} confirming turns)`,
     );
     this.identifyCb?.(track, match.deviceId);
   }
@@ -443,6 +502,21 @@ class MeetAdapter implements PlatformAdapter {
       const name = extractDisplayName(tile);
       if (name) this.names.set(id, name);
     }
+    this.emitRoster();
+  }
+
+  /** Forward newly-resolved (id → name) pairs to the roster callback, once
+   * each. Logs every resolution (device id → display name) per issue #23's
+   * debug-logging requirement. */
+  private emitRoster(): void {
+    const fresh = rosterDelta(this.names, this.emittedNames);
+    if (fresh.length === 0) return;
+    for (const entry of fresh) {
+      console.debug(
+        `[ears][identity] Meet roster resolved: ${entry.participantId} → "${entry.displayName}"`,
+      );
+    }
+    this.rosterCb?.(fresh);
   }
 
   // MUST-NOT #13 (no swallowing structural failures): a Meet build whose tiles

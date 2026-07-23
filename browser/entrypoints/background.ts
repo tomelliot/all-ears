@@ -137,6 +137,9 @@ export default defineBackground(() => {
         case "joined":
           meetings.participantJoined(portId, msg.platform, msg.participantId, msg.displayName);
           return;
+        case "roster":
+          meetings.rosterUpdate(portId, msg.platform, msg.entries);
+          return;
         case "left":
           tracker.participantLeft(portId, msg.participantId);
           socket.participantLeft(msg.participantId);

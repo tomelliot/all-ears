@@ -7,6 +7,7 @@ import {
   postToMain,
   type MainMessage,
   type Platform,
+  type RosterEntry,
 } from "../lib/protocol";
 
 // Isolated-world relay. The MAIN-world hook (hook.content.ts) generates PCM and
@@ -57,7 +58,7 @@ export default defineContentScript({
     // what the MV3 service worker holds only in memory — the worker can be
     // evicted mid-call and respawn empty, so the relay replays these to every
     // fresh port (see ReconnectingPort's onReconnect).
-    const state: RelayState = { participants: new Map(), liveMeeting: null };
+    const state: RelayState = { participants: new Map(), roster: new Map(), liveMeeting: null };
 
     // Dedicated PCM/lifecycle port to the background.
     const port = new ReconnectingPort(
@@ -72,10 +73,16 @@ export default defineContentScript({
             ...(p.displayName ? { displayName: p.displayName } : {}),
           });
         }
+        // Roster names dedupe in the MAIN world (only deltas are ever sent), so
+        // a respawned worker would otherwise miss every already-emitted name
+        // until Meet changed one. Replay the full accumulated roster here.
+        for (const [platform, entries] of groupRosterByPlatform(state.roster)) {
+          post({ type: "roster", platform, entries });
+        }
         console.debug(
           `[ears][relay] replayed to respawned worker: ` +
             `meeting=${state.liveMeeting?.externalMeetingId ?? "none"}, ` +
-            `${state.participants.size} participant(s)`,
+            `${state.participants.size} participant(s), ${state.roster.size} roster name(s)`,
         );
       },
     );
@@ -93,7 +100,26 @@ interface RelayState {
   // the participant's first PCM), so PCM frames can carry their platform and
   // reconnect replays can re-teach the roster.
   participants: Map<string, { platform: Platform; displayName?: string }>;
+  // participantId → resolved roster name, accumulated from participant-roster
+  // (identity only, no capture pipeline). Replayed in full on worker respawn
+  // because the MAIN world only ever sends deltas (#23).
+  roster: Map<string, { platform: Platform; displayName: string }>;
   liveMeeting: { platform: Platform; externalMeetingId: string } | null;
+}
+
+/** Regroup the accumulated roster back into per-platform entry batches for the
+ * `roster` port message. A tab is single-platform in practice, but grouping
+ * keeps the wire shape honest if that ever changes. */
+function groupRosterByPlatform(
+  roster: Map<string, { platform: Platform; displayName: string }>,
+): Map<Platform, RosterEntry[]> {
+  const byPlatform = new Map<Platform, RosterEntry[]>();
+  for (const [participantId, r] of roster) {
+    const list = byPlatform.get(r.platform) ?? [];
+    list.push({ participantId, displayName: r.displayName });
+    byPlatform.set(r.platform, list);
+  }
+  return byPlatform;
 }
 
 function relay(msg: MainMessage, port: ReconnectingPort, state: RelayState): void {
@@ -118,6 +144,24 @@ function relay(msg: MainMessage, port: ReconnectingPort, state: RelayState): voi
       port.post({ type: "left", participantId: msg.participantId });
       console.debug(`[ears][relay] left ${msg.participantId} gen${msg.generation}`);
       break;
+    case "participant-roster": {
+      // Identity-only names resolved from the platform roster; remember them for
+      // respawn replay and forward so the background upserts the daemon roster.
+      const fresh = msg.entries.filter(
+        (e) => state.roster.get(e.participantId)?.displayName !== e.displayName,
+      );
+      for (const entry of msg.entries) {
+        state.roster.set(entry.participantId, { platform: msg.platform, displayName: entry.displayName });
+      }
+      if (fresh.length > 0) {
+        port.post({ type: "roster", platform: msg.platform, entries: fresh });
+        console.debug(
+          `[ears][relay] roster ${fresh.length} name(s) (${msg.platform}): ` +
+            fresh.map((e) => `${e.participantId}="${e.displayName}"`).join(", "),
+        );
+      }
+      break;
+    }
     case "status":
       console.debug(`[ears][relay] status: ${msg.text}`);
       break;

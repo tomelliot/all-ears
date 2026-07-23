@@ -289,8 +289,17 @@ function collectionsMessageBytes(deviceId: string, flag: number): ArrayBuffer {
 }
 
 describe("Meet collections datachannel (rtc-hook.ts)", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.restoreAllMocks();
+    // The collections listener is a shared window global and each message
+    // decodes asynchronously (real gzip, ~10-50ms). Without this, a prior
+    // test's late decode lands in the *next* test's `events` array once that
+    // test has installed its own listener — a cross-test leak that made the
+    // "ignores non-collections" and "forwards one event" cases flaky. Clear the
+    // listener and drain any in-flight decode (dropped against a null listener)
+    // before each test installs a fresh one.
+    setCollectionsListener(null);
+    await new Promise((r) => setTimeout(r, 60));
   });
 
   function installAndConnect(): { pc: { dispatch(type: string, ev: unknown): void } } {
@@ -299,6 +308,15 @@ describe("Meet collections datachannel (rtc-hook.ts)", () => {
     const Ctor = (globalThis as unknown as { RTCPeerConnection: new () => { dispatch(type: string, ev: unknown): void } })
       .RTCPeerConnection;
     return { pc: new Ctor() };
+  }
+
+  /** Poll until `cond` holds or the bound elapses — for the async gzip decode,
+   * whose timing varies with system load, so a fixed sleep is flaky. */
+  async function waitFor(cond: () => boolean, timeoutMs = 1000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (!cond() && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
   }
 
   it("parses a collections-labeled channel's message and forwards it to the registered listener", async () => {
@@ -311,9 +329,10 @@ describe("Meet collections datachannel (rtc-hook.ts)", () => {
     channel.dispatch("message", { data: collectionsMessageBytes("spaces/abc/devices/377", 0) });
 
     // Real gzip decompression via DecompressionStream schedules across several
-    // real event-loop turns (~10ms observed), not just a microtask — a bare
-    // setTimeout(0) isn't reliably enough.
-    await new Promise((r) => setTimeout(r, 50));
+    // real event-loop turns (~10ms observed, but slower under full-suite load),
+    // so poll for the event with a generous bound instead of a fixed sleep that
+    // races the decode.
+    await waitFor(() => events.length > 0);
 
     expect(events).toEqual([{ deviceId: "spaces/abc/devices/377", speaking: true }]);
   });

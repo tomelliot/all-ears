@@ -1,4 +1,4 @@
-import type { ParticipantId, Platform } from "../protocol";
+import type { ParticipantId, Platform, RosterEntry } from "../protocol";
 
 // Identity is the fragile, platform-specific part — quarantined behind this one
 // interface. The capture spine (hook, tap, transport) never branches on platform.
@@ -29,6 +29,23 @@ export interface PlatformAdapter {
    * in-place wasn't used).
    */
   onIdentify?(cb: (track: MediaStreamTrack, id: ParticipantId) => void): void;
+  /**
+   * Optional: register a callback for batches of resolved participant identities
+   * (id → display name) read from the platform's own roster/UI, independent of
+   * whether each id has been tied to a captured track. audio-tap.ts forwards
+   * these to the daemon so names land on the meeting roster even for
+   * participants whose track never correlated to a stable id (issue #23). Only
+   * newly-resolved or changed entries are delivered (the adapter dedupes).
+   */
+  onRoster?(cb: (entries: RosterEntry[]) => void): void;
+  /**
+   * Optional: prompt the adapter to re-scan its identity source (e.g. Meet's
+   * participant tiles) and emit any newly-resolved names via onRoster. Called
+   * periodically by the capture reconciler so the roster is harvested even for
+   * participants who never trigger identify()/onTrackSpeaking (a silent
+   * participant whose name only lives in the DOM).
+   */
+  pollIdentities?(): void;
   /** Optional teardown of observers. */
   dispose?(): void;
 }

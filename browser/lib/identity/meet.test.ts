@@ -5,6 +5,7 @@ import {
   extractParticipantId,
   findMediaElementForTrack,
   findParticipantTile,
+  rosterDelta,
   type DocumentLike,
   type MediaElementLike,
 } from "./meet";
@@ -319,5 +320,34 @@ describe("findMediaElementForTrack", () => {
     expect(foundTile).toBe(tile);
     expect(extractParticipantId(foundTile as FakeEl)).toBe("spaces/abc/devices/7");
     expect(extractDisplayName(foundTile as FakeEl)).toBe("Ada");
+  });
+});
+
+describe("rosterDelta", () => {
+  it("emits every (id → name) pair on first sight and records them as emitted", () => {
+    const names = new Map([
+      ["spaces/s/devices/445", "Tom Elliot"],
+      ["spaces/s/devices/446", "Tom E"],
+    ]);
+    const emitted = new Map<string, string>();
+
+    const fresh = rosterDelta(names, emitted);
+
+    expect(fresh).toEqual([
+      { participantId: "spaces/s/devices/445", displayName: "Tom Elliot" },
+      { participantId: "spaces/s/devices/446", displayName: "Tom E" },
+    ]);
+    // Recorded, so a second identical scan is a no-op.
+    expect(rosterDelta(names, emitted)).toEqual([]);
+  });
+
+  it("re-emits only when a name changes (Meet swaps a placeholder for the real one)", () => {
+    const emitted = new Map<string, string>();
+    rosterDelta(new Map([["spaces/s/devices/445", "Guest"]]), emitted);
+
+    const fresh = rosterDelta(new Map([["spaces/s/devices/445", "Tom Elliot"]]), emitted);
+
+    expect(fresh).toEqual([{ participantId: "spaces/s/devices/445", displayName: "Tom Elliot" }]);
+    expect(emitted.get("spaces/s/devices/445")).toBe("Tom Elliot");
   });
 });
