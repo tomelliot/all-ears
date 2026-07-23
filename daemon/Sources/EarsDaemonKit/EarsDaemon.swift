@@ -963,6 +963,21 @@ public actor EarsDaemon {
     return try await meetingRegistry.end(id: id)
   }
 
+  /// Test-only: stamp a meeting's transcript-completion marker through the
+  /// same registry entry point the auto-transcribe hook uses, so a lifecycle
+  /// test can start the retention clock without spawning a real `transcribe`
+  /// process.
+  func markTranscriptCompletedForTesting(id: String) async {
+    await markMeetingTranscriptCompleted(id)
+  }
+
+  /// Test-only: drive one deterministic retention pass of the daemon's own
+  /// sweeper (the timer normally does this), so a lifecycle test can assert
+  /// eviction at an exact ``ManualClock`` deadline.
+  func sweepRetentionForTesting() async {
+    await evictionSweeper?.sweepOnce()
+  }
+
   /// The socket server's current subscriber count — a test-only seam so an
   /// end-to-end test can wait for its `subscribe` to be registered before
   /// triggering the events it expects to receive (the same handshake
