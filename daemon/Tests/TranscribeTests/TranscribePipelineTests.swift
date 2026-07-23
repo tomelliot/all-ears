@@ -491,7 +491,8 @@ struct TranscribePipelineTests {
     // Every source names why it was silent, and each store consulted is logged.
     #expect(lines.contains { $0.contains("run.empty: source=mic reason=store missing") })
     #expect(
-      lines.contains { $0.contains("run.empty: source=browser:meet:speaker-2 reason=store missing")
+      lines.contains {
+        $0.contains("run.empty: source=browser:meet:speaker-2 reason=store missing")
       })
     #expect(lines.contains { $0.contains("source mic: consulted meeting store at") })
     #expect(lines.contains { $0.contains("source mic: consulted ring store at") })
