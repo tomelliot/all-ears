@@ -45,7 +45,6 @@ struct EarsDaemonTests {
       channels: 1,
       codec: "aac",
       bitrate: 64_000,
-      timeCapSeconds: 7_200,
       created: Instant(secondsSinceEpoch: 1_000)
     )
   }
@@ -197,12 +196,12 @@ struct EarsDaemonTests {
     let meetingRoot = DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: meeting.id)
     var preExisting = makeDescriptor(id: "mic", sourceClass: .mic)
     preExisting.created = originalCreated
-    preExisting.timeCapSeconds = 3_600
+    preExisting.bitrate = 32_000
     try SourceMetaStore.write(preExisting, dataRoot: meetingRoot)
 
     let configuration = EarsDaemonConfiguration(
       // A fresh config-resolution pass stamps `created` with "now" and may
-      // have a different `time_cap_seconds` than what's already on disk.
+      // have a different `bitrate` than what's already on disk.
       sources: [makeDescriptor(id: "mic", sourceClass: .mic)],
       dataRoot: dataRoot,
       socketPath: tempSocketPath()
@@ -219,7 +218,7 @@ struct EarsDaemonTests {
 
     let written = try SourceMetaStore.read(sourceID: "mic", dataRoot: meetingRoot)
     #expect(written.created == originalCreated)
-    #expect(written.timeCapSeconds == 7_200)
+    #expect(written.bitrate == 64_000)
 
     await daemon.stop()
   }

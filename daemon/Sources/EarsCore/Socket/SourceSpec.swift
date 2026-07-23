@@ -20,7 +20,6 @@ public struct SourceSpec: Sendable, Hashable, Codable {
   public var channels: Int?
   public var codec: String?
   public var bitrate: Int?
-  public var timeCapSeconds: Int?
 
   public init(
     id: SourceID,
@@ -32,8 +31,7 @@ public struct SourceSpec: Sendable, Hashable, Codable {
     storeNative: Bool? = nil,
     channels: Int? = nil,
     codec: String? = nil,
-    bitrate: Int? = nil,
-    timeCapSeconds: Int? = nil
+    bitrate: Int? = nil
   ) {
     self.id = id
     self.sourceClass = sourceClass
@@ -45,7 +43,6 @@ public struct SourceSpec: Sendable, Hashable, Codable {
     self.channels = channels
     self.codec = codec
     self.bitrate = bitrate
-    self.timeCapSeconds = timeCapSeconds
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -59,6 +56,5 @@ public struct SourceSpec: Sendable, Hashable, Codable {
     case channels
     case codec
     case bitrate
-    case timeCapSeconds = "time_cap_seconds"
   }
 }

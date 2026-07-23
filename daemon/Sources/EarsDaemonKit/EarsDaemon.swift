@@ -27,16 +27,15 @@ public struct EarsDaemonConfiguration: Sendable {
   /// The VAD conformance shared across every source (Phase 1: always
   /// ``EnergyVAD``, per that type's doc comment).
   public var vad: EnergyVAD
-  /// `[earsd].codec`/`.bitrate`/`.default_time_cap_seconds` — the same
-  /// operator-configured storage defaults every config-declared source uses,
-  /// reused for a dynamically-created `browser:<label>` source's on-disk
-  /// encoding (see ``EarsDaemon/openIngestSource(label:format:)``). Every
+  /// `[earsd].codec`/`.bitrate` — the same operator-configured storage
+  /// defaults every config-declared source uses, reused for a
+  /// dynamically-created `browser:<label>` source's on-disk encoding (see
+  /// ``EarsDaemon/openIngestSource(label:format:meeting:)``). Every
   /// config-declared ``SourceDescriptor`` already has these baked in at
   /// resolution time; a browser source has no config entry to resolve one
   /// from, so ``EarsDaemon`` needs them directly.
   public var codec: String
   public var bitrate: Int
-  public var defaultTimeCapSeconds: Int
   /// How often the daemon's ``EvictionSweeper`` runs its retention pass across
   /// every meeting, in seconds. This bounds how far past a meeting's eviction
   /// deadline its audio can linger before being deleted (worst case ≈ deadline
@@ -88,7 +87,6 @@ public struct EarsDaemonConfiguration: Sendable {
     vad: EnergyVAD = EnergyVAD(),
     codec: String = "aac",
     bitrate: Int = 64_000,
-    defaultTimeCapSeconds: Int = 7_200,
     evictionSweepIntervalSeconds: Double = 60,
     evictAfterTranscriptSeconds: Double = 7_200,
     maxAudioAgeSeconds: Double = 604_800,
@@ -107,7 +105,6 @@ public struct EarsDaemonConfiguration: Sendable {
     self.codec = codec
     self.bitrate = bitrate
     self.outputRoot = outputRoot
-    self.defaultTimeCapSeconds = defaultTimeCapSeconds
     self.evictionSweepIntervalSeconds = evictionSweepIntervalSeconds
     self.evictAfterTranscriptSeconds = evictAfterTranscriptSeconds
     self.maxAudioAgeSeconds = maxAudioAgeSeconds
@@ -376,8 +373,8 @@ public actor EarsDaemon {
   /// restart would reset a source's true creation time each time `earsd`
   /// restarts. When a `meta.toml` already exists, this keeps its `created`
   /// and writes everything else from `descriptor` -- so config edits (e.g. a
-  /// changed `time_cap_seconds`) still take effect on restart, without
-  /// clobbering the one field that records history.
+  /// changed `bitrate`) still take effect on restart, without clobbering the
+  /// one field that records history.
   private static func writeSourceMeta(_ descriptor: SourceDescriptor, dataRoot: URL) throws {
     var toWrite = descriptor
     do {
@@ -762,7 +759,6 @@ public actor EarsDaemon {
         channels: format.channels,
         codec: configuration.codec,
         bitrate: configuration.bitrate,
-        timeCapSeconds: configuration.defaultTimeCapSeconds,
         created: clock.now())
       let backend = PushCaptureBackend(source: label)
       let built = try Self.buildCaptureActor(

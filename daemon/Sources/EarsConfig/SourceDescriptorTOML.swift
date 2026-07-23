@@ -26,7 +26,6 @@ public enum SourceDescriptorTOML {
       "channels": .int(descriptor.channels),
       "codec": .string(descriptor.codec),
       "bitrate": .int(descriptor.bitrate),
-      "time_cap_seconds": .int(descriptor.timeCapSeconds),
       "created": .string(formatCreated(descriptor.created)),
     ])
   }
@@ -62,7 +61,6 @@ public enum SourceDescriptorTOML {
       channels: try fields.int("channels"),
       codec: try fields.string("codec"),
       bitrate: try fields.int("bitrate"),
-      timeCapSeconds: try fields.int("time_cap_seconds"),
       created: created
     )
   }

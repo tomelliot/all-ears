@@ -36,8 +36,6 @@ struct EarsdConfigSchemaTests {
       "device_uid": .string(""),
     ])
     let earsdTable: ConfigValue = .table([
-      "default_time_cap_seconds": .int(7200),
-      "hard_total_cap_bytes": .int(0),
       "chunk_seconds": .int(30),
       "codec": .string("aac"),
       "bitrate": .int(64000),
@@ -139,7 +137,7 @@ struct EarsdConfigSchemaTests {
             .table(["id": .string("mic"), "class": .string("mic")]),
             .table([
               "id": .string("app:us.zoom.xos"), "class": .string("app"),
-              "time_cap_seconds": .string("not-a-number"),
+              "enabled": .string("not-a-bool"),
             ]),
           ])
         ])
@@ -148,8 +146,8 @@ struct EarsdConfigSchemaTests {
 
     let errors = validateConfig(value, against: EarsdConfigSchema.schema)
     #expect(errors.count == 1)
-    #expect(errors.first?.keyPathString == "earsd.source[1].time_cap_seconds")
-    #expect(errors.first?.reason == .typeMismatch(expected: .int, got: .string))
+    #expect(errors.first?.keyPathString == "earsd.source[1].enabled")
+    #expect(errors.first?.reason == .typeMismatch(expected: .bool, got: .string))
   }
 
   @Test("the doc's full [[earsd.source]] examples (mic, system, app:us.zoom.xos) validate cleanly")
@@ -165,7 +163,6 @@ struct EarsdConfigSchemaTests {
               "id": .string("app:us.zoom.xos"),
               "class": .string("app"),
               "label": .string("Zoom"),
-              "time_cap_seconds": .int(14400),
             ]),
           ])
         ])

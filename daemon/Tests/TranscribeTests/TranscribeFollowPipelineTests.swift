@@ -55,7 +55,7 @@ struct TranscribeFollowPipelineTests {
         SourceDescriptor(
           schema: 1, id: sourceID, sourceClass: sourceID.sourceClass ?? .mic,
           label: sourceID.rawValue, nativeSampleRate: asrRate, asrSampleRate: asrRate,
-          storeNative: false, channels: 1, codec: "aac", bitrate: 64_000, timeCapSeconds: 7_200,
+          storeNative: false, channels: 1, codec: "aac", bitrate: 64_000,
           created: created),
         dataRoot: dataRoot)
       appender = IndexAppender(

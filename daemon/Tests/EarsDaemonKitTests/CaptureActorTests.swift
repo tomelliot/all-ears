@@ -28,7 +28,7 @@ struct CaptureActorTests {
     return url
   }
 
-  private func makeDescriptor(timeCapSeconds: Int = 7_200) -> SourceDescriptor {
+  private func makeDescriptor() -> SourceDescriptor {
     SourceDescriptor(
       schema: 1,
       id: "mic",
@@ -40,7 +40,6 @@ struct CaptureActorTests {
       channels: 1,
       codec: "aac",
       bitrate: 64_000,
-      timeCapSeconds: timeCapSeconds,
       created: Instant(secondsSinceEpoch: startEpoch)
     )
   }
@@ -65,13 +64,12 @@ struct CaptureActorTests {
     clock: ManualClock,
     buffers: [AudioBuffer],
     chunkSeconds: Double = 1.0,
-    timeCapSeconds: Int = 7_200,
     backend: (any CaptureBackend)? = nil,
     eventSink: EventSink? = nil,
     logSink: any LogRecordSink = NoOpLogRecordSink(),
     encoderNativeRate: Int? = nil
   ) throws -> CaptureActor {
-    let descriptor = makeDescriptor(timeCapSeconds: timeCapSeconds)
+    let descriptor = makeDescriptor()
     let indexAppender = IndexAppender(
       fileURL: DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: descriptor.id))
     let vadWriter = VADSegmentWriter(

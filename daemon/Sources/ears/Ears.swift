@@ -200,8 +200,6 @@ struct SourcesAddCommand: AsyncParsableCommand {
   @Option(name: .customLong("channels"), help: "Channel count.") var channels: Int?
   @Option(name: .customLong("codec"), help: "Chunk codec, e.g. aac.") var codec: String?
   @Option(name: .customLong("bitrate"), help: "Chunk encoder bitrate.") var bitrate: Int?
-  @Option(name: .customLong("time-cap-seconds"), help: "Per-source retention override, in seconds.")
-  var timeCapSeconds: Int?
 
   func run() async throws {
     guard let sourceClass = SourceClass(rawValue: sourceClass) else {
@@ -220,8 +218,7 @@ struct SourcesAddCommand: AsyncParsableCommand {
       storeNative: storeNative ? true : nil,
       channels: channels,
       codec: codec,
-      bitrate: bitrate,
-      timeCapSeconds: timeCapSeconds
+      bitrate: bitrate
     )
     try await runSimpleCommand(
       .sourcesAdd(spec), expecting: EmptyData.self, options: options,

@@ -20,8 +20,6 @@ public struct SourceDescriptor: Sendable, Hashable, Codable {
   public var channels: Int
   public var codec: String
   public var bitrate: Int
-  /// This source's ring-buffer window in seconds (default 7200 = 2 h).
-  public var timeCapSeconds: Int
   public var created: Instant
 
   public init(
@@ -36,7 +34,6 @@ public struct SourceDescriptor: Sendable, Hashable, Codable {
     channels: Int,
     codec: String,
     bitrate: Int,
-    timeCapSeconds: Int,
     created: Instant
   ) {
     self.schema = schema
@@ -50,7 +47,6 @@ public struct SourceDescriptor: Sendable, Hashable, Codable {
     self.channels = channels
     self.codec = codec
     self.bitrate = bitrate
-    self.timeCapSeconds = timeCapSeconds
     self.created = created
   }
 }

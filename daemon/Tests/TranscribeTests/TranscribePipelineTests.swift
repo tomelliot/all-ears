@@ -47,7 +47,7 @@ struct TranscribePipelineTests {
       SourceDescriptor(
         schema: 1, id: sourceID, sourceClass: sourceID.sourceClass ?? .mic,
         label: sourceID.rawValue, nativeSampleRate: 48000, asrSampleRate: asrSampleRate,
-        storeNative: true, channels: 1, codec: "aac", bitrate: 64000, timeCapSeconds: 7200,
+        storeNative: true, channels: 1, codec: "aac", bitrate: 64000,
         created: chunkStart),
       dataRoot: dataRoot)
 

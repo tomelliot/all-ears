@@ -163,7 +163,7 @@ public actor CaptureActor {
 
   /// - Parameters:
   ///   - descriptor: This source's `meta.toml` model — supplies `codec`,
-  ///     `time_cap_seconds`, sample rates, and the id.
+  ///     sample rates, and the id.
   ///   - dataRoot: The suite's data root; per-source paths derive from
   ///     `DataStoreLayout` + `descriptor.id`.
   ///   - backend: The capture seam for this source (real `MicCaptureBackend`,

@@ -39,7 +39,6 @@ private final class SourceFixture {
       asr_sample_rate = 16000
       channels = 1
       codec = "aac"
-      time_cap_seconds = 7200
       created = "2026-07-17T08:00:00Z"
       """
     try? metaTOML.write(

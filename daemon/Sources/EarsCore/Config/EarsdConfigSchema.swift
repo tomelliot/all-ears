@@ -15,8 +15,6 @@
 public enum EarsdConfigSchema {
   public static let defaults: ConfigValue = .table([
     "earsd": .table([
-      "default_time_cap_seconds": .int(7200),
-      "hard_total_cap_bytes": .int(0),
       "chunk_seconds": .int(30),
       "codec": .string("aac"),
       "bitrate": .int(64000),
@@ -74,7 +72,6 @@ public enum EarsdConfigSchema {
       "class": ConfigSchema.Field(type: .string),
       "device_uid": ConfigSchema.Field(type: .string),
       "label": ConfigSchema.Field(type: .string),
-      "time_cap_seconds": ConfigSchema.Field(type: .int),
       "enabled": ConfigSchema.Field(type: .bool),
     ]
   )
@@ -109,8 +106,6 @@ public enum EarsdConfigSchema {
         type: .table,
         children: ConfigSchema(
           fields: [
-            "default_time_cap_seconds": ConfigSchema.Field(type: .int),
-            "hard_total_cap_bytes": ConfigSchema.Field(type: .int),
             "chunk_seconds": ConfigSchema.Field(type: .int),
             "codec": ConfigSchema.Field(type: .string),
             "bitrate": ConfigSchema.Field(type: .int),

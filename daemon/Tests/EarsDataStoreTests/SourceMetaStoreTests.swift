@@ -30,7 +30,6 @@ struct SourceMetaStoreTests {
     channels: 1,
     codec: "aac",
     bitrate: 64000,
-    timeCapSeconds: 7200,
     created: Instant(secondsSinceEpoch: 1_784_284_200)
   )
 
