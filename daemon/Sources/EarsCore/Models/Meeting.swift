@@ -6,7 +6,7 @@
 /// timeline; its `Codable` conformance is the v2 *wire* shape (snake_case,
 /// ISO-8601 instants) carried in `meeting.*` results and `meeting` events.
 ///
-/// Intervals are marks over the ring buffer, never capture control: pausing a
+/// Intervals are marks over the recording, never capture control: pausing a
 /// meeting closes the open interval, resuming opens a new one, and the
 /// capture engines/ingest streams are untouched throughout.
 public struct Meeting: Sendable, Hashable {
@@ -23,7 +23,7 @@ public struct Meeting: Sendable, Hashable {
   public var started: Instant
   /// Set once on `meeting.end`; `nil` while active/paused.
   public var ended: Instant?
-  /// Transcription marks over the ring buffer. A `nil` interval end means
+  /// Transcription marks over the recording. A `nil` interval end means
   /// "currently marked" (the meeting is active).
   public var intervals: [MeetingInterval]
   /// The roster, upserted by whoever knows it (the extension's DOM layer
@@ -107,7 +107,7 @@ public struct MeetingIdentity: Sendable, Hashable, Codable {
   }
 }
 
-/// One transcription mark over the ring buffer; `end == nil` means the span
+/// One transcription mark over the recording; `end == nil` means the span
 /// is currently marked.
 public struct MeetingInterval: Sendable, Hashable {
   public var start: Instant

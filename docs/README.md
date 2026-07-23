@@ -6,7 +6,7 @@ Two kinds of documents live here. Pick by what you're doing:
 
 - [Overview](./overview.md) — what the pieces are, how audio becomes notes, current status.
 - [Configuration](./configuration.md) — the config file, environment variables, and flags.
-- [Data formats](./data-formats.md) — the on-disk layout: ring buffer, index, sessions, transcripts. This is the contract your own scripts can rely on.
+- [Data formats](./data-formats.md) — the on-disk layout: per-meeting audio, index, sessions, transcripts. This is the contract your own scripts can rely on.
 - [Logging](./logging.md) — where logs go and how to consume them.
 - [Browser extension](./browser-extension.md) — per-participant meeting capture from Chrome/Firefox.
 - [Capture soak-test runbook](./operations/capture-soak-runbook.md) — the manual multi-day procedure for validating capture reliability on real hardware.

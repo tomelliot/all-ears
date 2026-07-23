@@ -24,7 +24,7 @@
 ///
 /// `docs/architecture.md`'s "Sessions" section is explicit: opening a session
 /// "records a session descriptor referencing the live time range; capture
-/// itself is unchanged (sessions are metadata over the ring buffer, not a
+/// itself is unchanged (sessions are metadata over the recorded audio, not a
 /// separate recording)". Two consequences drive these contracts:
 ///
 /// 1. ``SessionRegistry`` holds **no reference to any ``CaptureActor``**.

@@ -214,7 +214,7 @@ let package = Package(
         "EarsLogging",
         "EarsCLISupport",
         // For SegmentedAudioReader/AtomicFileIO/DataStoreLayout -- reading
-        // real ring-buffer audio off disk and writing the transcript
+        // real captured audio off disk and writing the transcript
         // atomically (docs/specs/transcribe.md).
         "EarsDataStore",
         // For ParakeetTranscriber, the real FluidAudio-backed Transcriber

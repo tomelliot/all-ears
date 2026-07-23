@@ -12,7 +12,7 @@ import struct EarsCore.AudioBuffer
 /// reads -- `.m4a`, `.wav`, `.caf`, ...) into ASR-ready ``AudioSlice``s: the
 /// same currency ``SegmentedAudioReader`` hands a ``Transcriber``, so the
 /// `transcribe` pipeline runs a file through the *identical* model seam it
-/// runs ring-buffer audio through.
+/// runs captured audio through.
 ///
 /// The file-input sibling of ``SegmentedAudioReader``. Where that reader
 /// reconstructs slices from a source's `asr/` chunks plus its VAD `index.jsonl`

@@ -1,7 +1,7 @@
 import ArgumentParser
 import EarsCLISupport
 
-/// Reads ring-buffer chunks and the VAD index for a source/time-range, runs the
+/// Reads captured audio chunks and the VAD index for a source/time-range, runs the
 /// ASR model, and writes a transcript to the output location. See
 /// `docs/architecture.md`.
 ///
@@ -11,7 +11,7 @@ import EarsCLISupport
 /// bootstrap plus `run.start`/`run.summary` JSON Lines records). A normal
 /// invocation (neither flag set) that clears that step then runs
 /// ``TranscribeRuntime``: it resolves `--last`/`--source`/`--out` into a
-/// requested range and sources, reads each source's real ring-buffer audio,
+/// requested range and sources, reads each source's real captured audio,
 /// runs the ASR backend, and writes the transcript. `--follow <source>`
 /// instead runs ``FollowRuntime``/``TranscribeFollowPipeline``: attach to a
 /// live source and stream finalised segments (stdout + transcript file +
@@ -67,7 +67,7 @@ struct Transcribe: AsyncParsableCommand {
   @Option(
     name: .customLong("file"),
     help:
-      "Transcribe a standalone audio file (e.g. a .m4a) directly, bypassing the ring buffer; repeatable, one transcript written per file."
+      "Transcribe a standalone audio file (e.g. a .m4a) directly, bypassing the capture store; repeatable, one transcript written per file."
   )
   var files: [String] = []
 

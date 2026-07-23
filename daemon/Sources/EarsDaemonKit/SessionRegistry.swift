@@ -30,7 +30,7 @@ public enum SessionRegistryError: Error, Sendable, Hashable {
 ///
 /// ## No `CaptureActor` coupling
 ///
-/// A session is metadata over the ring buffer, not a separate recording (see
+/// A session is metadata over the recorded audio, not a separate recording (see
 /// ``ActorContracts``), so opening/closing a session never starts, stops, or
 /// pauses capture. This actor holds **no `CaptureActor` reference**. It still
 /// has to validate that requested source ids are real, but does so through an

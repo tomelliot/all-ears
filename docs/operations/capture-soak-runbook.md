@@ -1,24 +1,24 @@
 # Capture daemon soak-test runbook
 
 Manual procedure for checking the capture daemon's core reliability claim:
-"daemon runs for days at a flat memory baseline; buffer stays bounded; gaps
-recorded across restarts, sleep/wake, and device unplug." This is a
-real-world, multi-day claim about a running process on real hardware — no
-automated test can establish it, and none here claims to.
+"daemon runs for days at a flat memory baseline; disk usage tracks meeting
+activity and retention, not elapsed time; gaps recorded across sleep/wake and
+device unplug." This is a real-world, multi-day claim about a running process
+on real hardware — no automated test can establish it, and none here claims
+to.
 
 ## What already exists, and what this fills in
 
-`SoakProxyTests` (`daemon/Tests/EarsDaemonKitTests/SoakProxyTests.swift`)
-drives a real `CaptureActor` through hundreds of accelerated rollover/
-eviction cycles with a `ManualClock`, and asserts the on-disk ring buffer
-converges to a bounded file count and byte footprint. It runs in CI on every
-commit and is a genuine regression guard on the eviction *logic*. Its own doc
-comment is explicit that it is "a proxy, not a proof": it cannot demonstrate
-flat process *memory* over real days, nor real restarts, sleep/wake, or
-device unplug — those only happen on a real machine over real time. This
-runbook is the manual procedure a human runs to actually check those things
-before treating the exit criterion as met. Nothing in this file or in the
-code should claim this is automated — it isn't.
+The CI suites (`EarsDaemonTests`, `EvictionSweeperTests`) prove the logic
+deterministically: an idle daemon writes nothing, a meeting's audio lands
+under its own `meetings/<id>/sources/` directory, and the retention sweeper
+deletes an ended meeting's audio at its transcript-driven deadline (driven by
+a `ManualClock`, so no real time passes). What they cannot demonstrate is
+flat process *memory* over real days, nor real sleep/wake or device unplug —
+those only happen on a real machine over real time. This runbook is the
+manual procedure a human runs to actually check those things before treating
+the exit criterion as met. Nothing in this file or in the code should claim
+this is automated — it isn't.
 
 ## Setup
 
@@ -26,7 +26,8 @@ code should claim this is automated — it isn't.
    binary lands at `daemon/.build/release/earsd`.
 2. Write a config with exactly one enabled source (mic keeps the run simple), a
    real `data_root` with room to spare, and a `--log-file` so `earsd`'s own
-   structured log survives the whole run:
+   structured log survives the whole run. A short retention window makes
+   eviction observable within the run:
 
    ```toml
    data_root = "/Users/you/soak-test/data"
@@ -35,6 +36,10 @@ code should claim this is automated — it isn't.
    [[earsd.source]]
    id = "mic"
    class = "mic"
+
+   [earsd.retention]
+   evict_after_transcript_seconds = 3600
+   max_audio_age_seconds = 14400
    ```
 
 3. Start it in the foreground of a terminal you can leave running (or under
@@ -47,10 +52,17 @@ code should claim this is automated — it isn't.
 4. Record the start timestamp, macOS version, and hardware.
 
 Run for **at least 48–72 hours continuously**, spanning at least one real
-overnight system sleep and one real microphone unplug/replug. Longer is
-better; the point is to see whether any of the three sub-criteria below drift
-with elapsed time, and a few hours is too short to distinguish a slow leak
-from noise.
+overnight system sleep. Several times a day, drive a real meeting cycle:
+
+```sh
+ears meeting start --source mic     # prints the meeting id
+# ...talk for a few minutes...
+ears meeting end <id>
+```
+
+Longer is better; the point is to see whether any of the sub-criteria below
+drift with elapsed time, and a few hours is too short to distinguish a slow
+leak from noise.
 
 ## What to watch
 
@@ -69,34 +81,38 @@ done
 equally well for a spot check — the log above is so you have a record to
 attach afterward.)
 
-**Expected:** RSS ramps briefly as the ring buffer fills to its `time_cap`,
-then flattens and stays flat — no sustained upward trend across the run. A
-slow, steady climb across hours/days is exactly the "buffer scales with time
-on disk instead of being bounded" failure this criterion exists to catch —
-treat that as a failed run, not noise, and file it before calling capture
-reliable.
+**Expected:** RSS stays flat while idle, may tick up during an active
+meeting, and returns to the baseline after each meeting ends (its capture
+actors are torn down). A slow, steady climb across hours/days — especially
+one that survives meeting teardown — is a leak: treat that as a failed run,
+not noise, and file it before calling capture reliable.
 
-### 2. The on-disk ring buffer stays bounded
+### 2. Disk usage tracks meetings and retention, not elapsed time
 
 ```sh
-du -sh <data_root>/sources/mic/chunks <data_root>/sources/mic/asr
-ls <data_root>/sources/mic/chunks | wc -l
+du -sh <data_root>/meetings/*/sources 2>/dev/null
+ls <data_root>/meetings
 ```
 
-Sampled on the same cadence as RSS above. **Expected:** both directories'
-size and file count converge to roughly `time_cap_seconds / chunk_seconds`
-files and stay there — not keep growing. `index.jsonl` **will** keep growing
-for the whole run; it is an append-only log by design (`docs/data-formats.md`),
-not the ring buffer — don't mistake its size for a leak.
+Sampled on the same cadence as RSS above. **Expected:** an idle daemon
+writes nothing (no new directories between meetings). Each meeting's
+`sources/` directory grows only while that meeting is active. Once a
+meeting's transcript completes, its `sources/` directory disappears within
+`evict_after_transcript_seconds` (plus up to one sweep interval); a meeting
+whose transcript failed keeps its audio until `max_audio_age_seconds` after
+it ended, then loses it too. `meeting.toml` and `events.jsonl` remain for
+every meeting. Audio directories that outlive their deadline mean retention
+is broken — file it.
 
-### 3. Gaps are recorded across restarts, sleep/wake, and device unplug
+### 3. Gaps are recorded across sleep/wake and device unplug
 
-`index.jsonl` discriminates events on `"t"`; watch it with `tail -f` during
-each of the three scenarios below (`docs/data-formats.md`'s "The index" and
+Each source's `chunks.jsonl` (under the active meeting's directory)
+discriminates events on `"t"`; watch it with `tail -f` **during an active
+meeting** for each scenario below (`docs/data-formats.md`'s "The index" and
 `docs/specs/capture-daemon.md`'s "Power/idle awareness").
 
-**Sleep/wake.** Put the machine to sleep (lid close, or Apple menu → Sleep)
-for at least several minutes mid-run, then wake it. Confirm:
+**Sleep/wake.** With a meeting active, put the machine to sleep (lid close,
+or Apple menu → Sleep) for at least several minutes, then wake it. Confirm:
 - a `{"t":"gap", ..., "reason":"pause"}` event appears, covering the
   suspended interval (`PowerObserver` pauses every source on
   `NSWorkspace.willSleepNotification`/screen-lock, `CaptureActor.pause()`
@@ -104,42 +120,44 @@ for at least several minutes mid-run, then wake it. Confirm:
 - capture visibly resumes afterward — new `chunk`/`vad` events with
   timestamps past the gap's `end`.
 
-**Restart.** Stop `earsd` cleanly (`kill -TERM <pid>`, or Ctrl-C in the
-foreground terminal), wait a few minutes, then start it again with the same
-config. Confirm a `{"t":"gap", ..., "reason":"daemon_restart"}` event appears
-on the next startup, covering the downtime (`StartupGapDetector`).
+**Restart mid-meeting.** Stop `earsd` cleanly (`kill -TERM <pid>`, or Ctrl-C
+in the foreground terminal) while a meeting is active, wait a few minutes,
+then start it again with the same config. Confirm the meeting resumes
+capture (new `chunk` events appear under the *same* meeting directory) —
+`MeetingRegistry.loadFromDisk()` restarts a still-active meeting's sources.
 
-**Device unplug/replug.** Physically unplug the configured microphone (or
-switch the default input device in System Settings → Sound) for at least a
-minute, then reconnect it. Watch both `earsd`'s own log (`--log-file`) and
-`index.jsonl` across the outage window.
+**Device unplug/replug.** With a meeting active, physically unplug the
+configured microphone (or switch the default input device in System
+Settings → Sound) for at least a minute, then reconnect it. Watch both
+`earsd`'s own log (`--log-file`) and the meeting's `chunks.jsonl` across the
+outage window.
 
 > **Known open gap, found by inspecting the code while writing this
 > runbook, not yet fixed:** `MicCaptureBackend.swift` rebuilds the Core Audio
 > engine on a device-route change (with backoff), but nothing in that path
 > emits an explicit `{"t":"gap",...}` index event for the outage window the
-> way pause/resume and restart do — the interval where no frames arrive
-> during the rebuild isn't distinguished from an ordinary VAD silence span.
-> When you run this scenario, check `index.jsonl` for whether *any* event
-> actually covers the unplug window. If none does, this sub-criterion is not
-> met yet — record that plainly rather than assuming device-unplug gap
-> recording works because sleep/wake and restart do.
+> way pause/resume does — the interval where no frames arrive during the
+> rebuild isn't distinguished from an ordinary VAD silence span. When you run
+> this scenario, check `chunks.jsonl` for whether *any* event actually covers
+> the unplug window. If none does, this sub-criterion is not met yet — record
+> that plainly rather than assuming device-unplug gap recording works because
+> sleep/wake does.
 
 ## Recording the result
 
 For each run, keep:
 - start/end timestamps, macOS version, hardware, and the config file used.
-- the sampled RSS log and `du`/file-count samples.
-- for each of the three sleep/wake, restart, and device-unplug scenarios: the
-  timestamp you triggered it, and the exact `index.jsonl` line(s) (or their
-  absence) that resulted.
-- a plain statement of whether each of the three sub-criteria held — and, if
-  the device-unplug gap above is still unfixed at the time you run this,
-  say so explicitly rather than marking the exit criterion met.
+- the sampled RSS log and `du`/directory-listing samples.
+- for each of the sleep/wake, mid-meeting restart, and device-unplug
+  scenarios: the timestamp you triggered it, and the exact `chunks.jsonl`
+  line(s) (or their absence) that resulted.
+- a plain statement of whether each sub-criterion held — and, if the
+  device-unplug gap above is still unfixed at the time you run this, say so
+  explicitly rather than marking the exit criterion met.
 
 ## Non-goals of this runbook
 
-- Does not replace `SoakProxyTests`, which keeps running in CI on every
-  commit as the regression guard on the eviction/bounded-file *logic*.
+- Does not replace the CI suites, which keep running on every commit as the
+  regression guard on the meeting-scoped capture and retention *logic*.
 - Does not cover multi-source scenarios — this procedure only exercises the
   single `mic` source.

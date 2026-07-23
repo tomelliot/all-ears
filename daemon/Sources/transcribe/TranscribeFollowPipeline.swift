@@ -64,7 +64,7 @@ import Foundation
 ///
 /// Same tier split as ``TranscribePipeline``: this type takes already-
 /// resolved values and injected seams so it is tier-1 testable against a
-/// fixture ring buffer that grows mid-run, with no daemon and no real model;
+/// fixture source directory that grows mid-run, with no daemon and no real model;
 /// ``FollowRuntime`` owns real config/environment/signal wiring.
 enum TranscribeFollowPipeline {
   struct Inputs: Sendable {

@@ -95,14 +95,14 @@ This does not license decoding anything else on `collections`, or Zoom's `__redu
 
 ## Audio extraction
 
-Two capture mechanisms, selected per platform, both terminating in the same downmix → resample (streaming, phase-continuous, native rate → 16 kHz mono) → bounded ring buffer pipeline in `audio-tap.ts`. Only the frame source differs.
+Two capture mechanisms, selected per platform, both terminating in the same downmix → resample (streaming, phase-continuous, native rate → 16 kHz mono) → bounded circular buffer pipeline in `audio-tap.ts`. Only the frame source differs.
 
 - **Standard path (Zoom, Teams):** `MediaStreamTrackProcessor` reads decoded `AudioData` directly off each remote track. Construction is deferred to the track's first `unmute` — a processor built on a muted track never delivers frames, and a track allows only one processor ever. (`pcm-worklet.ts` survives as an unwired legacy fallback; don't build new capture against it.)
 - **Meet path (`createEncodedStreams` tee):** Meet's client calls `receiver.createEncodedStreams()` on every audio receiver and decodes the RTP in its own WASM pipeline, so **no `MediaStreamTrack`-based mechanism ever produces audio on Meet** — worklet, processor, and `<audio>` taps all read pure silence (confirmed via `getStats()`: `decoderImplementation=undefined`, `jitterBufferEmittedCount=0` through live speech). The fix: wrap `createEncodedStreams` in the same MAIN-world hook, `.tee()` the pre-decode readable on audio receivers (Meet's own branch passes through untouched — verified transparent in live calls), and decode our branch with the native WebCodecs `AudioDecoder` (`{codec:"opus", sampleRate:48000, numberOfChannels:1}`; every Opus chunk is `"key"`). The decoder outputs the same `AudioData` interface the standard path yields, so downstream is shared. A registry keyed on the `MediaStreamTrack` connects the tee (which fires on the receiver) to the pipeline (built on the `track` event).
   - Gate the tee on `location.host === "meet.google.com"` at hook-install time — applied elsewhere it would double-capture platforms where the standard path works.
   - Do not attempt to reach Meet's own WASM decoder (it doesn't instantiate in the page's main-world realm) — unnecessary anyway, since native `AudioDecoder` covers Opus.
 
-**Shared constraints:** never connect any capture path to `AudioContext.destination` and never let a normalization `<audio>` element play — double-playback and echo into the user's mic are the failures this prevents. Output format is declared to `earsd` verbatim as `{"sample_rate":16000,"channels":1,"encoding":"pcm_s16le"}`. Backpressure is a bounded per-participant ring buffer, drop-oldest, with a logged counter.
+**Shared constraints:** never connect any capture path to `AudioContext.destination` and never let a normalization `<audio>` element play — double-playback and echo into the user's mic are the failures this prevents. Output format is declared to `earsd` verbatim as `{"sample_rate":16000,"channels":1,"encoding":"pcm_s16le"}`. Backpressure is a bounded per-participant circular buffer, drop-oldest, with a logged counter.
 
 ## Messaging & state
 
@@ -127,4 +127,4 @@ Two capture mechanisms, selected per platform, both terminating in the same down
 10. No install without the idempotent guard and capture epoch.
 11. No swallowing injection-order errors — a silent failure records zero audio while reporting success.
 12. No `ScriptProcessorNode`/`MediaRecorder` for PCM, and no `MediaStreamTrack`-based capture on Meet — the tee is the only mechanism that works there.
-13. No unbounded PCM queues — bounded ring buffer, drop-oldest, logged counter.
+13. No unbounded PCM queues — bounded circular buffer, drop-oldest, logged counter.

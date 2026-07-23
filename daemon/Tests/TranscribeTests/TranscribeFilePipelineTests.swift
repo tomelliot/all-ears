@@ -10,7 +10,7 @@ import Testing
 /// ``FileAudioReader`` (fake decoder) and ``ScriptedTranscriber`` stand in for
 /// a real audio file and ASR backend, so the file-input path is proven -- each
 /// file transcribed independently, transcript written beside the input (or to
-/// `--out`), and the same precise-error discipline the ring-buffer pipeline
+/// `--out`), and the same precise-error discipline the capture-store pipeline
 /// uses -- with no FluidAudio model or real audio needed.
 @Suite("TranscribeFilePipeline")
 struct TranscribeFilePipelineTests {

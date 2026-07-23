@@ -12,7 +12,7 @@ import Testing
 /// that ``EarsDaemon`` writes each source's `meta.toml` at construction, see
 /// ``writeFixtureSource(sourceID:dataRoot:chunkStart:chunkDuration:vadSpeechStart:vadSpeechEnd:)``'s
 /// doc comment) plus an injected ``ScriptedTranscriber`` in place of a real
-/// ASR backend, per `docs/engineering-practices.md`'s "fixture ring buffer
+/// ASR backend, per `docs/engineering-practices.md`'s "fixture audio store
 /// on disk" tier-1 strategy: no real FluidAudio/Parakeet model is needed to
 /// prove the wiring -- the right range gets read, segments get merged in
 /// order, and the transcript file is written correctly.

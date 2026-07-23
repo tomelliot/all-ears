@@ -5,7 +5,7 @@ import Foundation
 
 /// `transcribe`'s actual pipeline, per `docs/specs/transcribe.md`'s
 /// "Behaviour" section: resolve the requested range and sources, read each
-/// source's real ring-buffer audio into decoded, natural-pause-segmented
+/// source's real captured audio into decoded, natural-pause-segmented
 /// slices (``SegmentedAudioReader``, the composition root already merged on
 /// this base -- it resolves each source's `meta.toml` for the ASR sample
 /// rate and reads the real, codec-decoded `asr/` chunk files itself), run
@@ -22,7 +22,7 @@ import Foundation
 /// `transcribe`'s actual behaviour -- is directly unit-testable against a
 /// fixture data root and an injected fake ``Transcriber`` with no
 /// environment-variable or config-file setup at all, per
-/// `docs/engineering-practices.md`'s tier-1 "fixture ring buffer on disk"
+/// `docs/engineering-practices.md`'s tier-1 "fixture audio store on disk"
 /// strategy.
 enum TranscribePipeline {
   /// Everything real production code has to fake to test this type: the

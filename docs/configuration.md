@@ -28,7 +28,7 @@ All tools read the same file. Tool-specific settings live in their own tables.
 schema = 1
 
 # --- Shared paths ---
-data_root   = "~/Library/Application Support/ears"  # ring buffer, sessions, meetings, vocab, runtime
+data_root   = "~/Library/Application Support/ears"  # meetings (audio), sessions, vocab, runtime
 output_root = "~/Documents/Transcripts"             # transcripts, summaries
 socket_path = ""   # empty => <data_root>/runtime/earsd.sock
 
@@ -44,8 +44,6 @@ rotate_max_files = 5
 
 # --- Capture daemon ---
 [earsd]
-default_time_cap_seconds = 7200   # 2h ring-buffer window per source
-hard_total_cap_bytes     = 0      # 0 => unlimited; else evict oldest across sources to stay under
 chunk_seconds            = 30
 codec                    = "aac"  # aac | opus
 bitrate                  = 64000
@@ -53,6 +51,16 @@ native_sample_rate       = 48000  # listenable chunks/ feed
 asr_sample_rate          = 16000  # derived asr/ feed for transcription
 store_native             = true   # keep the listenable copy alongside the ASR feed
 channels                 = 1
+
+# Transcript-driven retention. A meeting's audio (meetings/<id>/sources/) is
+# deleted once its transcript has been complete for evict_after_transcript_seconds;
+# a meeting whose transcript never completed keeps its audio until
+# max_audio_age_seconds after it ended (so a failed run can be retried), then
+# it is deleted regardless. meeting.toml/events.jsonl and transcripts are
+# never deleted.
+[earsd.retention]
+evict_after_transcript_seconds = 7200    # 2h after a successful transcript
+max_audio_age_seconds          = 604800  # 7d hard cap for never-transcribed meetings
 
 [earsd.vad]
 backend        = "energy"  # currently ignored: an energy-threshold VAD is always used
@@ -97,7 +105,6 @@ enabled = false           # opt-in: needs the system-audio-recording permission
 id    = "app:us.zoom.xos"
 class = "app"
 label = "Zoom"
-time_cap_seconds = 14400  # keep meetings longer
 
 # --- Auto-triggers ---
 [triggers]

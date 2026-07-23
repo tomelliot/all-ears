@@ -23,7 +23,7 @@ public enum DataStoreError: Error, Sendable, Hashable {
   /// A chunk finished encoding with fewer frames written than were
   /// appended, because the native and/or ASR feed's encoder threw partway
   /// through. The partial chunk file(s) already on disk are kept (see
-  /// `docs/specs/capture-daemon.md`'s "Ring buffer maintenance"); this error
+  /// `docs/specs/capture-daemon.md`'s storage maintenance rules); this error
   /// reports which feed(s) failed so a caller can log it.
   case partialChunkWrite(nativeFailed: Bool, asrFailed: Bool)
   /// Opening or `mmap`ing a chunk file for reading failed (e.g. missing

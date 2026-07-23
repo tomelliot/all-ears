@@ -2,7 +2,7 @@
 
 ## One job
 
-Turn ring-buffer audio for a source + time range (or a session) into a transcript on disk. Batch or streaming. Reads files directly; does not depend on `earsd` running except to publish live-feed events in `--follow` mode.
+Turn captured audio for a source + time range (or a session) into a transcript on disk. Batch or streaming. Reads files directly; does not depend on `earsd` running except to publish live-feed events in `--follow` mode.
 
 ## Inputs
 

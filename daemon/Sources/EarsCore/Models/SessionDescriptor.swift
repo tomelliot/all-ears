@@ -1,6 +1,6 @@
 /// A session's on-disk descriptor, mirroring `session.toml` (see `docs/data-formats.md`).
 ///
-/// A session is metadata over the ring buffer — a named time range across one or
+/// A session is metadata over the recorded audio — a named time range across one or
 /// more sources — not a separate recording. Mapping to and from TOML belongs to
 /// `EarsConfig`. ``end`` is `nil` while the session is open.
 public struct SessionDescriptor: Sendable, Hashable, Codable {
@@ -24,7 +24,7 @@ public struct SessionDescriptor: Sendable, Hashable, Codable {
   /// it -- **not** a shift of ``start`` itself. `start` stays the accurate
   /// historical record of when the session actually opened; pre-roll is a
   /// read-time widening layered on top, since a session is "metadata over
-  /// the ring buffer, not a separate recording" (see
+  /// the recorded audio, not a separate recording" (see
   /// `docs/data-formats.md`'s session format, and
   /// `TranscribeRangeResolution`, which applies it). `0` (the
   /// default) means no widening -- every session opened before this field

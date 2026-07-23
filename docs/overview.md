@@ -8,9 +8,9 @@ The design follows the Unix philosophy: each tool does one job, tools compose th
 
 | Tool | One job |
 |------|---------|
-| `earsd` | Capture daemon: record every source into its ring buffer, maintain the VAD index, expose the control socket. |
+| `earsd` | Capture daemon: record each meeting's sources under the meeting's own directory, maintain the VAD index, expose the control socket. |
 | `ears` | Control client: status, sources, sessions, marking ranges, watching the live feed. |
-| `transcribe` | Turn ring-buffer audio for a time range or session into a transcript, batch or live. |
+| `transcribe` | Turn captured audio for a meeting or session into a transcript, batch or live. |
 | `cleanup` | Correct a transcript with an LLM, guided by your vocabulary list. |
 | `summarize` | Produce summaries from transcripts using configurable prompt presets. |
 
@@ -18,7 +18,7 @@ Each is a separate binary. They share nothing but the [data formats](./data-form
 
 ## How it works
 
-`earsd` runs in the background and captures every enabled source — microphone, system audio, a single app's audio, or per-participant meeting audio pushed in by the [browser extension](./browser-extension.md) — into a per-source **ring buffer** on disk: compressed, time-capped (2 hours by default), always bounded. A cheap voice-activity detector runs alongside and writes speech/silence spans to an index. Nothing is transcribed until asked.
+`earsd` runs in the background and records only while a meeting is active. When one starts, it captures the meeting's sources — microphone, system audio, a single app's audio, or per-participant meeting audio pushed in by the [browser extension](./browser-extension.md) — into that meeting's own directory on disk, compressed. A cheap voice-activity detector runs alongside and writes speech/silence spans to an index. Once the meeting's transcript lands, the audio is deleted a couple of hours later (7 days if transcription failed, so it can be retried); the transcript is the durable artifact.
 
 Two use cases drive everything:
 
@@ -32,7 +32,7 @@ A **session** is a named time range over one or more sources — metadata, not a
 ## Principles
 
 - **One job per tool.** If a tool grows a second responsibility, it becomes two tools.
-- **Disk is the API.** Tools communicate through the documented on-disk layout, never through each other. The daemon owns writes to the ring buffer; everything else reads files directly, so `ls`, `jq`, and `tail -f` are first-class debugging tools and a daemon crash never makes captured audio unreadable.
+- **Disk is the API.** Tools communicate through the documented on-disk layout, never through each other. The daemon owns writes to the audio store; everything else reads files directly, so `ls`, `jq`, and `tail -f` are first-class debugging tools and a daemon crash never makes captured audio unreadable.
 - **Local and explicit.** Audio and transcripts stay on your Mac. The only network calls are to whichever LLM you configure for cleanup and summaries.
 - **Fail loud, log always.** Non-zero exits, precise errors, structured logs sufficient to reconstruct every run.
 - **Zero-config start.** With no config file, the daemon captures the mic with sensible defaults.

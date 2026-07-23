@@ -110,7 +110,7 @@ The daemon-owned lifecycle entity — what v1's client-side meeting tracker beco
   "state": "active",                      // active | paused | ended
   "started": "2026-07-19T10:00:00Z",
   "ended": null,
-  "intervals": [                          // transcription marks over the ring buffer
+  "intervals": [                          // transcription marks over the recording
     {"start": "2026-07-19T10:00:00Z", "end": "2026-07-19T10:12:30Z"},
     {"start": "2026-07-19T10:20:05Z", "end": null}   // null end = currently marked
   ],
@@ -128,7 +128,7 @@ The daemon-owned lifecycle entity — what v1's client-side meeting tracker beco
 Semantics:
 
 - **Intervals are marks, never capture control.** Pausing a meeting closes the open interval;
-  resuming opens a new one. The ring buffer, capture engines, and ingest streams are untouched —
+  resuming opens a new one. The audio store, capture engines, and ingest streams are untouched —
   a session/meeting is metadata over the buffer, exactly as v1 sessions are. (Source-level
   `capture.pause` still exists, unchanged, for actually stopping a source.)
 - **`meeting.start` is idempotent on `identity`.** Re-declaring an active meeting returns its

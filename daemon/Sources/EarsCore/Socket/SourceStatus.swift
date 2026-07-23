@@ -6,7 +6,7 @@
 /// carries the same per-source shape. This adds three fields beyond the
 /// spec's example: ``oldestChunkStart`` and ``newestChunkEnd`` (both
 /// ISO-8601, rendered the same way ``IndexTimestampCodec`` renders
-/// `index.jsonl` timestamps) bound the source's current ring-buffer window,
+/// `index.jsonl` timestamps) bound the source's current on-disk audio window,
 /// and ``bytesUsed`` (bytes) reports its on-disk footprint. All three are
 /// optional/defaulted on decode — ``oldestChunkStart``/``newestChunkEnd``
 /// are `nil` and ``bytesUsed`` is `0` when absent — so the spec's original

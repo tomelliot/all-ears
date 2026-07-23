@@ -1,5 +1,5 @@
 /// The voice-activity-detection seam: classify a source's audio into coarse
-/// speech/silence spans that index the ring buffer for silence-skipping.
+/// speech/silence spans that index the recorded audio for silence-skipping.
 ///
 /// - Design rationale (no Swift signature exists in the docs; shaped from
 ///   `docs/specs/capture-daemon.md`): the VAD is a pluggable backend (default
