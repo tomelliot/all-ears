@@ -68,11 +68,10 @@ public enum CaptureActorError: Error, Sendable, Hashable {
 
 /// Owns the continuous capture of one source: drains its ``CaptureBackend``'s
 /// buffer stream into a ``ChunkEncoder``, runs its ``VAD`` to append `vad`
-/// spans, records `gap`/`evict` events through its ``IndexAppender``, and
-/// enforces the source's per-source time cap. One instance per source, per
-/// `docs/architecture.md`'s "Actor decomposition inside `earsd`". An `actor`:
-/// all of this is real shared mutable per-source state that exactly one writer
-/// may touch (the "single writer per source" rule).
+/// spans, and records `gap` events through its ``IndexAppender``. One instance
+/// per source, per `docs/architecture.md`'s "Actor decomposition inside
+/// `earsd`". An `actor`: all of this is real shared mutable per-source state
+/// that exactly one writer may touch (the "single writer per source" rule).
 ///
 /// ## Dependencies (all injected, for testability)
 ///
@@ -88,22 +87,11 @@ public enum CaptureActorError: Error, Sendable, Hashable {
 /// implementing task downcasts and reads `stats`); a plain `CaptureBackend`
 /// reports capture health from index/disk state alone.
 ///
-/// ## Eviction seam (daemon-driven, not audio-driven)
-///
-/// Time-cap eviction runs on demand via ``evictNow()``, which the daemon's
-/// periodic ``EvictionSweeper`` calls for **this source only** — deleting chunks
-/// aged past the source's `time_cap_seconds` and appending `evict` events
-/// through this source's shared ``IndexAppender``. The actor no longer evicts as
-/// a side effect of a chunk rolling over: enforcement is a wall-clock bound, so
-/// the daemon drives it on a timer across *every* source (including ones that
-/// have stopped capturing — an ended meeting, a disabled source — which never
-/// roll another chunk). Sources with no live actor are evicted straight from
-/// disk by the sweeper; this seam covers the ones that do.
-///
-/// Cross-source coordination (`earsd`'s `hard_total_cap_bytes` backstop, which
-/// evicts oldest *across* sources) stays a documented no-op seam:
-/// `EarsDataStore.HardTotalCapEnforcement` is where a later phase adds real
-/// cross-source byte accounting; it changes no call site here.
+/// This actor never deletes audio. Retention is the daemon's
+/// ``EvictionSweeper``'s job, and it operates on whole *meetings*: audio is
+/// meeting-scoped (this actor's `dataRoot` is a meeting's directory), so an
+/// ended meeting's audio is removed as one directory delete, long after this
+/// actor was torn down.
 public actor CaptureActor {
   /// This actor's source id — `nonisolated` so `ControlServer` can key its
   /// source→actor lookup without hopping onto the actor.
@@ -149,12 +137,13 @@ public actor CaptureActor {
   /// When paused, the instant capture stopped — the `gap`'s `start`, closed on
   /// ``resume()``. `nil` whenever the source is not paused.
   private var pauseStartInstant: Instant?
-  /// The chunks this source currently has on disk, subject to the time cap.
-  /// Seeded once from `index.jsonl` at ``start()`` (so chunks from earlier
-  /// daemon runs are still evicted — see ``seedKnownChunksFromIndex()``), then
-  /// tracked incrementally on each rollover so the eviction pass doesn't
-  /// re-parse the index every time.
-  private var knownChunks: [IndexedChunk] = []
+  /// Bounds of the chunks this actor has finalized in this run, tracked on
+  /// each rollover for ``status()``'s window fields. In-process only: an actor
+  /// is built fresh per meeting, so there are no prior-run chunks to account
+  /// for in the steady state (a restart-resumed meeting under-reports until
+  /// its first new rollover — acceptable for a status display).
+  private var oldestChunkStart: Instant?
+  private var newestChunkEnd: Instant?
   /// The task draining `backend`'s stream into the encoder/VAD; `nil` while
   /// stopped or paused.
   private var consumerTask: Task<Void, Never>?
@@ -219,10 +208,8 @@ public actor CaptureActor {
     self.normalizer = AdaptiveResampler(targetSampleRate: descriptor.nativeSampleRate)
   }
 
-  /// Begin continuous capture: append a startup `gap` for any downtime since
-  /// the index's last known coverage (via `StartupGapAppender`), start the
-  /// backend, and drain its stream — encoding chunks, running the VAD, and
-  /// running the per-source eviction pass on each new chunk.
+  /// Begin continuous capture: start the backend and drain its stream —
+  /// encoding chunks and running the VAD.
   ///
   /// - Precondition: not already capturing.
   /// - Postcondition: ``status()`` reports `.capturing`.
@@ -231,20 +218,6 @@ public actor CaptureActor {
   ///   source — `.error` state — rather than propagating fatally).
   public func start() async throws {
     guard runtimeState != .capturing else { throw CaptureActorError.alreadyCapturing }
-
-    // Record any downtime since the index's last known coverage before the
-    // first new chunk lands, so the gap is ordered ahead of resumed capture.
-    _ = try? await StartupGapAppender.detectAndAppend(
-      now: clock.now(), indexAppender: indexAppender)
-
-    // Recover chunks written by previous daemon runs into the eviction set,
-    // then evict any already aged past the time cap. Without this, a fresh
-    // actor's `knownChunks` starts empty and only ever sees chunks written in
-    // *this* process, so every restart orphans the prior run's chunks from the
-    // time cap — they'd never be evicted and the buffer would grow past
-    // `time_cap_seconds` without bound. Best-effort: a read/parse failure just
-    // leaves eviction to catch up incrementally as new chunks roll over.
-    await seedKnownChunksFromIndex()
 
     let stream: AsyncStream<AudioBuffer>
     do {
@@ -368,8 +341,8 @@ public actor CaptureActor {
       id: sourceID,
       state: state,
       codec: descriptor.codec,
-      oldestChunkStart: knownChunks.map(\.range.start).min(),
-      newestChunkEnd: knownChunks.map(\.range.end).max(),
+      oldestChunkStart: oldestChunkStart,
+      newestChunkEnd: newestChunkEnd,
       bytesUsed: bytesUsedOnDisk()
     )
   }
@@ -432,8 +405,7 @@ public actor CaptureActor {
         }
         // Drop the buffer and do NOT advance the playhead: keeping the
         // playhead ↔ encoder timeline consistent matters more than the lost
-        // audio, and the wall-clock gap is reconciled by StartupGapAppender
-        // (the same accepted caveat as the encoder's partial writes).
+        // audio (the same accepted caveat as the encoder's partial writes).
         return
       }
     } else {
@@ -535,79 +507,15 @@ public actor CaptureActor {
   }
 
   /// If the encoder's chunk start advanced past `previousChunkStart`, a chunk
-  /// was finalized covering `[previousChunkStart, currentChunkStart)`. Track it
-  /// so `status` bounds and the next ``evictNow()`` see it. Eviction itself is
-  /// not run here — it's the daemon's timer-driven ``EvictionSweeper``'s job, so
-  /// it doesn't depend on a fresh chunk arriving (see the type doc's seam note).
+  /// was finalized covering `[previousChunkStart, currentChunkStart)`. Track
+  /// its bounds so `status`'s window fields stay fresh.
   private func trackRollover(previousChunkStart: Instant) async {
     let currentStart = await encoder.currentChunkStart
     guard currentStart != previousChunkStart else { return }
-    knownChunks.append(makeIndexedChunk(start: previousChunkStart, end: currentStart))
-  }
-
-  /// Rebuilds the ``IndexedChunk`` the encoder just wrote from the chunk's
-  /// wall-clock bounds. Filename/extension/frames are derived exactly as the
-  /// encoder derives them, so eviction targets the right on-disk files.
-  private func makeIndexedChunk(start: Instant, end: Instant) -> IndexedChunk {
-    let settings = ChunkAudioSettings(
-      codec: descriptor.codec, sampleRate: descriptor.nativeSampleRate, bitrate: descriptor.bitrate)
-    let filename = FilenameTimestampCodec.string(for: start) + "." + settings.fileExtension
-    let subdirectory: ChunkSubdirectory = descriptor.storeNative ? .chunks : .asr
-    let file = DataStoreLayout.relativeChunkPath(subdirectory: subdirectory, filename: filename)
-    let frames = Int((end.interval(since: start) * Double(descriptor.nativeSampleRate)).rounded())
-    return IndexedChunk(range: TimeRange(start: start, end: end), file: file, frames: frames)
-  }
-
-  /// Seeds `knownChunks` from the existing `index.jsonl` at ``start()``, so a
-  /// later ``evictNow()`` covers chunks written by earlier daemon runs — not
-  /// just this process's — and `status` bounds are accurate from the first
-  /// reply.
-  ///
-  /// Reads the whole index (via ``IndexAppender/readContents()``) rather than
-  /// the tail: the live chunk set can only be recovered by pairing every
-  /// `chunk` event with its `evict`, which needs the full log. This runs once
-  /// per source per daemon start, after the control socket is already bound
-  /// (see ``EarsDaemon/start()``), so its cost doesn't hold the control plane.
-  /// A read or parse failure is swallowed — capture still starts, and the
-  /// daemon's sweep still evicts this source straight from disk regardless.
-  private func seedKnownChunksFromIndex() async {
-    guard let contents = try? await indexAppender.readContents(), !contents.isEmpty else { return }
-    knownChunks = RingBufferReconstruction.liveChunks(from: IndexLog.parse(contents).events)
-  }
-
-  /// Runs this source's time-cap eviction pass now, on demand — the seam the
-  /// daemon's ``EvictionSweeper`` drives on its timer, so enforcement is
-  /// wall-clock-based rather than tied to a new chunk rolling over. Reuses this
-  /// source's shared ``IndexAppender`` (the single writer per source) and
-  /// updates `knownChunks`, keeping `status` bounds fresh as chunks are deleted.
-  public func evictNow() async {
-    await runEviction()
-  }
-
-  /// Runs the per-source eviction pass over the tracked chunks and drops any it
-  /// evicted from `knownChunks`. Eviction failure is non-fatal — the aged
-  /// chunks simply remain until a later pass retries.
-  private func runEviction() async {
-    do {
-      let evicted = try await EvictionExecutor.evict(
-        chunks: knownChunks,
-        now: clock.now(),
-        timeCapSeconds: Double(descriptor.timeCapSeconds),
-        sourceDirectory: DataStoreLayout.sourceDirectory(dataRoot: dataRoot, sourceID: sourceID),
-        indexAppender: indexAppender)
-      // Drop whole VAD segments that have aged past the same time cap — an
-      // unlink, keeping the segmented stream bounded without rewriting a file
-      // a `--follow` tail may be reading.
-      try? VADSegmentStore.evict(
-        directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: sourceID),
-        olderThan: clock.now().advanced(by: -Double(descriptor.timeCapSeconds)))
-
-      guard !evicted.isEmpty else { return }
-      let evictedSet = Set(evicted)
-      knownChunks.removeAll { evictedSet.contains($0) }
-    } catch {
-      // Leave knownChunks intact; a later rollover retries the pass.
+    if oldestChunkStart == nil {
+      oldestChunkStart = previousChunkStart
     }
+    newestChunkEnd = currentStart
   }
 
   /// Sum of this source's on-disk `chunks/` and `asr/` file sizes — the

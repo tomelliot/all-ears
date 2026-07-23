@@ -618,8 +618,8 @@ struct CaptureActorTests {
     #expect(await actor.status().state == .disabled)
   }
 
-  @Test("status() surfaces the source id and reports a bounded ring window")
-  func statusReportsRingWindow() async throws {
+  @Test("status() surfaces the source id and this run's chunk bounds")
+  func statusReportsChunkBounds() async throws {
     let dataRoot = try makeDataRoot()
     let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
     let actor = try makeActor(
@@ -653,94 +653,6 @@ struct CaptureActorTests {
     await actor.stop()
   }
 
-  @Test("an aged-out chunk is evicted and logged by evictNow()")
-  func agedChunkEvicted() async throws {
-    let dataRoot = try makeDataRoot()
-    let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
-    // A zero time cap so every finalized chunk is immediately aged out; four
-    // 0.5s buffers roll two chunks, both tracked in `knownChunks`.
-    let actor = try makeActor(
-      dataRoot: dataRoot, clock: clock,
-      buffers: [
-        makeBuffer(seconds: 0.5), makeBuffer(seconds: 0.5),
-        makeBuffer(seconds: 0.5), makeBuffer(seconds: 0.5),
-      ],
-      chunkSeconds: 1.0, timeCapSeconds: 0)
-
-    // Advance the clock well past the anchor so the finalized chunks' ends are
-    // strictly before `now - timeCap`.
-    clock.set(Instant(secondsSinceEpoch: startEpoch + 10_000))
-    try await actor.start()
-    await actor.drainForTesting()
-
-    // Eviction is daemon-driven now, not a rollover side effect: the sweeper's
-    // per-source seam is `evictNow()`. Nothing is evicted until it runs.
-    let evictsBefore = try indexEvents(dataRoot: dataRoot).filter {
-      if case .evict = $0 { return true } else { return false }
-    }
-    #expect(evictsBefore.isEmpty)
-
-    await actor.evictNow()
-
-    let evicts = try indexEvents(dataRoot: dataRoot).filter {
-      if case .evict = $0 { return true } else { return false }
-    }
-    #expect(!evicts.isEmpty)
-  }
-
-  @Test("chunks written by a previous daemon run are evicted by evictNow() once past the cap")
-  func priorRunChunksEvictedOnStart() async throws {
-    let dataRoot = try makeDataRoot()
-
-    // First run: write chunks under a generous cap so none are evicted yet.
-    let clock1 = ManualClock(Instant(secondsSinceEpoch: startEpoch))
-    let actor1 = try makeActor(
-      dataRoot: dataRoot, clock: clock1,
-      buffers: [
-        makeBuffer(seconds: 0.5), makeBuffer(seconds: 0.5),
-        makeBuffer(seconds: 0.5), makeBuffer(seconds: 0.5),
-      ],
-      chunkSeconds: 1.0, timeCapSeconds: 7_200)
-    try await actor1.start()
-    await actor1.drainForTesting()
-    await actor1.stop()
-
-    let priorChunks = try chunkEvents(dataRoot: dataRoot)
-    #expect(!priorChunks.isEmpty)
-    let evictsBefore = try indexEvents(dataRoot: dataRoot).filter {
-      if case .evict = $0 { return true } else { return false }
-    }
-    #expect(evictsBefore.isEmpty)
-
-    // Second run: a fresh actor (empty `knownChunks`) over the SAME data root,
-    // clock advanced well past the cap so every prior chunk is aged out. The
-    // seed-from-index pass in start() recovers the prior run's chunks into
-    // `knownChunks`, so the first `evictNow()` deletes them even though no new
-    // chunk ever rolls over — the restart-persistence path.
-    let clock2 = ManualClock(Instant(secondsSinceEpoch: startEpoch + 100_000))
-    let actor2 = try makeActor(
-      dataRoot: dataRoot, clock: clock2, buffers: [], chunkSeconds: 1.0, timeCapSeconds: 7_200)
-    try await actor2.start()
-    await actor2.drainForTesting()
-    await actor2.evictNow()
-
-    let evictedFiles = Set(
-      try indexEvents(dataRoot: dataRoot).compactMap { event -> String? in
-        if case .evict(let file, _) = event { return file } else { return nil }
-      })
-    let priorChunkFiles = Set(
-      priorChunks.compactMap { event -> String? in
-        if case .chunk(_, _, let file, _) = event { return file } else { return nil }
-      })
-    #expect(evictedFiles == priorChunkFiles)
-
-    // And the on-disk chunk files are actually gone.
-    let sourceDir = DataStoreLayout.sourceDirectory(dataRoot: dataRoot, sourceID: "mic")
-    for file in priorChunkFiles {
-      let path = sourceDir.appendingPathComponent(file).path
-      #expect(!FileManager.default.fileExists(atPath: path))
-    }
-  }
 }
 
 /// A stats-reporting synthetic backend whose failure latch is test-controllable,
