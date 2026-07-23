@@ -322,6 +322,23 @@ struct MeetingRegistryTests {
     #expect(stopCalls.withLock { $0 } == [["mic"]])
   }
 
+  @Test("markTranscriptCompleted records the completion instant durably")
+  func marksTranscriptCompleted() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let registry = makeRegistry(dataRoot: dataRoot, clock: clock)
+    let meeting = try await registry.start(MeetingStartParams(title: "standup"))
+    _ = try await registry.end(id: meeting.id)
+    #expect(try await registry.get(id: meeting.id).transcriptCompleted == nil)
+
+    await registry.markTranscriptCompleted(id: meeting.id, at: base.advanced(by: 300))
+
+    #expect(try await registry.get(id: meeting.id).transcriptCompleted == base.advanced(by: 300))
+    // Durable: read straight back off disk.
+    let reloaded = try MeetingStore.read(meetingID: meeting.id, dataRoot: dataRoot)
+    #expect(reloaded.transcriptCompleted == base.advanced(by: 300))
+  }
+
   // MARK: - rename / attendee
 
   @Test("rename is a compare-and-set under if_rev")
