@@ -380,6 +380,191 @@ struct TranscribePipelineTests {
     #expect(markdown.contains("meeting: \(meetingID)"))
   }
 
+  @Test(
+    "--meeting reads per-meeting chunks for a source that has them and falls back to the ring for one that doesn't"
+  )
+  func meetingPrefersPerMeetingAndFallsBackToRing() async throws {
+    let dataRoot = makeTempDirectory("meeting-mixed")
+    let outputRoot = makeTempDirectory("meeting-mixed-output")
+    let meetingID = "mixed-meeting"
+
+    let meeting = Meeting(
+      id: meetingID,
+      title: "call",
+      state: .ended,
+      started: now.advanced(by: -20),
+      ended: now,
+      intervals: [MeetingInterval(start: now.advanced(by: -20), end: now)],
+      sources: ["mic", "browser:meet:speaker-1"])
+    try MeetingStore.write(meeting, dataRoot: dataRoot)
+
+    // mic has NO per-meeting dir — only the ring holds it (the issue's mic
+    // case). The browser source is the authoritative per-meeting copy and has
+    // no ring dir at all.
+    try await writeFixtureSource(
+      sourceID: "mic", dataRoot: dataRoot,
+      chunkStart: now.advanced(by: -20), chunkDuration: 20,
+      vadSpeechStart: now.advanced(by: -8), vadSpeechEnd: now.advanced(by: -6))
+    try await writeFixtureSource(
+      sourceID: "browser:meet:speaker-1",
+      dataRoot: DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: meetingID),
+      chunkStart: now.advanced(by: -20), chunkDuration: 20,
+      vadSpeechStart: now.advanced(by: -15), vadSpeechEnd: now.advanced(by: -13))
+
+    // Read order follows the meeting's source list: mic (ring) then browser
+    // (per-meeting).
+    let scripted = ScriptedTranscriber(results: [
+      [Segment(start: 0, end: 1, text: "mic-from-ring")],
+      [Segment(start: 0, end: 1, text: "browser-from-meeting")],
+    ])
+
+    let exitCode = await TranscribePipeline.run(
+      inputs: .init(meeting: meetingID, sourceIDs: [], out: nil),
+      dataRoot: dataRoot,
+      outputRoot: outputRoot,
+      backendName: "fluidaudio",
+      dependencies: .init(
+        clock: ManualClock(now),
+        transcriberFactory: { scripted },
+        loadOptions: LoadOptions(),
+        log: { _ in },
+        writeStderr: { line in Issue.record("unexpected stderr: \(line)") }
+      )
+    )
+
+    #expect(exitCode == 0)
+    #expect(scripted.recordedCalls.count == 2)
+
+    let paths = OutputPathResolution.resolve(
+      outputRoot: outputRoot, requestedStart: now.advanced(by: -20),
+      sourceIDs: ["mic", "browser:meet:speaker-1"], explicitOut: nil, sessionSlug: meetingID)
+    let markdown = try outputText(at: paths.markdown)
+    #expect(markdown.contains("mic-from-ring"))
+    #expect(markdown.contains("browser-from-meeting"))
+    // The chosen lookup order is recorded in frontmatter, per issue #20.
+    #expect(markdown.contains("audio_stores: [\"mic=ring\", \"browser:meet:speaker-1=meeting\"]"))
+
+    // Frontmatter round-trips the per-source store record.
+    let parsed = try TranscriptParser.parseFrontmatter(markdown)
+    #expect(
+      parsed.audioStores == [
+        TranscriptAudioStore(source: "mic", store: "ring"),
+        TranscriptAudioStore(source: "browser:meet:speaker-1", store: "meeting"),
+      ])
+  }
+
+  @Test("--meeting with no audio in any store exits 0 and logs a per-source reason")
+  func meetingEmptyLogsPerSourceReason() async throws {
+    let dataRoot = makeTempDirectory("meeting-empty")
+    let outputRoot = makeTempDirectory("meeting-empty-output")
+    let meetingID = "empty-meeting"
+
+    // meeting.toml exists, but neither the per-meeting dir nor the ring holds
+    // either source's audio.
+    let meeting = Meeting(
+      id: meetingID,
+      title: "call",
+      state: .ended,
+      started: now.advanced(by: -20),
+      ended: now,
+      intervals: [MeetingInterval(start: now.advanced(by: -20), end: now)],
+      sources: ["mic", "browser:meet:speaker-2"])
+    try MeetingStore.write(meeting, dataRoot: dataRoot)
+
+    let logs = LogCollector()
+    let exitCode = await TranscribePipeline.run(
+      inputs: .init(meeting: meetingID, sourceIDs: [], out: nil),
+      dataRoot: dataRoot,
+      outputRoot: outputRoot,
+      backendName: "fluidaudio",
+      dependencies: .init(
+        clock: ManualClock(now),
+        transcriberFactory: { ScriptedTranscriber(results: []) },
+        loadOptions: LoadOptions(),
+        log: { logs.append($0) },
+        writeStderr: { line in Issue.record("unexpected stderr: \(line)") }
+      )
+    )
+
+    #expect(exitCode == 0)
+    let lines = logs.snapshot()
+    // Every source names why it was silent, and each store consulted is logged.
+    #expect(lines.contains { $0.contains("run.empty: source=mic reason=store missing") })
+    #expect(
+      lines.contains {
+        $0.contains("run.empty: source=browser:meet:speaker-2 reason=store missing")
+      })
+    #expect(lines.contains { $0.contains("source mic: consulted meeting store at") })
+    #expect(lines.contains { $0.contains("source mic: consulted ring store at") })
+
+    // An empty meeting still produces a (segment-less) transcript with the
+    // per-source store record (`none`, since nothing was found).
+    let paths = OutputPathResolution.resolve(
+      outputRoot: outputRoot, requestedStart: now.advanced(by: -20),
+      sourceIDs: ["mic", "browser:meet:speaker-2"], explicitOut: nil, sessionSlug: meetingID)
+    let markdown = try outputText(at: paths.markdown)
+    #expect(markdown.contains("audio_stores: [\"mic=none\", \"browser:meet:speaker-2=none\"]"))
+  }
+
+  @Test(
+    "--meeting reads per-meeting chunks even when the ring also holds the source (per-meeting is authoritative)"
+  )
+  func meetingPrefersPerMeetingOverRing() async throws {
+    let dataRoot = makeTempDirectory("meeting-both")
+    let outputRoot = makeTempDirectory("meeting-both-output")
+    let meetingID = "both-meeting"
+
+    let meeting = Meeting(
+      id: meetingID,
+      title: "call",
+      state: .ended,
+      started: now.advanced(by: -20),
+      ended: now,
+      intervals: [MeetingInterval(start: now.advanced(by: -20), end: now)],
+      sources: ["mic"])
+    try MeetingStore.write(meeting, dataRoot: dataRoot)
+
+    // Both stores hold mic; the per-meeting copy must win, so only one read
+    // (of the per-meeting store) happens.
+    try await writeFixtureSource(
+      sourceID: "mic", dataRoot: dataRoot,
+      chunkStart: now.advanced(by: -20), chunkDuration: 20,
+      vadSpeechStart: now.advanced(by: -8), vadSpeechEnd: now.advanced(by: -6))
+    try await writeFixtureSource(
+      sourceID: "mic",
+      dataRoot: DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: meetingID),
+      chunkStart: now.advanced(by: -20), chunkDuration: 20,
+      vadSpeechStart: now.advanced(by: -15), vadSpeechEnd: now.advanced(by: -13))
+
+    let scripted = ScriptedTranscriber(results: [
+      [Segment(start: 0, end: 1, text: "hello")]
+    ])
+
+    let exitCode = await TranscribePipeline.run(
+      inputs: .init(meeting: meetingID, sourceIDs: [], out: nil),
+      dataRoot: dataRoot,
+      outputRoot: outputRoot,
+      backendName: "fluidaudio",
+      dependencies: .init(
+        clock: ManualClock(now),
+        transcriberFactory: { scripted },
+        loadOptions: LoadOptions(),
+        log: { _ in },
+        writeStderr: { line in Issue.record("unexpected stderr: \(line)") }
+      )
+    )
+
+    #expect(exitCode == 0)
+    // Only the chosen (per-meeting) store is read — never both.
+    #expect(scripted.recordedCalls.count == 1)
+
+    let paths = OutputPathResolution.resolve(
+      outputRoot: outputRoot, requestedStart: now.advanced(by: -20), sourceIDs: ["mic"],
+      explicitOut: nil, sessionSlug: meetingID)
+    let markdown = try outputText(at: paths.markdown)
+    #expect(markdown.contains("audio_stores: [\"mic=meeting\"]"))
+  }
+
   @Test("segments from two sources are merged onto one shared timeline, ordered by time")
   func twoSourcesMergeByTime() async throws {
     let dataRoot = makeTempDirectory("two-sources")
@@ -503,6 +688,25 @@ struct TranscribePipelineTests {
 
     #expect(exitCode == 0)
     #expect(recorder.loadedOptions == requestedOptions)
+  }
+}
+
+/// Thread-safe collector for the pipeline's `@Sendable` `log` closure, so a
+/// test can assert on the human-readable diagnostic lines it emits.
+private final class LogCollector: @unchecked Sendable {
+  private let lock = NSLock()
+  private var lines: [String] = []
+
+  func append(_ line: String) {
+    lock.lock()
+    defer { lock.unlock() }
+    lines.append(line)
+  }
+
+  func snapshot() -> [String] {
+    lock.lock()
+    defer { lock.unlock() }
+    return lines
   }
 }
 

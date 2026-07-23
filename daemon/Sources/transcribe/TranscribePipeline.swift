@@ -183,22 +183,6 @@ enum TranscribePipeline {
     }
     let requestedRange = resolved.range
 
-    // Audio is meeting-scoped: `--meeting M` reads it under meetings/M/, and
-    // `--session` under meetings/<slug>/ (sessions are materialized with
-    // slug = meeting id). Only the audio moves — meeting.toml/session.toml
-    // are still read from the global data root above. The ad-hoc flags
-    // (--last/--from/--to) have no meeting context and keep the global root;
-    // there is no global audio store any more, so they only find audio a
-    // caller staged there deliberately.
-    let audioRoot: URL
-    if let meetingID = inputs.meeting {
-      audioRoot = DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: meetingID)
-    } else if let slug = resolved.sessionSlug {
-      audioRoot = DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: slug)
-    } else {
-      audioRoot = dataRoot
-    }
-
     // --session's sources override any --source flags; otherwise --source
     // is required, exactly as before.
     let sourceIDs = resolved.sourceIDs ?? inputs.sourceIDs.map { SourceID($0) }
@@ -207,25 +191,54 @@ enum TranscribePipeline {
       return 1
     }
 
-    // Fail fast on an unknown source before loading the (expensive) ASR
-    // model or reading any audio, per docs/specs/transcribe.md: "exits
-    // non-zero with a precise error if ... sources are unknown." Checking
-    // the source's directory (sources/<id>/) rather than requiring
-    // meta.toml specifically: every source earsd has ever started capturing
-    // gets this directory (EarsDaemon.init creates it unconditionally), so
-    // its presence is the honest "does this source exist at all" signal --
-    // a missing meta.toml on an existing directory (a stale capture from
-    // before EarsDaemon started writing it) surfaces instead as
-    // SegmentedAudioReader's own clear error below, not a misleading
-    // "unknown source".
-    for sourceID in sourceIDs {
-      let sourceDirectory = DataStoreLayout.sourceDirectory(dataRoot: audioRoot, sourceID: sourceID)
-      guard FileManager.default.fileExists(atPath: sourceDirectory.path) else {
-        dependencies.writeStderr(
-          "error: unknown source '\(sourceID.rawValue)': no data found under \(sourceDirectory.path)"
-        )
-        return 1
+    // Resolve, per source, which store to read from.
+    //
+    // A `--meeting` run consults each source's per-meeting copy
+    // (`meetings/<id>/sources/<source>/`) *and* the global ring
+    // (`<data-root>/sources/<source>/`), preferring the per-meeting copy when
+    // it holds chunks and falling back to the ring only where it doesn't
+    // (issue #20). It logs both consultations and never fails on a source that
+    // exists in neither store — that source simply contributes nothing, with a
+    // logged reason, so the meeting's other sources still transcribe. Every
+    // other path (`--session`, `--last`/`--from`/`--to`) reads one shared root
+    // and keeps the fail-fast "unknown source" guard.
+    let plans: [SourceAudioPlan]
+    if let meetingID = inputs.meeting {
+      plans = planMeetingSources(
+        sourceIDs: sourceIDs, meetingID: meetingID, dataRoot: dataRoot,
+        intervalRanges: intervalRanges, log: dependencies.log)
+    } else {
+      // Audio is meeting-scoped: `--session` reads it under meetings/<slug>/
+      // (sessions are materialized with slug = meeting id). The ad-hoc flags
+      // (--last/--from/--to) have no meeting context and keep the global root;
+      // there is no global audio store any more, so they only find audio a
+      // caller staged there deliberately.
+      let audioRoot =
+        resolved.sessionSlug.map {
+          DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: $0)
+        } ?? dataRoot
+      // Fail fast on an unknown source before loading the (expensive) ASR
+      // model or reading any audio, per docs/specs/transcribe.md: "exits
+      // non-zero with a precise error if ... sources are unknown." Checking
+      // the source's directory (sources/<id>/) rather than requiring
+      // meta.toml specifically: every source earsd has ever started capturing
+      // gets this directory (EarsDaemon.init creates it unconditionally), so
+      // its presence is the honest "does this source exist at all" signal --
+      // a missing meta.toml on an existing directory (a stale capture from
+      // before EarsDaemon started writing it) surfaces instead as
+      // SegmentedAudioReader's own clear error below, not a misleading
+      // "unknown source".
+      let reader = SegmentedAudioReader(dataRoot: audioRoot)
+      for sourceID in sourceIDs {
+        let sourceDirectory = reader.sourceDirectory(for: sourceID)
+        guard FileManager.default.fileExists(atPath: sourceDirectory.path) else {
+          dependencies.writeStderr(
+            "error: unknown source '\(sourceID.rawValue)': no data found under \(sourceDirectory.path)"
+          )
+          return 1
+        }
       }
+      plans = sourceIDs.map { SourceAudioPlan(sourceID: $0, reader: reader, store: nil) }
     }
 
     let transcriber: any Transcriber
@@ -237,23 +250,37 @@ enum TranscribePipeline {
       return 1
     }
 
-    let audioReader = SegmentedAudioReader(dataRoot: audioRoot)
     var transcriptions: [SourceTranscription] = []
     var speechSeconds: Double = 0
+    // Per-source read outcome, for the segments=0 reason lines below.
+    var readOutcomes: [ReadOutcome] = []
 
-    for sourceID in sourceIDs {
+    for plan in plans {
+      let sourceID = plan.sourceID
       // One read per interval: a paused span is simply never read, so it is
-      // provably absent from the output, exactly like silence.
+      // provably absent from the output, exactly like silence. A meeting
+      // source with no resolved store (`reader == nil`) contributes nothing.
       var slices: [AudioSlice] = []
-      for range in intervalRanges {
-        do {
-          slices.append(contentsOf: try audioReader.slices(source: sourceID, range: range))
-        } catch {
-          dependencies.writeStderr(
-            "error: failed to read audio for source '\(sourceID.rawValue)': \(error)")
-          return 1
+      var chunksInRange = 0
+      var speechIntervals = 0
+      if let reader = plan.reader {
+        for range in intervalRanges {
+          do {
+            let report = try reader.read(source: sourceID, range: range)
+            slices.append(contentsOf: report.slices)
+            chunksInRange += report.chunksInRange
+            speechIntervals += report.speechIntervals
+          } catch {
+            dependencies.writeStderr(
+              "error: failed to read audio for source '\(sourceID.rawValue)': \(error)")
+            return 1
+          }
         }
       }
+      readOutcomes.append(
+        ReadOutcome(
+          sourceID: sourceID, storeExists: plan.reader != nil, chunks: chunksInRange,
+          speech: speechIntervals, slices: slices.count))
 
       var segments: [Segment] = []
       for slice in slices {
@@ -316,6 +343,15 @@ enum TranscribePipeline {
       }
     }
 
+    // The chosen lookup order, recorded in frontmatter so a wrong-store read is
+    // visible after the fact (issue #20). Only a `--meeting` run resolves a
+    // per-source store; every other path reads one shared root and records
+    // nothing here. A source with no store at all is recorded as `none`.
+    let audioStores: [TranscriptAudioStore] =
+      inputs.meeting == nil
+      ? []
+      : plans.map { TranscriptAudioStore(source: $0.sourceID, store: $0.store?.label ?? "none") }
+
     let document = TranscriptAssembly.assemble(
       sourceIDs: sourceIDs,
       transcriptions: transcriptions,
@@ -325,7 +361,8 @@ enum TranscribePipeline {
       speakers: speakers,
       model: modelInfo,
       generated: generated,
-      speechSeconds: speechSeconds
+      speechSeconds: speechSeconds,
+      audioStores: audioStores
     )
 
     let paths = OutputPathResolution.resolve(
@@ -346,6 +383,23 @@ enum TranscribePipeline {
       return 1
     }
 
+    // A run that produced no segments is only diagnosable if each source says
+    // *why* it was silent — no chunks, chunks-but-silence, or store missing
+    // (issue #20). Logged for every path, but it is a meeting spanning several
+    // sources where a one-line-per-source breakdown matters most.
+    if document.segments.count == 0 {
+      for outcome in readOutcomes {
+        // A source with `nil` reason did produce audio slices — the model just
+        // returned no text for them; every other case names the missing input.
+        let reason =
+          MeetingAudioResolution.emptyReason(
+            storeExists: outcome.storeExists, chunksInRange: outcome.chunks,
+            speechIntervals: outcome.speech, sliceCount: outcome.slices)
+          ?? "audio produced no segments"
+        dependencies.log("run.empty: source=\(outcome.sourceID.rawValue) reason=\(reason)")
+      }
+    }
+
     dependencies.log(
       "run.summary: segments=\(document.segments.count) words=\(document.frontmatter.wordCount) "
         + "speech_seconds=\(speechSeconds) duration_seconds=\(requestedRange.duration) "
@@ -361,6 +415,99 @@ enum TranscribePipeline {
     ])
 
     return 0
+  }
+
+  /// Where one source's audio is read from for this run: the ``reader`` bound
+  /// to the chosen data root (`nil` on a `--meeting` run when no store holds the
+  /// source at all — it then contributes nothing), and, for a `--meeting` run,
+  /// which ``MeetingAudioStore`` was chosen (`nil` for every other path).
+  private struct SourceAudioPlan {
+    let sourceID: SourceID
+    let reader: SegmentedAudioReader?
+    let store: MeetingAudioStore?
+  }
+
+  /// One source's read result, kept so a `segments=0` run can name why each
+  /// source was silent (issue #20).
+  private struct ReadOutcome {
+    let sourceID: SourceID
+    let storeExists: Bool
+    let chunks: Int
+    let speech: Int
+    let slices: Int
+  }
+
+  /// Resolves each meeting source to a store, logging every consultation.
+  ///
+  /// For each source it probes both the per-meeting copy and the global ring
+  /// (index-only, no decode), logs what each holds with its concrete path, then
+  /// picks the store per ``MeetingAudioResolution/chooseStore(meeting:ring:)``
+  /// — per-meeting chunks preferred, ring fallback. A source found in neither
+  /// store gets a `nil` reader (it contributes nothing, with a logged reason at
+  /// the end of the run) rather than failing the whole meeting.
+  private static func planMeetingSources(
+    sourceIDs: [SourceID], meetingID: String, dataRoot: URL, intervalRanges: [TimeRange],
+    log: @Sendable (String) -> Void
+  ) -> [SourceAudioPlan] {
+    let meetingRoot = DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: meetingID)
+    let meetingReader = SegmentedAudioReader(dataRoot: meetingRoot)
+    let ringReader = SegmentedAudioReader(dataRoot: dataRoot)
+
+    return sourceIDs.map { sourceID in
+      let meetingProbe = summedProbe(meetingReader, source: sourceID, ranges: intervalRanges)
+      let ringProbe = summedProbe(ringReader, source: sourceID, ranges: intervalRanges)
+      logConsultation(
+        meeting: meetingID, source: sourceID, store: .meeting,
+        path: meetingReader.sourceDirectory(for: sourceID).path, probe: meetingProbe, log: log)
+      logConsultation(
+        meeting: meetingID, source: sourceID, store: .ring,
+        path: ringReader.sourceDirectory(for: sourceID).path, probe: ringProbe, log: log)
+
+      let chosen = MeetingAudioResolution.chooseStore(meeting: meetingProbe, ring: ringProbe)
+      switch chosen {
+      case .some(.meeting):
+        log("meeting \(meetingID) source \(sourceID.rawValue): reading from meeting store")
+        return SourceAudioPlan(sourceID: sourceID, reader: meetingReader, store: .meeting)
+      case .some(.ring):
+        log("meeting \(meetingID) source \(sourceID.rawValue): reading from ring store")
+        return SourceAudioPlan(sourceID: sourceID, reader: ringReader, store: .ring)
+      case .none:
+        log("meeting \(meetingID) source \(sourceID.rawValue): no audio store found")
+        return SourceAudioPlan(sourceID: sourceID, reader: nil, store: nil)
+      }
+    }
+  }
+
+  /// A source's probe summed over every interval range the run reads (a paused
+  /// meeting has several). `sourceExists` is range-independent, so the first
+  /// probe's flag stands for the whole source.
+  private static func summedProbe(
+    _ reader: SegmentedAudioReader, source sourceID: SourceID, ranges: [TimeRange]
+  ) -> SegmentedAudioReader.RangeProbe {
+    var exists = false
+    var chunks = 0
+    var speech = 0
+    for range in ranges {
+      let probe = reader.probe(source: sourceID, range: range)
+      exists = exists || probe.sourceExists
+      chunks += probe.chunksInRange
+      speech += probe.speechIntervals
+    }
+    return SegmentedAudioReader.RangeProbe(
+      sourceExists: exists, chunksInRange: chunks, speechIntervals: speech)
+  }
+
+  private static func logConsultation(
+    meeting meetingID: String, source sourceID: SourceID, store: MeetingAudioStore, path: String,
+    probe: SegmentedAudioReader.RangeProbe, log: @Sendable (String) -> Void
+  ) {
+    let result =
+      probe.sourceExists
+      ? "chunks=\(probe.chunksInRange) speech_intervals=\(probe.speechIntervals)"
+      : "no data (store missing)"
+    log(
+      "meeting \(meetingID) source \(sourceID.rawValue): consulted \(store.label) store at \(path) — \(result)"
+    )
   }
 
   private static func shifted(_ segment: Segment, by offset: Double) -> Segment {

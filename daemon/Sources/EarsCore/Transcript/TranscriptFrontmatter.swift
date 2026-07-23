@@ -49,6 +49,12 @@ public struct TranscriptFrontmatter: Sendable, Hashable {
   /// `docs/specs/llm-stages.md`'s "frontmatter kind: summary,
   /// preset, and derived_from".
   public var preset: String?
+  /// Per-source record of which audio store each source was read from on a
+  /// `transcribe --meeting` run (`meeting` = per-meeting copy, `ring` = global
+  /// rolling buffer), so a wrong-store read is visible after the fact
+  /// (all-ears issue #20). Empty for non-meeting transcripts; rendered as an
+  /// `audio_stores:` line only when non-empty.
+  public var audioStores: [TranscriptAudioStore]
 
   public init(
     schema: Int,
@@ -65,7 +71,8 @@ public struct TranscriptFrontmatter: Sendable, Hashable {
     wordCount: Int,
     vocab: [String],
     derivedFrom: String? = nil,
-    preset: String? = nil
+    preset: String? = nil,
+    audioStores: [TranscriptAudioStore] = []
   ) {
     self.schema = schema
     self.kind = kind
@@ -82,5 +89,19 @@ public struct TranscriptFrontmatter: Sendable, Hashable {
     self.vocab = vocab
     self.derivedFrom = derivedFrom
     self.preset = preset
+    self.audioStores = audioStores
+  }
+}
+
+/// One `audio_stores` entry: which store a single source's audio was read from
+/// on a `transcribe --meeting` run. See ``TranscriptFrontmatter/audioStores``.
+public struct TranscriptAudioStore: Sendable, Hashable {
+  public var source: SourceID
+  /// `"meeting"` (per-meeting copy) or `"ring"` (global rolling buffer).
+  public var store: String
+
+  public init(source: SourceID, store: String) {
+    self.source = source
+    self.store = store
   }
 }

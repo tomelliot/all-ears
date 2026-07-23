@@ -53,7 +53,8 @@ enum TranscriptAssembly {
     speakers: [String: String] = [:],
     model: TranscriptModelInfo,
     generated: Instant,
-    speechSeconds: Double
+    speechSeconds: Double,
+    audioStores: [TranscriptAudioStore] = []
   ) -> TranscriptDocument {
     var turns: [TranscriptSegment] = []
     for transcription in transcriptions {
@@ -95,7 +96,8 @@ enum TranscriptAssembly {
       durationSeconds: requested.duration,
       speechSeconds: speechSeconds,
       wordCount: wordCount,
-      vocab: []
+      vocab: [],
+      audioStores: audioStores
     )
 
     return TranscriptDocument(frontmatter: frontmatter, segments: ordered)

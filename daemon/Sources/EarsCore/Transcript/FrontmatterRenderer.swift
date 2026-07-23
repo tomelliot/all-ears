@@ -56,6 +56,15 @@ enum FrontmatterRenderer {
       YAML.line("speech_seconds", .plain(RenderNumber.string(frontmatter.speechSeconds))))
     lines.append(YAML.line("word_count", .plain(String(frontmatter.wordCount))))
     lines.append(YAML.line("vocab", .flowArray(frontmatter.vocab.map(scalar))))
+    if !frontmatter.audioStores.isEmpty {
+      // `"<source>=<store>"` tokens: always quoted (they carry `=`, and a
+      // source id may carry `:`), so they round-trip through the flow-array
+      // grammar without ambiguity. Source ids never contain `=`.
+      lines.append(
+        YAML.line(
+          "audio_stores",
+          .flowArray(frontmatter.audioStores.map { .quoted("\($0.source.rawValue)=\($0.store)") })))
+    }
 
     return lines.joined(separator: "\n")
   }

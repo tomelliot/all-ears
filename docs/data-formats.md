@@ -163,6 +163,11 @@ duration_seconds: 1920
 speech_seconds: 1440
 word_count: 3120
 vocab: [global, standup]
+# audio_stores: ["mic=ring", "app:us.zoom.xos=meeting"]
+#                           # present on `transcribe --meeting` output only —
+                            # which store each source was read from (`meeting` =
+                            # per-meeting copy, `ring` = global buffer, `none` =
+                            # no store held it), so a wrong-store read is visible
 ---
 
 ## [10:30:04] You

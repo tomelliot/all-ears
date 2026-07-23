@@ -158,4 +158,60 @@ struct SegmentedAudioReaderTests {
 
     #expect(slices.isEmpty)
   }
+
+  @Test("read reports the chunk and speech-span counts alongside the slices")
+  func readReportsCounts() async throws {
+    let fixture = try await makeFixture(
+      chunks: [("chunk1.pcm", 0, 3, 30)],
+      vadSpans: [(.speech, 1, 2)])
+
+    let report = try makeReader(dataRoot: fixture.dataRoot).read(
+      source: "mic", range: range(0, 3))
+
+    #expect(report.slices.count == 1)
+    #expect(report.chunksInRange == 1)
+    #expect(report.speechIntervals == 1)
+  }
+
+  @Test("read distinguishes chunks-but-only-silence from no chunks at all")
+  func readCountsExplainEmptyResults() async throws {
+    // Chunks on record, but every VAD span is silence: chunksInRange > 0,
+    // speechIntervals == 0, no slices — the "chunks but no speech" case.
+    let silent = try await makeFixture(
+      chunks: [("chunk1.pcm", 0, 3, 30)],
+      vadSpans: [(.silence, 0, 3)])
+    let silentReport = try makeReader(dataRoot: silent.dataRoot).read(
+      source: "mic", range: range(0, 3))
+    #expect(silentReport.slices.isEmpty)
+    #expect(silentReport.chunksInRange == 1)
+    #expect(silentReport.speechIntervals == 0)
+
+    // Nothing on record at all: chunksInRange == 0 — the "no chunks" case.
+    let empty = try await makeFixture(chunks: [], vadSpans: [])
+    let emptyReport = try makeReader(dataRoot: empty.dataRoot).read(
+      source: "mic", range: range(0, 3))
+    #expect(emptyReport.chunksInRange == 0)
+    #expect(emptyReport.speechIntervals == 0)
+  }
+
+  @Test("probe reports counts without decoding, and a missing source as sourceExists == false")
+  func probeReportsPresenceAndCounts() async throws {
+    let fixture = try await makeFixture(
+      chunks: [("chunk1.pcm", 0, 3, 30)],
+      vadSpans: [(.speech, 1, 2)])
+    let reader = makeReader(dataRoot: fixture.dataRoot)
+
+    let present = reader.probe(source: "mic", range: range(0, 3))
+    #expect(present.sourceExists)
+    #expect(present.chunksInRange == 1)
+    #expect(present.speechIntervals == 1)
+
+    // A source with no directory under this root reports absent with zero
+    // counts rather than throwing — the fallback signal the meeting path keys
+    // off.
+    let absent = reader.probe(source: "system", range: range(0, 3))
+    #expect(!absent.sourceExists)
+    #expect(absent.chunksInRange == 0)
+    #expect(absent.speechIntervals == 0)
+  }
 }

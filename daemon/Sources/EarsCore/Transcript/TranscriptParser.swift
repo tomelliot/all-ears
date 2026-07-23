@@ -171,6 +171,18 @@ public enum TranscriptParser {
     let speechSeconds = try double("speech_seconds", field("speech_seconds"))
     let wordCount = try int("word_count", field("word_count"))
     let vocab = try splitFlowArray(field("vocab")).map(unquote)
+    let audioStoreTokens = try fields["audio_stores"].map(splitFlowArray) ?? []
+    let audioStores = try audioStoreTokens.map { token -> TranscriptAudioStore in
+      let unquoted = unquote(token)
+      // `<source>=<store>`; the store token never contains `=` and a source id
+      // never does, so splitting on the first `=` recovers both.
+      guard let separator = unquoted.firstIndex(of: "=") else {
+        throw TranscriptParsingError.malformedField(field: "audio_stores", value: token)
+      }
+      return TranscriptAudioStore(
+        source: SourceID(String(unquoted[unquoted.startIndex..<separator])),
+        store: String(unquoted[unquoted.index(after: separator)...]))
+    }
 
     return TranscriptFrontmatter(
       schema: schema,
@@ -187,7 +199,8 @@ public enum TranscriptParser {
       wordCount: wordCount,
       vocab: vocab,
       derivedFrom: derivedFrom,
-      preset: preset)
+      preset: preset,
+      audioStores: audioStores)
   }
 
   // MARK: - JSON sidecar (full-fidelity segments)
