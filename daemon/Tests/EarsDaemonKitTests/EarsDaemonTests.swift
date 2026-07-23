@@ -604,6 +604,85 @@ struct EarsDaemonTests {
     await daemon.stop()
   }
 
+  @Test(
+    "full retention lifecycle: idle boot, meeting records under its directory, transcript completion starts the clock, and the sweeper deletes the audio at the deadline"
+  )
+  func retentionLifecycleEndToEnd() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_000))
+
+    let configuration = EarsDaemonConfiguration(
+      sources: [makeDescriptor(id: "mic", sourceClass: .mic)],
+      dataRoot: dataRoot,
+      socketPath: tempSocketPath(),
+      evictAfterTranscriptSeconds: 100,
+      maxAudioAgeSeconds: 1_000
+    )
+    let daemon = try EarsDaemon(
+      configuration: configuration,
+      backendFactory: { descriptor in
+        SyntheticCaptureBackend(source: descriptor.id, buffers: [self.makeBuffer(seconds: 2)])
+      },
+      clock: clock
+    )
+    try await daemon.start()
+
+    // Idle boot: nothing on disk.
+    #expect(
+      !FileManager.default.fileExists(
+        atPath: DataStoreLayout.meetingsDirectory(dataRoot: dataRoot).path))
+
+    // A meeting records real audio under its own directory, then ends.
+    let meeting = try await daemon.startMeetingForTesting(
+      MeetingStartParams(title: "call", sources: ["mic"]))
+    clock.advance(by: 600)
+    try await daemon.endMeetingForTesting(id: meeting.id)
+
+    let sourcesDir = DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: meeting.id)
+      .appendingPathComponent("sources")
+    #expect(FileManager.default.fileExists(atPath: sourcesDir.path))
+
+    // The transcript completes, starting the retention clock.
+    await daemon.markTranscriptCompletedForTesting(id: meeting.id)
+
+    // One second before completion + evict_after_transcript_seconds: retained.
+    clock.advance(by: 99)
+    await daemon.sweepRetentionForTesting()
+    #expect(FileManager.default.fileExists(atPath: sourcesDir.path))
+
+    // At the deadline: the audio is gone; the meeting's record survives.
+    clock.advance(by: 1)
+    await daemon.sweepRetentionForTesting()
+    #expect(!FileManager.default.fileExists(atPath: sourcesDir.path))
+    #expect(
+      FileManager.default.fileExists(
+        atPath: DataStoreLayout.meetingTomlFile(dataRoot: dataRoot, meetingID: meeting.id).path))
+
+    // A second meeting whose transcript never completes: its audio survives
+    // past the transcript deadline and is deleted only at the hard cap.
+    let failed = try await daemon.startMeetingForTesting(
+      MeetingStartParams(title: "no-transcript", sources: ["mic"]))
+    clock.advance(by: 600)
+    try await daemon.endMeetingForTesting(id: failed.id)
+    let failedSourcesDir = DataStoreLayout.meetingDirectory(
+      dataRoot: dataRoot, meetingID: failed.id
+    ).appendingPathComponent("sources")
+    #expect(FileManager.default.fileExists(atPath: failedSourcesDir.path))
+
+    clock.advance(by: 999)
+    await daemon.sweepRetentionForTesting()
+    #expect(FileManager.default.fileExists(atPath: failedSourcesDir.path))
+
+    clock.advance(by: 1)
+    await daemon.sweepRetentionForTesting()
+    #expect(!FileManager.default.fileExists(atPath: failedSourcesDir.path))
+    #expect(
+      FileManager.default.fileExists(
+        atPath: DataStoreLayout.meetingTomlFile(dataRoot: dataRoot, meetingID: failed.id).path))
+
+    await daemon.stop()
+  }
+
   @Test("openIngestSource rejects an open whose meeting identity can't be resolved")
   func rejectsIngestOpenWithoutResolvableMeeting() async throws {
     let dataRoot = try makeDataRoot()
