@@ -208,8 +208,8 @@ public actor EarsDaemon {
   private let bootID = UUID().uuidString.lowercased()
   private var powerObserver: PowerObserver?
   private var appSignalTriggerObserver: AppSignalTriggerObserver?
-  /// The daemon-owned, timer-driven time-cap enforcer — expires aged-out
-  /// recordings across every source independent of capture activity. Started in
+  /// The daemon-owned, timer-driven retention enforcer — deletes each ended
+  /// meeting's audio once its transcript-driven deadline passes. Started in
   /// ``start()`` after the control socket is bound, stopped in ``stop()``.
   private var evictionSweeper: EvictionSweeper?
 
@@ -565,38 +565,23 @@ public actor EarsDaemon {
     await observer.startObserving()
     powerObserver = observer
 
-    // The daemon owns time-cap enforcement: a periodic sweep over every source
-    // on disk, decoupled from capture so stopped/idle sources (an ended meeting,
-    // a disabled source) are expired too — not just the continuously-capturing
-    // mic. `[weak self]` to avoid a retain cycle (the daemon owns the sweeper).
+    // The daemon owns retention: a periodic sweep over every meeting on disk,
+    // deleting an ended meeting's audio once its transcript-driven deadline
+    // passes. Decoupled from capture entirely — an ended meeting has no live
+    // actors, so the sweep is a plain per-meeting directory delete.
     let sweeper = EvictionSweeper(
       dataRoot: configuration.dataRoot,
       clock: clock,
       intervalSeconds: configuration.evictionSweepIntervalSeconds,
-      log: log,
-      evictThroughActors: { [weak self] ids in
-        guard let self else { return [] }
-        return await self.evictThroughLiveActors(ids)
-      })
+      evictAfterTranscriptSeconds: configuration.evictAfterTranscriptSeconds,
+      maxAudioAgeSeconds: configuration.maxAudioAgeSeconds,
+      log: log)
     await sweeper.start()
     evictionSweeper = sweeper
 
     if let ingestWebSocket = configuration.ingestWebSocket {
       await startIngestWebSocket(ingestWebSocket)
     }
-  }
-
-  /// Evicts each id that has a live `CaptureActor` through that actor (so the
-  /// actor's shared `IndexAppender` stays the single writer to its index), and
-  /// returns the ids it handled. The ``EvictionSweeper`` disk-evicts the rest.
-  private func evictThroughLiveActors(_ ids: Set<SourceID>) async -> Set<SourceID> {
-    var handled: Set<SourceID> = []
-    for id in ids {
-      guard let actor = captureActors[id] else { continue }
-      await actor.evictNow()
-      handled.insert(id)
-    }
-    return handled
   }
 
   /// Binds and starts the ingest WebSocket. A bind failure (e.g. the port is

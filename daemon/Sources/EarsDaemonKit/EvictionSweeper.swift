@@ -2,60 +2,54 @@ import EarsCore
 import EarsDataStore
 import Foundation
 
-/// The daemon's time-cap enforcer: a single, timer-driven pass that expires
-/// recordings older than each source's `time_cap_seconds` (default 7200 = 2 h)
-/// across **every** source, owned by the daemon rather than by any one source's
-/// capture path.
+/// The daemon's retention enforcer: a single, timer-driven pass that deletes
+/// each **ended meeting's** audio (`meetings/<id>/sources/`) once its
+/// retention deadline passes, per `[earsd.retention]`:
 ///
-/// ## Why this exists
+/// - transcript completed successfully → deleted at
+///   `transcript_completed + evict_after_transcript_seconds`;
+/// - transcript never completed → retained (so a failed run can be retried)
+///   until `ended + max_audio_age_seconds`, then deleted regardless.
 ///
-/// The time cap is a wall-clock bound, but eviction used to fire only when a new
-/// chunk rolled over (or once at a source's `start()`). The mic captures
-/// continuously, so its rollovers kept it pruned — and it looked like expiry
-/// worked. Every other source is episodic: a browser/meeting source captures
-/// for a call and then stops, rolls no more chunks, and its recordings sat on
-/// disk past the cap forever (never re-instantiated as an actor after a daemon
-/// restart, either). So in practice only the mic was ever expired.
+/// The first deadline always wins arithmetically when both exist
+/// (`completed + evict_after < ended + max_age` for the shipped defaults), so
+/// no explicit whichever-first logic is needed. `meeting.toml` and
+/// `events.jsonl` are never deleted — the meeting's record outlives its
+/// audio. Live (non-ended) meetings are never touched, no matter how old.
 ///
-/// This sweeper decouples enforcement from capture entirely. Each tick it
-/// enumerates the sources present on disk (``SourceDirectoryScan``) — not the
-/// live actor set — so it reaches stopped and actor-less sources, and evicts:
-///
-/// - **through the live `CaptureActor`** (``CaptureActor/evictNow()``) for
-///   sources that have one, so that actor's shared ``IndexAppender`` stays the
-///   single writer to its `index.jsonl` and its `status` bounds stay fresh;
-/// - **straight from disk** (``EvictionExecutor/evictFromDisk``, deciding from
-///   filenames via ``DiskChunkScan``) for sources with no live actor, where no
-///   other writer exists to race.
+/// Retention is a per-meeting directory delete because audio is
+/// meeting-scoped: everything a meeting recorded lives under its own
+/// `sources/` tree, so eviction needs no chunk-level bookkeeping, no index
+/// rewrite, and no coordination with a live `CaptureActor` (an ended
+/// meeting's actors are already torn down).
 public actor EvictionSweeper {
   private let dataRoot: URL
   private let clock: any NowProviding
   private let intervalSeconds: Double
+  private let evictAfterTranscriptSeconds: Double
+  private let maxAudioAgeSeconds: Double
   private let log: @Sendable (String) -> Void
-  /// Asks the daemon to evict every id that has a live `CaptureActor` through
-  /// that actor, returning the ids it handled — so the sweep disk-evicts only
-  /// the rest. Injected (not a direct actor-map reference) so the daemon keeps
-  /// sole ownership of its `captureActors`.
-  private let evictThroughActors: @Sendable (Set<SourceID>) async -> Set<SourceID>
   private var runTask: Task<Void, Never>?
 
   public init(
     dataRoot: URL,
     clock: any NowProviding,
     intervalSeconds: Double,
-    log: @escaping @Sendable (String) -> Void,
-    evictThroughActors: @escaping @Sendable (Set<SourceID>) async -> Set<SourceID>
+    evictAfterTranscriptSeconds: Double,
+    maxAudioAgeSeconds: Double,
+    log: @escaping @Sendable (String) -> Void
   ) {
     self.dataRoot = dataRoot
     self.clock = clock
     self.intervalSeconds = intervalSeconds
+    self.evictAfterTranscriptSeconds = evictAfterTranscriptSeconds
+    self.maxAudioAgeSeconds = maxAudioAgeSeconds
     self.log = log
-    self.evictThroughActors = evictThroughActors
   }
 
   /// Starts the periodic loop: one prompt pass now (recovering anything already
-  /// past the cap from prior runs or stopped sources), then a pass every
-  /// `intervalSeconds`. Idempotent — a second call while running is a no-op.
+  /// past its deadline from prior runs), then a pass every `intervalSeconds`.
+  /// Idempotent — a second call while running is a no-op.
   public func start() {
     guard runTask == nil else { return }
     let interval = intervalSeconds
@@ -78,35 +72,26 @@ public actor EvictionSweeper {
     runTask = nil
   }
 
-  /// One full sweep over every on-disk source. Internal so tests can drive a
+  /// One full sweep over every meeting on disk. Internal so tests can drive a
   /// single deterministic pass without the timer.
   func sweepOnce() async {
-    let sources = SourceDirectoryScan.sources(dataRoot: dataRoot)
-    guard !sources.isEmpty else { return }
     let now = clock.now()
+    for meeting in MeetingStore.readAll(dataRoot: dataRoot) {
+      guard meeting.state == .ended, let ended = meeting.ended else { continue }
+      let deadline =
+        meeting.transcriptCompleted.map { $0.advanced(by: evictAfterTranscriptSeconds) }
+        ?? ended.advanced(by: maxAudioAgeSeconds)
+      guard now >= deadline else { continue }
 
-    let handled = await evictThroughActors(Set(sources.map { $0.descriptor.id }))
-
-    for (descriptor, directory) in sources where !handled.contains(descriptor.id) {
-      // No live actor for this source, so a fresh IndexAppender is the only
-      // writer to its index — safe. (A source gaining an actor between the
-      // routing snapshot above and here is a single-tick window; the resulting
-      // double-write is idempotent: deleteChunkFiles guards file existence and a
-      // duplicate `evict` event is inert to every index reader.)
-      let indexAppender = IndexAppender(
-        fileURL: DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: descriptor.id))
+      let sourcesDirectory = DataStoreLayout.meetingDirectory(
+        dataRoot: dataRoot, meetingID: meeting.id
+      ).appendingPathComponent("sources")
+      guard FileManager.default.fileExists(atPath: sourcesDirectory.path) else { continue }
       do {
-        try await EvictionExecutor.evictFromDisk(
-          sourceDirectory: directory,
-          storeNative: descriptor.storeNative,
-          now: now,
-          timeCapSeconds: Double(descriptor.timeCapSeconds),
-          indexAppender: indexAppender)
-        try VADSegmentStore.evict(
-          directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: descriptor.id),
-          olderThan: now.advanced(by: -Double(descriptor.timeCapSeconds)))
+        try FileManager.default.removeItem(at: sourcesDirectory)
+        log("retention: evicted meeting \(meeting.id)'s audio (deadline passed)")
       } catch {
-        log("eviction sweep: source '\(descriptor.id.rawValue)' failed: \(error)")
+        log("retention: evicting meeting \(meeting.id)'s audio failed: \(error)")
       }
     }
   }
