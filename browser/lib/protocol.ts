@@ -15,12 +15,33 @@ export type Platform = "meet" | "zoom" | "teams";
 export type ParticipantId = string;
 
 /**
+ * One (participantId → displayName) pair harvested from the platform's own
+ * participant roster/UI, independent of whether that participant's audio track
+ * has been correlated to this id yet (issue #23). The daemon upserts these onto
+ * the meeting's attendee roster, so a name lands even when the speaking-onset
+ * correlation never tied the participant to a captured track (in which case the
+ * track stays `speaker-<n>` and this named entry sits beside it, rather than the
+ * name being silently lost). `displayName` is always a non-empty string —
+ * empties are dropped before an entry is built.
+ */
+export interface RosterEntry {
+  participantId: ParticipantId;
+  displayName: string;
+}
+
+/**
  * Main-world → isolated-world messages. PCM rides the same channel as a
  * transferable Int16Array (structured-cloned across the world boundary).
  */
 export type MainMessage =
   | { kind: "participant-joined"; platform: Platform; participantId: ParticipantId; generation: number; displayName?: string }
   | { kind: "participant-left"; participantId: ParticipantId; generation: number }
+  // A batch of participant identities (id → display name) the adapter resolved
+  // from the platform's roster/UI, not necessarily tied to a captured track.
+  // Distinct from participant-joined (which is a capture-pipeline lifecycle
+  // event): a roster entry carries only identity, so names reach the daemon even
+  // for a participant whose track never correlated to a device id (issue #23).
+  | { kind: "participant-roster"; platform: Platform; entries: RosterEntry[] }
   | { kind: "pcm"; participantId: ParticipantId; generation: number; samples: Int16Array }
   | { kind: "status"; text: string }
   // A participant's capture pipeline died for good (e.g. the Meet decoder gave
@@ -107,6 +128,10 @@ export type PortMessage =
   // Participant identity (with display name, when the DOM knows it) — what
   // the background upserts onto the daemon meeting's roster.
   | { type: "joined"; participantId: ParticipantId; platform: Platform; displayName?: string }
+  // Identity-only roster names (see MainMessage "participant-roster"). The
+  // background upserts each onto the daemon meeting's attendee roster without
+  // treating them as capture participants (they don't gate meeting-end).
+  | { type: "roster"; platform: Platform; entries: RosterEntry[] }
   | { type: "left"; participantId: ParticipantId }
   // A participant's capture died mid-call (see MainMessage "capture-failed").
   | { type: "capture-failed"; participantId: ParticipantId; platform: Platform; reason: string }

@@ -211,6 +211,68 @@ describe("MeetingTracker (v2 signal forwarder)", () => {
     expect(tracker.meetingActive).toBe(false);
   });
 
+  it("rosterUpdate upserts display-name-only attendees keyed by device id (issue #23)", async () => {
+    const control = new FakeControl();
+    const { tracker } = makeTracker(control);
+
+    tracker.meetingStarted("p1", "meet", "abc");
+    await flush();
+    tracker.rosterUpdate("p1", "meet", [
+      { participantId: "spaces/s/devices/445", displayName: "Tom Elliot" },
+      { participantId: "spaces/s/devices/446", displayName: "Tom E" },
+    ]);
+    await flush();
+
+    expect(control.ofVerb("attendee")).toEqual([
+      { verb: "attendee", meeting: "m-1", attendee: { id: "spaces/s/devices/445", display_name: "Tom Elliot" } },
+      { verb: "attendee", meeting: "m-1", attendee: { id: "spaces/s/devices/446", display_name: "Tom E" } },
+    ]);
+  });
+
+  it("a roster name is identity-only: it does not enrol a capture participant or keep the meeting alive", async () => {
+    const control = new FakeControl();
+    const { tracker } = makeTracker(control);
+
+    tracker.meetingStarted("p1", "meet", "abc");
+    await flush();
+    // One real capture participant plus a roster name for someone never captured.
+    tracker.participantJoined("p1", "meet", "speaker-1");
+    tracker.rosterUpdate("p1", "meet", [{ participantId: "spaces/s/devices/445", displayName: "Tom Elliot" }]);
+    await flush();
+
+    // The only capture participant leaving ends the meeting — the roster name
+    // must not count as a live participant that strands it open.
+    tracker.participantLeft("p1", "speaker-1");
+    await flush();
+    expect(control.ofVerb("end")).toEqual([{ verb: "end", meeting: "m-1" }]);
+    expect(tracker.meetingActive).toBe(false);
+  });
+
+  it("buffers roster names that arrive before meeting-started and flushes them once it lands", async () => {
+    const control = new FakeControl();
+    const { tracker } = makeTracker(control);
+
+    tracker.rosterUpdate("p1", "meet", [{ participantId: "spaces/s/devices/445", displayName: "Tom Elliot" }]);
+    expect(control.ofVerb("attendee")).toHaveLength(0); // no record yet — buffered
+
+    tracker.meetingStarted("p1", "meet", "abc");
+    await flush();
+    expect(control.ofVerb("attendee")).toEqual([
+      { verb: "attendee", meeting: "m-1", attendee: { id: "spaces/s/devices/445", display_name: "Tom Elliot" } },
+    ]);
+  });
+
+  it("rosterUpdate with an empty batch is a no-op", async () => {
+    const control = new FakeControl();
+    const { tracker } = makeTracker(control);
+
+    tracker.meetingStarted("p1", "meet", "abc");
+    await flush();
+    tracker.rosterUpdate("p1", "meet", []);
+    await flush();
+    expect(control.ofVerb("attendee")).toHaveLength(0);
+  });
+
   it("the pause toggle maps to meeting.pause / meeting.resume — never session churn", async () => {
     const control = new FakeControl();
     const { tracker, states } = makeTracker(control);

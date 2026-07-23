@@ -5,6 +5,7 @@ import {
   type MeetingWire,
   type ParticipantId,
   type Platform,
+  type RosterEntry,
   type SnapshotWire,
 } from "./protocol";
 
@@ -60,7 +61,8 @@ export interface MeetingControl {
  */
 type PendingPortEvent =
   | { kind: "joined"; platform: Platform; participantId: ParticipantId; displayName?: string }
-  | { kind: "stream"; platform: Platform; participantId: ParticipantId };
+  | { kind: "stream"; platform: Platform; participantId: ParticipantId }
+  | { kind: "roster"; platform: Platform; entries: RosterEntry[] };
 
 // Guard against unbounded growth if a port never declares a meeting (e.g. a
 // non-meeting tab that still opens a pcm port). Far above any real pre-declare
@@ -165,6 +167,24 @@ export class MeetingTracker {
     this.applyJoined(record, participantId, displayName);
   }
 
+  /**
+   * Resolved participant names from the platform roster (id → display name),
+   * independent of capture. Upserts each onto the daemon meeting's attendee
+   * roster so names land even for a participant whose track never correlated to
+   * this id — unlike participantJoined, a roster entry is identity only and does
+   * NOT enrol the id as a capture participant (it must not keep the meeting
+   * alive or gate its end). See issue #23.
+   */
+  rosterUpdate(portId: string, platform: Platform, entries: RosterEntry[]): void {
+    if (entries.length === 0) return;
+    const record = this.findRecord(portId, platform);
+    if (!record) {
+      this.enqueuePending(portId, { kind: "roster", platform, entries });
+      return;
+    }
+    this.applyRoster(record, entries);
+  }
+
   /** An ingest stream for this participant is confirmed open on earsd — link
    * the attendee to their per-participant source (which downstream feeds the
    * transcript's speaker-name map). */
@@ -193,6 +213,15 @@ export class MeetingTracker {
     });
   }
 
+  private applyRoster(record: MeetingRecord, entries: RosterEntry[]): void {
+    for (const entry of entries) {
+      if (!entry.displayName) continue; // never upsert an empty name (issue #23)
+      // Identity only — deliberately NOT added to record.participants, so a
+      // named-but-never-captured attendee can't keep the meeting from ending.
+      this.upsertAttendee(record, { id: entry.participantId, display_name: entry.displayName });
+    }
+  }
+
   private enqueuePending(portId: string, event: PendingPortEvent): void {
     const queue = this.pendingByPort.get(portId) ?? [];
     queue.push(event);
@@ -208,6 +237,7 @@ export class MeetingTracker {
     for (const event of queue) {
       if (event.platform !== record.platform) continue; // different platform on the same port — not this meeting
       if (event.kind === "joined") this.applyJoined(record, event.participantId, event.displayName);
+      else if (event.kind === "roster") this.applyRoster(record, event.entries);
       else this.applyStream(record, event.platform, event.participantId);
     }
   }

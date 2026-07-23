@@ -82,6 +82,13 @@ export function initCapture(config: CaptureConfig): void {
 
   setTrackSink(sink);
   cfg.adapter?.onIdentify?.(handleIdentityUpgrade);
+  // Forward roster names (id → display name) the adapter resolves to the daemon,
+  // decoupled from track capture, so a participant's name reaches meeting.toml
+  // even when the speaking-onset correlation never tied them to a track (#23).
+  cfg.adapter?.onRoster?.((entries) => {
+    if (!isCurrentEpoch(cfg.epoch) || entries.length === 0) return;
+    postToIsolated({ kind: "participant-roster", platform: cfg.platform, entries });
+  });
 
   // Catch-up: adopt tracks that were already live when this epoch loaded.
   for (const [track, rec] of liveTracks()) {
@@ -217,12 +224,15 @@ function teardownAll(): void {
   for (const track of [...pipelines.keys()]) stopPipeline(track);
 }
 
-/** Adopt any epoch-owned live track that lost (or never got) a pipeline. */
+/** Adopt any epoch-owned live track that lost (or never got) a pipeline, and
+ * re-harvest the participant roster so names for silent (never-speaking)
+ * participants still reach the daemon (#23). */
 function reconcile(): void {
   if (!isCurrentEpoch(cfg.epoch)) return;
   for (const [track, rec] of liveTracks()) {
     if (!pipelines.has(track)) sink(track, rec.stream, rec.transceiver);
   }
+  cfg.adapter?.pollIdentities?.();
 }
 
 /** Adapter identity, else a stable speaker-<n> so audio never blocks. */

@@ -340,6 +340,7 @@ public actor MeetingRegistry {
     meeting.state = .ended
     meeting.ended = now
 
+    logRosterSummary(meeting)
     let sessions = materializeSessions(for: meeting)
     try persist(meeting)
     appendEvent(meeting.id, event: "ended", at: now, reason: reason.rawValue)
@@ -459,6 +460,17 @@ public actor MeetingRegistry {
     if let source = attendee.source {
       _ = mergeSources([source], into: &meeting)
     }
+
+    // Trace every upsert so an empty `display_name`/`source` in meeting.toml is
+    // attributable to "never sent" (recv_* is `-` on every upsert for this id)
+    // vs "sent but not merged" (recv_* carried a value the stored field didn't
+    // pick up) — issue #23's debug-logging requirement.
+    log(
+      "meeting.attendee upsert: meeting=\(meeting.id) attendee=\(params.id) new=\(isNew) "
+        + "recv_display_name=\(logField(params.displayName)) "
+        + "recv_source=\(logField(params.source?.rawValue)) "
+        + "stored_display_name=\(logField(attendee.displayName)) "
+        + "stored_source=\(logField(attendee.source?.rawValue))")
 
     try persist(meeting)
     if isNew {
@@ -747,6 +759,34 @@ public actor MeetingRegistry {
     } catch {
       log("meeting \(meetingID): events.jsonl append failed: \(error)")
     }
+  }
+
+  /// Renders an optional string for a log line: the quoted value, or `-` for
+  /// nil/empty — so "field absent" and "field present" read distinctly.
+  private func logField(_ value: String?) -> String {
+    guard let value, !value.isEmpty else { return "-" }
+    return "\"\(value)\""
+  }
+
+  /// At meeting end, log which attendees resolved a name and a source and which
+  /// are still unresolved (name and/or source missing). This makes an
+  /// unresolved attendee an explicit, greppable fact rather than a silent empty
+  /// string in meeting.toml (issue #23's acceptance criterion + roster-summary
+  /// logging requirement).
+  private func logRosterSummary(_ meeting: Meeting) {
+    let withName = meeting.attendees.filter { !($0.displayName ?? "").isEmpty }.count
+    let withSource = meeting.attendees.filter { $0.source != nil }.count
+    let unresolved = meeting.attendees
+      .filter { ($0.displayName ?? "").isEmpty || $0.source == nil }
+      .map { attendee in
+        let hasName = !(attendee.displayName ?? "").isEmpty
+        let hasSource = attendee.source != nil
+        return "\(attendee.id)(name=\(hasName ? "yes" : "no"),source=\(hasSource ? "yes" : "no"))"
+      }
+    log(
+      "meeting.end roster summary: meeting=\(meeting.id) attendees=\(meeting.attendees.count) "
+        + "with_name=\(withName) with_source=\(withSource) "
+        + "unresolved=\(unresolved.isEmpty ? "-" : unresolved.joined(separator: ","))")
   }
 
   private static func defaultTitle(identity: MeetingIdentity?) -> String {
