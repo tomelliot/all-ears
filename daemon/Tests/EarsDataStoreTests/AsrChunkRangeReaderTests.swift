@@ -183,7 +183,7 @@ struct AsrChunkRangeReaderTests {
       if url.lastPathComponent.contains(poisonMarker) {
         throw ChunkReadTestError.poisoned
       }
-      return try MmapPCMChunkFileReader.make(url)
+      return try MmapPCMChunkFileReader.make(url: url)
     }
   }
 

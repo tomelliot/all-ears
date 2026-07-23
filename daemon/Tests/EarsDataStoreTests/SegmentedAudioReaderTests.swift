@@ -213,7 +213,7 @@ struct SegmentedAudioReaderTests {
         if url.lastPathComponent.contains("poison") {
           throw SegmentedReaderTestError.poisoned
         }
-        return try MmapPCMChunkFileReader.make(url)
+        return try MmapPCMChunkFileReader.make(url: url)
       })
 
     let report = try reader.read(source: "mic", range: range(0, 4))
