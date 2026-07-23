@@ -394,15 +394,20 @@ struct CLISmokeTests {
       named: "config.toml"
     )
 
-    let sourceDirectory = URL(fileURLWithPath: dataRootPath)
-      .appendingPathComponent("sources").appendingPathComponent("mic")
+    // Audio is meeting-scoped: the mic's directory lands under
+    // meetings/<id>/sources/mic, where <id> is minted by the daemon at
+    // `meeting start`. The exact id is recovered after the run by
+    // enumerating meetings/ (exactly one meeting exists in this test).
+    let meetingsDirectory = URL(fileURLWithPath: dataRootPath)
+      .appendingPathComponent("meetings")
 
     let run = try Self.withRunningDaemon(
       configPath: configPath,
       environment: ["ALLEARS_CAPTURE_BACKEND": "synthetic"]
     ) { socketPath -> Bool in
-      // A fresh, idle daemon has recorded nothing: no source directory exists.
-      let wroteNothingIdle = !FileManager.default.fileExists(atPath: sourceDirectory.path)
+      // A fresh, idle daemon has recorded nothing: no meeting directory (and
+      // so no source directory) exists.
+      let wroteNothingIdle = !FileManager.default.fileExists(atPath: meetingsDirectory.path)
 
       // Drive the meeting lifecycle over the real control socket via `ears`.
       // A manual meeting naming `mic` starts its capture; ending it stops and
@@ -422,6 +427,15 @@ struct CLISmokeTests {
     #expect(run.socketBecameReady)
     #expect(run.exitCode == 0)
     #expect(run.result, "expected an idle daemon to write nothing, then a meeting to start cleanly")
+
+    let meetingIDs =
+      (try? FileManager.default.contentsOfDirectory(atPath: meetingsDirectory.path)) ?? []
+    #expect(meetingIDs.count == 1, "expected exactly one meeting directory, got \(meetingIDs)")
+    let sourceDirectory =
+      meetingsDirectory
+      .appendingPathComponent(meetingIDs.first ?? "missing")
+      .appendingPathComponent("sources")
+      .appendingPathComponent("mic")
 
     let chunkFileNames =
       ((try? FileManager.default.contentsOfDirectory(

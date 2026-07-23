@@ -392,6 +392,13 @@ public actor MeetingRegistry {
     meetings.values.sorted { $0.started < $1.started }
   }
 
+  /// The live meeting id declared under `identity`, or `nil` when no live
+  /// meeting has it — how `EarsDaemon.openIngestSource` resolves an ingest
+  /// stream's membership tag to the meeting directory its audio lands in.
+  public func meetingID(for identity: MeetingIdentity) -> String? {
+    byIdentity[identity]
+  }
+
   /// `meeting.get`: a live/recent meeting, or (falling back) one read from
   /// disk.
   public func get(id: String) throws -> Meeting {

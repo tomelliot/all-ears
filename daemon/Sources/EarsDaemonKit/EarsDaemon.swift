@@ -239,12 +239,18 @@ public actor EarsDaemon {
   private var ingestWebSocketServer: IngestWebSocketServer?
   private var ingestServerRunTask: Task<Void, Never>?
 
-  /// Thrown by ``openIngestSource(label:format:)`` for a `source` that isn't
-  /// a `browser:*` id — guards against a WebSocket client naming an
-  /// existing config-declared source (e.g. `mic`) and hijacking its
-  /// `CaptureActor`.
+  /// Thrown by ``openIngestSource(label:format:meeting:)``.
   public enum IngestError: Error, Sendable {
+    /// The `source` isn't a `browser:*` id — guards against a WebSocket
+    /// client naming an existing config-declared source (e.g. `mic`) and
+    /// hijacking its `CaptureActor`.
     case notABrowserSource(SourceID)
+    /// The open carried no meeting tag, or its identity resolves to no live
+    /// meeting (the `ingest.open` raced ahead of `meeting.start`). Audio is
+    /// meeting-scoped, so with no meeting there is nowhere to put it; the
+    /// extension sends `meeting.start` before `ingest.open`, so a live client
+    /// simply retries.
+    case noMeetingForIngest(SourceID)
   }
 
   /// Records `configuration` and boots **idle**: no `CaptureActor` is built,
@@ -300,33 +306,41 @@ public actor EarsDaemon {
 
   /// Builds one source's `CaptureActor` — and its `ChunkEncoder`/
   /// `IndexAppender`/on-disk directory/`meta.toml` — from `descriptor`. The
-  /// construction logic every config-declared source goes through at
-  /// `init()`, and the same logic ``openIngestSource(label:format:)`` uses
-  /// to build a `browser:<label>` source the first time it's ever seen.
+  /// construction logic every config-declared source goes through when a
+  /// meeting starts it, and the same logic
+  /// ``openIngestSource(label:format:meeting:)`` uses to build a
+  /// `browser:<label>` source the first time it's ever seen.
+  ///
+  /// `dataRoot` is the *meeting's* directory
+  /// (`DataStoreLayout.meetingDirectory`), not the global data root: audio is
+  /// meeting-scoped, so every path this method derives lands under
+  /// `meetings/<id>/sources/<source>/`. `configuration` supplies only the
+  /// non-path capture parameters (chunk seconds, VAD).
   private static func buildCaptureActor(
     for descriptor: SourceDescriptor,
     configuration: EarsDaemonConfiguration,
+    dataRoot: URL,
     backend: any CaptureBackend,
     clock: any NowProviding,
     eventSink: EventSink?,
     logSink: any LogRecordSink
   ) throws -> CaptureActor {
     let sourceDirectory = DataStoreLayout.sourceDirectory(
-      dataRoot: configuration.dataRoot, sourceID: descriptor.id)
+      dataRoot: dataRoot, sourceID: descriptor.id)
     try FileManager.default.createDirectory(
       at: sourceDirectory, withIntermediateDirectories: true)
 
-    try writeSourceMeta(descriptor, dataRoot: configuration.dataRoot)
+    try writeSourceMeta(descriptor, dataRoot: dataRoot)
 
     let indexAppender = IndexAppender(
       fileURL: DataStoreLayout.structuralIndexFile(
-        dataRoot: configuration.dataRoot, sourceID: descriptor.id))
+        dataRoot: dataRoot, sourceID: descriptor.id))
     let vadWriter = VADSegmentWriter(
       directory: DataStoreLayout.vadDirectory(
-        dataRoot: configuration.dataRoot, sourceID: descriptor.id))
+        dataRoot: dataRoot, sourceID: descriptor.id))
     let encoder = try ChunkEncoder(
       sourceID: descriptor.id,
-      dataRoot: configuration.dataRoot,
+      dataRoot: dataRoot,
       codec: descriptor.codec,
       bitrate: descriptor.bitrate,
       nativeSampleRate: descriptor.nativeSampleRate,
@@ -338,7 +352,7 @@ public actor EarsDaemon {
 
     return CaptureActor(
       descriptor: descriptor,
-      dataRoot: configuration.dataRoot,
+      dataRoot: dataRoot,
       backend: backend,
       encoder: encoder,
       indexAppender: indexAppender,
@@ -736,6 +750,17 @@ public actor EarsDaemon {
       throw IngestError.notABrowserSource(label)
     }
 
+    // Audio is meeting-scoped: the open's identity tag names which meeting
+    // directory this source's audio lands in. No tag, or a tag whose
+    // meeting.start hasn't arrived yet, is rejected — the extension opens
+    // ingest only after meeting.start, so a live client retries.
+    guard let identity = meeting,
+      let meetingID = await meetingRegistry?.meetingID(for: identity)
+    else {
+      log("ingest.open '\(label.rawValue)' rejected: no live meeting for its identity tag")
+      throw IngestError.noMeetingForIngest(label)
+    }
+
     let actor: CaptureActor
     if let existing = captureActors[label] {
       actor = existing
@@ -758,6 +783,8 @@ public actor EarsDaemon {
       let built = try Self.buildCaptureActor(
         for: descriptor,
         configuration: configuration,
+        dataRoot: DataStoreLayout.meetingDirectory(
+          dataRoot: configuration.dataRoot, meetingID: meetingID),
         backend: backend,
         clock: clock,
         eventSink: { [eventBus] event in await eventBus.publish(event) },
@@ -842,7 +869,7 @@ public actor EarsDaemon {
       let wasIdle = (captureMeetingRefs[id]?.isEmpty ?? true)
       captureMeetingRefs[id, default: []].insert(meetingID)
       guard wasIdle else { continue }
-      await ensureCaptureStarted(descriptor)
+      await ensureCaptureStarted(descriptor, meetingID: meetingID)
     }
   }
 
@@ -862,18 +889,29 @@ public actor EarsDaemon {
 
   /// Builds (if needed) and starts a config source's `CaptureActor`, registering
   /// a freshly-built one into the control server so `status`/`sources.list` see
-  /// it. A build failure disables just that source (logged), and a backend
-  /// `start()` failure leaves it in `.error` — never taking down the meeting or
-  /// the daemon, mirroring the old per-source startup isolation.
-  private func ensureCaptureStarted(_ descriptor: SourceDescriptor) async {
+  /// it. The actor is built against `meetingID`'s directory, so its audio lands
+  /// under `meetings/<id>/sources/`. A build failure disables just that source
+  /// (logged), and a backend `start()` failure leaves it in `.error` — never
+  /// taking down the meeting or the daemon, mirroring the old per-source
+  /// startup isolation.
+  ///
+  /// Accepted limitation: two *concurrent* meetings sharing a config source
+  /// reuse the first meeting's actor (actors are keyed by source id), so the
+  /// second meeting's audio lands in the first's directory. Sequential
+  /// meetings are unaffected — each builds a fresh actor against its own
+  /// directory, because the prior meeting's teardown removed the shared one.
+  private func ensureCaptureStarted(_ descriptor: SourceDescriptor, meetingID: String) async {
     let actor: CaptureActor
     if let existing = captureActors[descriptor.id] {
       actor = existing
     } else {
+      let meetingRoot = DataStoreLayout.meetingDirectory(
+        dataRoot: configuration.dataRoot, meetingID: meetingID)
       do {
         actor = try Self.buildCaptureActor(
           for: descriptor,
           configuration: configuration,
+          dataRoot: meetingRoot,
           backend: backendFactory(descriptor),
           clock: clock,
           eventSink: { [eventBus] event in await eventBus.publish(event) },
