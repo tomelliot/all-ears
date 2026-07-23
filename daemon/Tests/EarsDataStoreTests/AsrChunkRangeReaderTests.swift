@@ -172,6 +172,53 @@ struct AsrChunkRangeReaderTests {
     return (sumSquares / Float(samples.count)).squareRoot()
   }
 
+  // MARK: - Unreadable-chunk degradation (all-ears issue #26)
+
+  /// Wraps ``MmapPCMChunkFileReader`` but throws for any file whose basename
+  /// contains `poisonMarker` — modelling a chunk an `ExtAudioFileOpenURL` would
+  /// refuse (a Bluetooth-rate-switch-poisoned m4a) without needing a real
+  /// corrupt codec container.
+  private func poisoningReaderFactory(poisonMarker: String) -> ChunkFileReaderFactory {
+    { url in
+      if url.lastPathComponent.contains(poisonMarker) {
+        throw ChunkReadTestError.poisoned
+      }
+      return try MmapPCMChunkFileReader.make(url: url)
+    }
+  }
+
+  @Test("an unreadable chunk is skipped and reported, and the surrounding audio still reads")
+  func unreadableChunkDegradesToItsOwnSpan() throws {
+    let dataRoot = try makeDataRoot()
+    // Three abutting chunks; the middle one is poisoned. before/after ramps
+    // start fresh at 0 so the stitch is provably ordered and gap-free-across
+    // -the-hole.
+    try writeAsrChunk(dataRoot: dataRoot, filename: "before.pcm", sampleCount: 20)
+    try writeAsrChunk(dataRoot: dataRoot, filename: "poison-mid.pcm", sampleCount: 20)
+    try writeAsrChunk(dataRoot: dataRoot, filename: "after.pcm", sampleCount: 20)
+    let chunks = [
+      IndexedChunk(range: range(0, 2), file: "asr/before.pcm", frames: 20),
+      IndexedChunk(range: range(2, 4), file: "asr/poison-mid.pcm", frames: 20),
+      IndexedChunk(range: range(4, 6), file: "asr/after.pcm", frames: 20),
+    ]
+    let reader = AsrChunkRangeReader(
+      dataRoot: dataRoot, sourceID: "mic", asrSampleRate: sampleRate,
+      readerFactory: poisoningReaderFactory(poisonMarker: "poison"))
+
+    let result = try reader.readReporting(range(0, 6), chunks: chunks)
+
+    // The poisoned chunk contributes nothing; before + after still stitch, in
+    // order, with only the middle span missing.
+    #expect(result.audio.samples == (0..<20).map { Float($0) } + (0..<20).map { Float($0) })
+    let expected = [AsrChunkRangeReader.UnreadableChunk(file: "poison-mid.pcm", error: "poisoned")]
+    #expect(result.unreadableChunks == expected)
+
+    // The non-reporting entry point returns the same surviving audio and does
+    // NOT throw — one corrupt chunk no longer aborts the whole read.
+    let audio = try reader.read(range(0, 6), chunks: chunks)
+    #expect(audio.samples == result.audio.samples)
+  }
+
   @Test(
     "a chunk whose actual on-disk frame count is shorter than its nominal duration clamps rather than throwing"
   )
@@ -187,4 +234,8 @@ struct AsrChunkRangeReaderTests {
 
     #expect(audio.samples == (10..<15).map { Float($0) })
   }
+}
+
+private enum ChunkReadTestError: Error {
+  case poisoned
 }

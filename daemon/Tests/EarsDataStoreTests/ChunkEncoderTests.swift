@@ -1,5 +1,8 @@
 import EarsCore
+import EarsCoreTestSupport
+import EarsLogging
 import Foundation
+import Synchronization
 import Testing
 
 @testable import EarsDataStore
@@ -69,7 +72,9 @@ struct ChunkEncoderTests {
     storeNative: Bool = true,
     chunkSeconds: Double = 1.0,
     startInstant: Instant = Instant(secondsSinceEpoch: 1_000),
-    chunkFileWriterFactory: ChunkFileWriterFactory? = nil
+    chunkFileWriterFactory: ChunkFileWriterFactory? = nil,
+    chunkFileReaderFactory: ChunkFileReaderFactory? = nil,
+    logSink: any LogRecordSink = NoOpLogRecordSink()
   ) throws -> (ChunkEncoder, IndexAppender) {
     let indexAppender = IndexAppender(
       fileURL: DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: "mic"))
@@ -84,7 +89,10 @@ struct ChunkEncoderTests {
       chunkSeconds: chunkSeconds,
       startInstant: startInstant,
       indexAppender: indexAppender,
-      chunkFileWriterFactory: chunkFileWriterFactory ?? AVFoundationChunkFileWriter.make
+      chunkFileWriterFactory: chunkFileWriterFactory ?? AVFoundationChunkFileWriter.make,
+      chunkFileReaderFactory: chunkFileReaderFactory ?? AVFoundationChunkFileReader.make,
+      clock: ManualClock(startInstant),
+      logSink: logSink
     )
     return (encoder, indexAppender)
   }
@@ -318,4 +326,87 @@ struct ChunkEncoderTests {
     let parsed = IndexLog.parse(contents)
     #expect(parsed.events.count == 1)  // only the truncated chunk from the failure so far
   }
+
+  // MARK: - Post-write validity check (all-ears issue #26)
+
+  @Test("finalizing a chunk logs capture.chunk_finalized with a passing open check")
+  func finalizeLogsPassingOpenCheck() async throws {
+    let dataRoot = try makeDataRoot()
+    let start = Instant(secondsSinceEpoch: 1_000)
+    let logger = RecordingLogRecordSink()
+    // The real AAC writer + real decoder: a healthy chunk opens cleanly, so the
+    // post-write check passes and the finalization is logged at debug.
+    let (encoder, _) = try makeEncoder(
+      dataRoot: dataRoot, chunkSeconds: 1.0, startInstant: start, logSink: logger)
+
+    try await encoder.append(makeBuffer(seconds: 0.5, sampleRate: nativeRate))
+    try await encoder.append(makeBuffer(seconds: 0.5, sampleRate: nativeRate))
+
+    let finalized = try #require(
+      logger.recorded.first(where: { $0.event == "capture.chunk_finalized" }))
+    #expect(finalized.level == .debug)
+    #expect(finalized.fields.contains(LogField("source", .string("mic"))))
+    #expect(finalized.fields.contains(LogField("open_check", .string("ok"))))
+    #expect(finalized.fields.contains(LogField("declared_sample_rate", .int(asrRate))))
+    // The check decoded a real, non-empty ASR file (exact count is codec
+    // -priming dependent, so this is a floor, not equality).
+    let decoded = try #require(
+      finalized.fields.first(where: { $0.key == "decoded_frames" }))
+    guard case .int(let decodedFrames) = decoded.value else {
+      Issue.record("expected an int decoded_frames field")
+      return
+    }
+    #expect(decodedFrames > 0)
+    // No error field on the happy path.
+    #expect(!finalized.fields.contains { $0.key == "error" })
+  }
+
+  @Test("a finalized chunk that won't open is flagged loudly at write time")
+  func finalizeFlagsUnreadableChunk() async throws {
+    let dataRoot = try makeDataRoot()
+    let start = Instant(secondsSinceEpoch: 1_000)
+    let logger = RecordingLogRecordSink()
+    // The write succeeds (real AAC writer) but the post-write open check is
+    // forced to fail — modelling a chunk that lands on disk yet later refuses
+    // ExtAudioFileOpenURL. The finalization log must surface it as an error at
+    // write time, not leave it to poison a transcribe run silently.
+    let failingReader: ChunkFileReaderFactory = { _ in
+      throw ChunkEncoderTestError.unreadable
+    }
+    let (encoder, appender) = try makeEncoder(
+      dataRoot: dataRoot, chunkSeconds: 1.0, startInstant: start,
+      chunkFileReaderFactory: failingReader, logSink: logger)
+
+    try await encoder.append(makeBuffer(seconds: 0.5, sampleRate: nativeRate))
+    try await encoder.append(makeBuffer(seconds: 0.5, sampleRate: nativeRate))
+
+    let finalized = try #require(
+      logger.recorded.first(where: { $0.event == "capture.chunk_finalized" }))
+    #expect(finalized.level == .error)
+    #expect(finalized.fields.contains(LogField("open_check", .string("failed"))))
+    #expect(finalized.fields.contains { $0.key == "error" })
+    #expect(finalized.fields.contains(LogField("decoded_frames", .int(0))))
+
+    // The chunk is still indexed — the write itself succeeded; only the
+    // validity check failed, and that is what the log records.
+    let parsed = IndexLog.parse(try await appender.readContents())
+    #expect(parsed.events.count == 1)
+  }
+}
+
+private enum ChunkEncoderTestError: Error {
+  case unreadable
+}
+
+/// A ``LogRecordSink`` that captures every record so the encoder's post-write
+/// validity logging can be asserted on. Mirrors the daemon-kit test sink; kept
+/// local to this target to avoid a shared-test-support dependency.
+private final class RecordingLogRecordSink: LogRecordSink, @unchecked Sendable {
+  private let records = Mutex<[LogRecord]>([])
+
+  func log(_ record: LogRecord) async throws {
+    records.withLock { $0.append(record) }
+  }
+
+  var recorded: [LogRecord] { records.withLock { $0 } }
 }

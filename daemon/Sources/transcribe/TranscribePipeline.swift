@@ -270,6 +270,17 @@ enum TranscribePipeline {
             slices.append(contentsOf: report.slices)
             chunksInRange += report.chunksInRange
             speechIntervals += report.speechIntervals
+            // A chunk that wouldn't open/decode (e.g. a Bluetooth-rate-switch
+            // -poisoned m4a `ExtAudioFileOpenURL` refuses) is skipped by the
+            // reader and reported here, per-chunk, so it degrades only its own
+            // span — the run continues and the surrounding audio still
+            // transcribes, instead of one opaque stderr line aborting six
+            // meetings (all-ears issue #26).
+            for unreadable in report.unreadableChunks {
+              dependencies.log(
+                "chunk.unreadable: source=\(sourceID.rawValue) file=\(unreadable.file) "
+                  + "error=\(unreadable.error)")
+            }
           } catch {
             dependencies.writeStderr(
               "error: failed to read audio for source '\(sourceID.rawValue)': \(error)")

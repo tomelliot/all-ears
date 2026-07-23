@@ -194,6 +194,41 @@ struct SegmentedAudioReaderTests {
     #expect(emptyReport.speechIntervals == 0)
   }
 
+  @Test("an unreadable chunk is surfaced in the report and skipped, not thrown (issue #26)")
+  func unreadableChunkSurfacedInReport() async throws {
+    // One continuous speech span across two chunks; the second chunk is
+    // poisoned. The read must still produce the first chunk's audio and report
+    // the poisoned one, rather than aborting the whole source's read.
+    let fixture = try await makeFixture(
+      chunks: [
+        ("good.pcm", 0, 2, 20),
+        ("poison.pcm", 2, 4, 20),
+      ],
+      vadSpans: [(.speech, 0.5, 3.5)])
+
+    let reader = SegmentedAudioReader(
+      dataRoot: fixture.dataRoot,
+      segmentationOptions: SegmentationOptions(maxPauseSeconds: 1.5, preRollSeconds: 0.3),
+      readerFactory: { url in
+        if url.lastPathComponent.contains("poison") {
+          throw SegmentedReaderTestError.poisoned
+        }
+        return try MmapPCMChunkFileReader.make(url: url)
+      })
+
+    let report = try reader.read(source: "mic", range: range(0, 4))
+
+    // The poisoned chunk is reported once, by basename, and does not throw.
+    let expected = [AsrChunkRangeReader.UnreadableChunk(file: "poison.pcm", error: "poisoned")]
+    #expect(report.unreadableChunks == expected)
+    // The good chunk's audio still made it into the slice (pre-roll clamps the
+    // start to frame 2 of the first chunk); the poisoned tail is simply absent.
+    #expect(report.slices.count == 1)
+    #expect(report.slices[0].audio.samples == (2..<20).map { Float($0) })
+    // Counts still reflect what the index says is on record.
+    #expect(report.chunksInRange == 2)
+  }
+
   @Test("probe reports counts without decoding, and a missing source as sourceExists == false")
   func probeReportsPresenceAndCounts() async throws {
     let fixture = try await makeFixture(
@@ -214,4 +249,8 @@ struct SegmentedAudioReaderTests {
     #expect(absent.chunksInRange == 0)
     #expect(absent.speechIntervals == 0)
   }
+}
+
+private enum SegmentedReaderTestError: Error {
+  case poisoned
 }

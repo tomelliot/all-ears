@@ -378,6 +378,32 @@ public actor CaptureActor {
     let buffer: AudioBuffer
     if let normalizer {
       if raw.sampleRate != lastInputRate {
+        // A device rate switch mid-recording (AirPods engaging HFP at 16 kHz
+        // mid-call is the canonical case) is made an *explicit chunk boundary*:
+        // finalize the chunk still accumulating at the old rate before the new
+        // rate's audio starts, so every chunk file is single-rate end to end
+        // and the AdaptiveResampler rebuilds its converter on the next
+        // normalize(). Previously the transition was written silently into the
+        // same chunk, producing an m4a `ExtAudioFileOpenURL` later refused to
+        // open — poisoning a whole meeting's window (all-ears issue #26). The
+        // action taken is logged (the old silent behaviour was the bug's hiding
+        // place); the very first buffer only establishes the baseline rate and
+        // has no prior chunk to finalize.
+        var action = "baseline"
+        if lastInputRate != nil {
+          let before = await encoder.currentChunkStart
+          try? await encoder.flush()
+          await trackRollover(previousChunkStart: before)
+          let after = await encoder.currentChunkStart
+          if after != before {
+            // Re-anchor the VAD playhead to the fresh chunk so post-flip spans
+            // land on the encoder's timeline, exactly as a rollover does.
+            playhead = after
+            action = "chunk_finalized"
+          } else {
+            action = "converter_rebuilt"
+          }
+        }
         await logEvent(
           "capture.input_rate_changed", level: .notice,
           fields: [
@@ -385,6 +411,7 @@ public actor CaptureActor {
             LogField("from", .int(lastInputRate ?? 0)),
             LogField("to", .int(raw.sampleRate)),
             LogField("target", .int(normalizer.targetSampleRate)),
+            LogField("action", .string(action)),
           ])
         lastInputRate = raw.sampleRate
       }
