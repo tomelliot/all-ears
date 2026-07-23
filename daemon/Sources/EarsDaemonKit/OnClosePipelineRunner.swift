@@ -259,7 +259,9 @@ private final class StderrCollector: Sendable {
       s.waiter = nil
       return (waiter, String(decoding: s.data, as: UTF8.self))
     }
-    resumption?.0.resume(returning: resumption.1)
+    if let resumption {
+      resumption.0.resume(returning: resumption.1)
+    }
   }
 
   /// The full captured stderr, awaiting EOF if it has not arrived yet.
