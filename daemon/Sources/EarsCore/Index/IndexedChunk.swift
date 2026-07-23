@@ -2,8 +2,8 @@
 /// event's payload lifted into its own type.
 ///
 /// Separate from `IndexEvent.chunk`'s associated values so that reconstruction
-/// (``RangeReconstructor``) and eviction (``RingBufferEviction``) have a clean,
-/// self-contained type to hand callers instead of an enum case.
+/// (``RangeReconstructor``) has a clean, self-contained type to hand callers
+/// instead of an enum case.
 public struct IndexedChunk: Sendable, Hashable {
   /// The chunk's wall-clock coverage, `[range.start, range.end)`.
   public var range: TimeRange

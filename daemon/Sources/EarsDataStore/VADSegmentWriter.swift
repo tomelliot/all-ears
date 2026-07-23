@@ -4,15 +4,13 @@ import Foundation
 /// Appends `vad` events to a source's segmented VAD stream under `vad/`, per
 /// `docs/data-formats.md`'s "The index": the high-volume speech/silence spans
 /// live apart from the small structural log (`chunks.jsonl`) so a daemon
-/// restart never parses them, and they age out by whole-segment `unlink`
-/// (``VADSegmentStore/evict(directory:olderThan:)``) rather than by rewriting a
-/// growing file.
+/// restart never parses them.
 ///
 /// A new segment opens when the current one crosses either bound — a byte cap
 /// (so any single segment's parse cost is bounded regardless of speech density)
-/// or a wall-clock span (so eviction granularity tracks the time cap). Segments
-/// are append-only and named by their first event's start, so nothing that
-/// tails them (``VADSegmentTailReader``) is ever invalidated by a rewrite.
+/// or a wall-clock span. Segments are append-only and named by their first
+/// event's start, so nothing that tails them (``VADSegmentTailReader``) is
+/// ever invalidated by a rewrite.
 ///
 /// An `actor`, mirroring ``IndexAppender``: one writer per source serialises the
 /// segment-rollover decision against the appends it guards.

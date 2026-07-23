@@ -6,8 +6,7 @@ import Foundation
 ///
 /// Segments are append-only files named by their first event's start
 /// (``FilenameTimestampCodec``), so their filenames alone order them in time and
-/// bound which ones a query or an eviction must touch — no segment body is read
-/// to decide either.
+/// bound which ones a query must touch — no segment body is read to decide.
 public enum VADSegmentStore {
   /// The source's VAD segments, oldest-first, each paired with the start parsed
   /// from its filename. Non-`.jsonl` entries and unparseable names are skipped.
@@ -53,34 +52,4 @@ public enum VADSegmentStore {
     return events
   }
 
-  /// The latest `end` across the newest segment — the VAD stream's contribution
-  /// to startup gap detection. Reads only the newest segment (its events are the
-  /// most recent), returning `nil` when there are none.
-  public static func lastKnownEnd(directory: URL) -> Instant? {
-    guard let newest = segmentURLs(directory: directory).last,
-      let contents = try? String(contentsOf: newest.url, encoding: .utf8)
-    else { return nil }
-    return IndexLog.parse(contents).events.compactMap {
-      if case .vad(_, _, let end) = $0 { return end }
-      return nil
-    }.max()
-  }
-
-  /// Deletes whole segments that lie entirely before `cutoff`, returning the
-  /// removed URLs. A segment is fully aged out when the *next* segment already
-  /// starts at/before `cutoff` (so every event in it predates the cutoff); the
-  /// newest segment is never evicted (it is the one still being appended). This
-  /// keeps eviction a filename-only `unlink`, never a body read or rewrite.
-  @discardableResult
-  public static func evict(directory: URL, olderThan cutoff: Instant) throws -> [URL] {
-    let segments = segmentURLs(directory: directory)
-    guard segments.count > 1 else { return [] }
-
-    var removed: [URL] = []
-    for i in 0..<(segments.count - 1) where segments[i + 1].start <= cutoff {
-      try FileManager.default.removeItem(at: segments[i].url)
-      removed.append(segments[i].url)
-    }
-    return removed
-  }
 }
