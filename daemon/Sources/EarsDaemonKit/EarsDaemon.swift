@@ -397,10 +397,17 @@ public actor EarsDaemon {
     let onMeetingEnded: MeetingRegistry.EndedHook?
     if configuration.triggers.transcribeOnBrowserSessionClose {
       let pipeline = OnClosePipelineRunner(outputRoot: configuration.outputRoot, log: log)
-      onMeetingEnded = { meeting, _ in
+      onMeetingEnded = { [weak self] meeting, _ in
         guard meeting.trigger == .browserExtension else { return }
-        Task {
-          await pipeline.runMeetingTranscribe(meetingID: meeting.id, context: "meeting-end")
+        // Spawned in its own task so `meeting.end` never blocks behind a full
+        // transcription run. On success, stamp the transcript-completion marker
+        // — which starts this meeting's retention clock.
+        Task { [weak self] in
+          let succeeded = await pipeline.runMeetingTranscribe(
+            meetingID: meeting.id, context: "meeting-end")
+          if succeeded {
+            await self?.markMeetingTranscriptCompleted(meeting.id)
+          }
         }
       }
     } else {
@@ -886,6 +893,13 @@ public actor EarsDaemon {
     await actor.stop()
     captureActors[id] = nil
     await controlServer?.unregisterDynamicSource(id: id)
+  }
+
+  /// Stamps a meeting's transcript-completion marker through the registry —
+  /// invoked by the meeting-end auto-transcribe hook after a successful run, so
+  /// the retention sweeper can start that meeting's eviction clock.
+  private func markMeetingTranscriptCompleted(_ id: String) async {
+    await meetingRegistry?.markTranscriptCompleted(id: id, at: clock.now())
   }
 
   /// Every source's current status, keyed by id — a test-only seam so an

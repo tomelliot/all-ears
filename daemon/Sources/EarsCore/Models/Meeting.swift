@@ -35,6 +35,13 @@ public struct Meeting: Sendable, Hashable {
   public var sources: [SourceID]
   /// Provenance, preserved onto every materialized session.
   public var trigger: TriggerKind
+  /// When this meeting's transcript last completed **successfully** — the
+  /// durable marker retention keys off (`docs/specs/capture-daemon.md`'s
+  /// "Retention"). `nil` until a transcript run succeeds; once set, the
+  /// meeting's audio is evicted `evict_after_transcript_seconds` later. A
+  /// meeting whose transcript never succeeds keeps this `nil` and its audio is
+  /// instead retained until `max_audio_age_seconds` after it ended.
+  public var transcriptCompleted: Instant?
   /// The last state revision that touched this meeting. Boot-scoped (see
   /// `hello`'s `boot_id`), so never persisted to `meeting.toml`.
   public var rev: Int
@@ -50,6 +57,7 @@ public struct Meeting: Sendable, Hashable {
     attendees: [MeetingAttendee] = [],
     sources: [SourceID] = [],
     trigger: TriggerKind = .manual,
+    transcriptCompleted: Instant? = nil,
     rev: Int = 0
   ) {
     self.id = id
@@ -62,6 +70,7 @@ public struct Meeting: Sendable, Hashable {
     self.attendees = attendees
     self.sources = sources
     self.trigger = trigger
+    self.transcriptCompleted = transcriptCompleted
     self.rev = rev
   }
 
@@ -142,6 +151,7 @@ public struct MeetingAttendee: Sendable, Hashable {
 extension Meeting: Codable {
   private enum CodingKeys: String, CodingKey {
     case id, identity, title, state, started, ended, intervals, attendees, sources, trigger, rev
+    case transcriptCompleted = "transcript_completed"
   }
 
   public init(from decoder: any Decoder) throws {
@@ -156,6 +166,7 @@ extension Meeting: Codable {
     attendees = try container.decodeIfPresent([MeetingAttendee].self, forKey: .attendees) ?? []
     sources = try container.decodeIfPresent([SourceID].self, forKey: .sources) ?? []
     trigger = try container.decode(TriggerKind.self, forKey: .trigger)
+    transcriptCompleted = try container.decodeISO8601InstantIfPresent(forKey: .transcriptCompleted)
     rev = try container.decodeIfPresent(Int.self, forKey: .rev) ?? 0
   }
 
@@ -171,6 +182,7 @@ extension Meeting: Codable {
     try container.encode(attendees, forKey: .attendees)
     try container.encode(sources, forKey: .sources)
     try container.encode(trigger, forKey: .trigger)
+    try container.encodeISO8601InstantIfPresent(transcriptCompleted, forKey: .transcriptCompleted)
     try container.encode(rev, forKey: .rev)
   }
 }

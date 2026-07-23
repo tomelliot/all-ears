@@ -60,13 +60,19 @@ public struct OnClosePipelineRunner: Sendable {
   /// `docs/specs/control-protocol.md`'s "Transcription output").
   /// Only the transcribe stage runs at meeting level today; `cleanup`/
   /// `summarize` chains stay session-path-based.
-  public func runMeetingTranscribe(meetingID: String, context: String) async {
+  ///
+  /// - Returns: `true` iff `transcribe --meeting` exited 0 — the signal the
+  ///   caller uses to stamp the meeting's transcript-completion marker (which
+  ///   in turn starts the retention clock).
+  @discardableResult
+  public func runMeetingTranscribe(meetingID: String, context: String) async -> Bool {
     let exitCode = await runProcess("transcribe", ["--meeting", meetingID])
     if exitCode == 0 {
       log("\(context) on_end: transcribe succeeded for meeting '\(meetingID)'")
-    } else {
-      log("\(context) on_end: transcribe failed (exit \(exitCode)) for meeting '\(meetingID)'")
+      return true
     }
+    log("\(context) on_end: transcribe failed (exit \(exitCode)) for meeting '\(meetingID)'")
+    return false
   }
 
   /// Builds each stage's argv. `transcribe` resolves the session directly;

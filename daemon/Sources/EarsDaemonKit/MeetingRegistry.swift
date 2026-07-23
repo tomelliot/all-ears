@@ -277,6 +277,21 @@ public actor MeetingRegistry {
     return meeting
   }
 
+  /// Records that this meeting's transcript completed **successfully** at
+  /// `at` — the durable marker the retention sweeper keys off. Idempotent; a
+  /// later successful re-transcription moves the marker forward. A no-op for an
+  /// unknown meeting (nothing to mark).
+  public func markTranscriptCompleted(id: String, at: Instant) {
+    guard var meeting = knownMeeting(id) else { return }
+    meeting.transcriptCompleted = at
+    do {
+      try persist(meeting)
+    } catch {
+      log("meeting \(id): persisting transcript-completed marker failed: \(error)")
+    }
+    meetings[meeting.id] = meeting
+  }
+
   /// `meeting.pause`: closes the open interval. No-op success if already
   /// paused; `meeting_ended` if the meeting is over.
   public func pause(id: String) async throws -> Meeting {
