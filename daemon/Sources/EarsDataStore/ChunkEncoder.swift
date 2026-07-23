@@ -270,7 +270,7 @@ public actor ChunkEncoder {
       // transcribe abort (all-ears issue #26).
       await logChunkFinalized(
         file: asrFinalURL,
-        declaredSampleRate: asrSettings.sampleRate,
+        declaredSampleRate: Int(asrSettings.sampleRate),
         indexedFrames: canonicalFrames)
     }
 
