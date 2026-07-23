@@ -55,6 +55,22 @@ struct EarsDaemonTests {
       sampleRate: nativeRate)
   }
 
+  /// Every on-disk chunk file (native `chunks/` + ASR `asr/`) for a source under
+  /// a specific meeting's directory — the assertion that a source's audio landed
+  /// in the meeting it belongs to, not another's tree (#19).
+  private func chunkFiles(dataRoot: URL, meetingID: String, source: SourceID) -> [String] {
+    let sourceDir = DataStoreLayout.sourceDirectory(
+      dataRoot: DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: meetingID),
+      sourceID: source)
+    let chunks =
+      (try? FileManager.default.contentsOfDirectory(
+        atPath: sourceDir.appendingPathComponent("chunks").path)) ?? []
+    let asr =
+      (try? FileManager.default.contentsOfDirectory(
+        atPath: sourceDir.appendingPathComponent("asr").path)) ?? []
+    return chunks + asr
+  }
+
   private struct StartFailure: Error {}
 
   /// A ``CaptureBackend`` whose `start()` always throws, standing in for a
@@ -713,6 +729,121 @@ struct EarsDaemonTests {
         meeting: MeetingIdentity(platform: "meet", externalID: "never-started"))
     }
 
+    await daemon.stop()
+  }
+
+  // MARK: - single active meeting invariant (#19 / #27)
+
+  @Test(
+    "a browser slot label reused under a superseding meeting rebuilds against the new meeting's directory"
+  )
+  func ingestRebuildsAgainstNewMeetingOnMismatch() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_000))
+    let logRecorder = RecordingLogRecordSink()
+
+    let configuration = EarsDaemonConfiguration(
+      sources: [],
+      dataRoot: dataRoot,
+      socketPath: tempSocketPath(),
+      // Keep meeting-end from spawning a real transcribe subprocess when the
+      // first meeting is superseded — this test is about capture directories.
+      triggers: TriggersConfiguration(transcribeOnBrowserSessionClose: false))
+
+    let daemon = try EarsDaemon(
+      configuration: configuration,
+      backendFactory: { descriptor in SyntheticCaptureBackend(source: descriptor.id, buffers: []) },
+      clock: clock,
+      logSink: logRecorder)
+    try await daemon.start()
+
+    let label: SourceID = "browser:meet:speaker-1"
+    let format = AudioFormatSpec(sampleRate: 16000, channels: 1, encoding: "pcm_s16le")
+    let samples = [Float](repeating: 0.25, count: 16000)  // 1 s @ 16 kHz
+
+    // Meeting A: opens the slot label, streams, then the tab drops (ingest close)
+    // WITHOUT a meeting.end — the exact shape that left a browser actor pointing
+    // at A's tree in the incident.
+    let a = try await daemon.startMeetingForTesting(
+      MeetingStartParams(
+        platform: "meet", externalID: "aaa", sources: [], trigger: .browserExtension))
+    let streamA = try await daemon.openIngestSource(
+      label: label, format: format, meeting: MeetingIdentity(platform: "meet", externalID: "aaa"))
+    await daemon.pushIngestAudio(streamID: streamA, samples: samples, sampleRate: 16000)
+    await daemon.closeIngestSource(streamID: streamA)
+
+    // Meeting B starts — superseding A under the single-active invariant — and
+    // rejoins the SAME slot label. The label-only reuse would have written B's
+    // audio into A's directory (#19 manifestation B); the (SourceID, meetingID)
+    // identity check rebuilds against B's directory instead.
+    let b = try await daemon.startMeetingForTesting(
+      MeetingStartParams(
+        platform: "meet", externalID: "bbb", sources: [], trigger: .browserExtension))
+    #expect(b.id != a.id)
+    let streamB = try await daemon.openIngestSource(
+      label: label, format: format, meeting: MeetingIdentity(platform: "meet", externalID: "bbb"))
+    await daemon.pushIngestAudio(streamID: streamB, samples: samples, sampleRate: 16000)
+    await daemon.closeIngestSource(streamID: streamB)
+
+    // B's audio landed under B's own directory.
+    #expect(
+      !chunkFiles(dataRoot: dataRoot, meetingID: b.id, source: label).isEmpty,
+      "expected B's audio under B's own directory after the rebuild")
+
+    // A's audio is still under A's directory — not stranded, not overwritten.
+    #expect(
+      !chunkFiles(dataRoot: dataRoot, meetingID: a.id, source: label).isEmpty,
+      "expected A's audio to remain under A's directory")
+
+    // The reuse-mismatch error line fired (the daemon's string log is
+    // fire-and-forget, so poll briefly for it to land).
+    var sawMismatch = false
+    for _ in 0..<100 {
+      if logRecorder.recorded.contains(where: { $0.msg?.contains("reuse-mismatch") == true }) {
+        sawMismatch = true
+        break
+      }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(sawMismatch)
+
+    await daemon.stop()
+  }
+
+  @Test("ears status can never show two active meetings: a second start supersedes the first")
+  func statusShowsSingleActiveMeetingAfterSupersede() async throws {
+    let dataRoot = try makeDataRoot()
+    let socketPath = tempSocketPath()
+    let clock = ManualClock(Instant(secondsSinceEpoch: 1_000))
+
+    let configuration = EarsDaemonConfiguration(
+      sources: [],
+      dataRoot: dataRoot,
+      socketPath: socketPath,
+      triggers: TriggersConfiguration(transcribeOnBrowserSessionClose: false))
+
+    let daemon = try EarsDaemon(
+      configuration: configuration,
+      backendFactory: { descriptor in SyntheticCaptureBackend(source: descriptor.id, buffers: []) },
+      clock: clock)
+    try await daemon.start()
+
+    let client = try await ControlSocketClient.connect(toPath: socketPath)
+    _ = try await client.hello(client: "test/0")
+
+    _ = try await client.send(
+      .meetingStart(MeetingStartParams(platform: "meet", externalID: "first")),
+      expecting: Meeting.self)
+    let second = try await client.send(
+      .meetingStart(MeetingStartParams(platform: "meet", externalID: "second")),
+      expecting: Meeting.self)
+
+    let status = try await client.send(.status, expecting: StatusData.self)
+    #expect(status.meetings.count == 1)
+    #expect(status.meetings.first?.id == second.id)
+    #expect(status.meetings.allSatisfy { $0.state == .active })
+
+    await client.close()
     await daemon.stop()
   }
 }

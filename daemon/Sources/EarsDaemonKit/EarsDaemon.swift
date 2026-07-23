@@ -189,6 +189,16 @@ public actor EarsDaemon {
   /// once it empties, so two concurrent meetings sharing the mic keep it alive
   /// until both end.
   private var captureMeetingRefs: [SourceID: Set<String>] = [:]
+  /// The meeting each live ``CaptureActor`` was built against — i.e. whose
+  /// directory its `ChunkEncoder`/`IndexAppender`/VAD writer point at. A
+  /// capture actor's true identity is `(SourceID, meetingID)`, not the label
+  /// alone (#19): the same label (`mic` always, `browser:meet:speaker-N` by
+  /// construction) recurs across meetings, so an actor built for meeting X must
+  /// never be reused to write meeting Y's audio into X's tree. Under the
+  /// single-active invariant (#27) there is only ever one legal meeting for any
+  /// actor; this map is what lets a reuse verify that and rebuild (browser) or
+  /// loudly assert (config) on a mismatch.
+  private var actorMeetings: [SourceID: String] = [:]
   /// The producer→subscriber bridge for live-feed events: every
   /// ``CaptureActor`` and the ``SessionRegistry`` publish into it from
   /// construction on, and ``start()`` attaches the socket server's fan-out
@@ -744,9 +754,26 @@ public actor EarsDaemon {
     }
 
     let actor: CaptureActor
-    if let existing = captureActors[label] {
+    if let existing = captureActors[label], actorMeetings[label] == meetingID {
+      // Same-meeting rejoin: resume the SAME on-disk source (the behaviour the
+      // label-only reuse was protecting — a participant leaving and rejoining
+      // the same call).
+      log("ingest.open reuse: label=\(label.rawValue) meeting=\(meetingID) (same-meeting rejoin)")
       actor = existing
     } else {
+      if captureActors[label] != nil {
+        // #19 manifestation B: the existing actor's writers point at a
+        // *different* meeting's tree (a superseded/older meeting that reused the
+        // same slot label). Reusing it would write this meeting's audio into the
+        // old meeting's directory — the exact wrong-directory bug. Tear it down
+        // and rebuild against the resolved meeting's own directory instead. This
+        // line IS the bug when it fires unexpectedly.
+        log(
+          "ingest.open reuse-mismatch [error]: label=\(label.rawValue) "
+            + "resolved_meeting=\(meetingID) actor_meeting=\(actorMeetings[label] ?? "nil") "
+            + "— rebuilding against the resolved meeting")
+        await teardownIngestActor(label)
+      }
       let descriptor = SourceDescriptor(
         schema: 1,
         id: label,
@@ -761,17 +788,22 @@ public actor EarsDaemon {
         bitrate: configuration.bitrate,
         created: clock.now())
       let backend = PushCaptureBackend(source: label)
+      let meetingRoot = DataStoreLayout.meetingDirectory(
+        dataRoot: configuration.dataRoot, meetingID: meetingID)
       let built = try Self.buildCaptureActor(
         for: descriptor,
         configuration: configuration,
-        dataRoot: DataStoreLayout.meetingDirectory(
-          dataRoot: configuration.dataRoot, meetingID: meetingID),
+        dataRoot: meetingRoot,
         backend: backend,
         clock: clock,
         eventSink: { [eventBus] event in await eventBus.publish(event) },
         logSink: logSink)
       captureActors[label] = built
+      actorMeetings[label] = meetingID
       pushBackends[label] = backend
+      log(
+        "capture actor built: source=\(label.rawValue) meeting=\(meetingID) "
+          + "data_root=\(meetingRoot.path)")
       await controlServer?.registerDynamicSource(built, id: label)
       actor = built
     }
@@ -818,6 +850,21 @@ public actor EarsDaemon {
     await meetingRegistry?.ingestStreamClosed(source: label)
   }
 
+  /// Stops and forgets the `CaptureActor` + `PushCaptureBackend` behind a
+  /// browser `label`, so a rebuild against a *different* meeting's directory
+  /// starts clean (the #19 reuse-mismatch path). The stopped actor's on-disk
+  /// audio under its original meeting stays put — retention owns its lifetime,
+  /// not this teardown.
+  private func teardownIngestActor(_ label: SourceID) async {
+    if let actor = captureActors[label] {
+      await actor.stop()
+    }
+    captureActors[label] = nil
+    pushBackends[label] = nil
+    actorMeetings[label] = nil
+    await controlServer?.unregisterDynamicSource(id: label)
+  }
+
   /// The ids of every source this daemon currently knows — the config-declared
   /// sources (whether or not they're capturing right now) plus any live
   /// `browser:<label>` sources built by `ingest.open` — read live for
@@ -849,6 +896,9 @@ public actor EarsDaemon {
       guard let descriptor = configuredDescriptors[id] else { continue }
       let wasIdle = (captureMeetingRefs[id]?.isEmpty ?? true)
       captureMeetingRefs[id, default: []].insert(meetingID)
+      log(
+        "meeting capture claim: source=\(id.rawValue) meeting=\(meetingID) "
+          + "refs=[\(captureMeetingRefs[id]!.sorted().joined(separator: ","))] was_idle=\(wasIdle)")
       guard wasIdle else { continue }
       await ensureCaptureStarted(descriptor, meetingID: meetingID)
     }
@@ -884,6 +934,17 @@ public actor EarsDaemon {
   private func ensureCaptureStarted(_ descriptor: SourceDescriptor, meetingID: String) async {
     let actor: CaptureActor
     if let existing = captureActors[descriptor.id] {
+      // Identity assertion (option C's cheap guard, #27): a config source's live
+      // actor must belong to the meeting now claiming it. Under the single-active
+      // invariant the prior meeting's teardown removed it before this meeting
+      // started, so a surviving actor bound to a *different* meeting is a bug
+      // worth a loud error, not a supported configuration.
+      if let boundTo = actorMeetings[descriptor.id], boundTo != meetingID {
+        log(
+          "capture actor identity mismatch [error]: source=\(descriptor.id.rawValue) "
+            + "actor_meeting=\(boundTo) claiming_meeting=\(meetingID) — reusing existing actor "
+            + "(its audio still lands under \(boundTo))")
+      }
       actor = existing
     } else {
       let meetingRoot = DataStoreLayout.meetingDirectory(
@@ -904,6 +965,10 @@ public actor EarsDaemon {
         return
       }
       captureActors[descriptor.id] = actor
+      actorMeetings[descriptor.id] = meetingID
+      log(
+        "capture actor built: source=\(descriptor.id.rawValue) meeting=\(meetingID) "
+          + "data_root=\(meetingRoot.path)")
       await controlServer?.registerDynamicSource(actor, id: descriptor.id)
     }
     do {
@@ -923,6 +988,7 @@ public actor EarsDaemon {
     guard let actor = captureActors[id] else { return }
     await actor.stop()
     captureActors[id] = nil
+    actorMeetings[id] = nil
     await controlServer?.unregisterDynamicSource(id: id)
   }
 

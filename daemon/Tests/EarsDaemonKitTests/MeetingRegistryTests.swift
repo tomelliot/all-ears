@@ -171,6 +171,130 @@ struct MeetingRegistryTests {
     #expect(!meeting.isBrowserMeeting)
   }
 
+  // MARK: - single active meeting invariant (#27)
+
+  @Test("starting a meeting supersedes any live meeting (reason superseded)")
+  func startSupersedesLiveMeeting() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let registry = makeRegistry(dataRoot: dataRoot, clock: clock)
+
+    // A stale meeting left live (the 2026-07-23 chain: one real, one stale).
+    let stale = try await registry.start(
+      MeetingStartParams(
+        platform: "meet", externalID: "stale", sources: ["browser:meet:a"],
+        trigger: .browserExtension))
+    clock.advance(by: 300)
+    let real = try await registry.start(
+      MeetingStartParams(
+        platform: "meet", externalID: "real", sources: ["browser:meet:b"],
+        trigger: .browserExtension))
+
+    #expect(real.id != stale.id)
+    #expect(real.state == .active)
+
+    let staleFinal = try await registry.get(id: stale.id)
+    #expect(staleFinal.state == .ended)
+    let staleTimeline = MeetingEventLog.readAll(dataRoot: dataRoot, meetingID: stale.id)
+    #expect(staleTimeline.last?.event == "ended")
+    #expect(staleTimeline.last?.reason == "superseded")
+
+    // Exactly one live meeting remains — the invariant holds.
+    let live = await registry.list().filter { $0.state != .ended }
+    #expect(live.map(\.id) == [real.id])
+  }
+
+  @Test("a duplicate start for the same identity does not supersede or restart the meeting")
+  func duplicateStartSameIdentityIsIdempotent() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let registry = makeRegistry(dataRoot: dataRoot, clock: clock)
+
+    let first = try await registry.start(
+      MeetingStartParams(platform: "meet", externalID: "abc", trigger: .browserExtension))
+    clock.advance(by: 5)
+    let again = try await registry.start(
+      MeetingStartParams(platform: "meet", externalID: "abc", trigger: .browserExtension))
+
+    #expect(again.id == first.id)
+    #expect(again.state == .active)
+    // Not restarted: still a single open interval, and never ended.
+    #expect(again.intervals.count == 1)
+    let timeline = MeetingEventLog.readAll(dataRoot: dataRoot, meetingID: first.id)
+    #expect(!timeline.map(\.event).contains("ended"))
+  }
+
+  @Test("supersede stops the old meeting's capture before it starts the new meeting's")
+  func supersedeReleasesCaptureBeforeStartingNew() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let calls = Mutex<[String]>([])
+    let ids = Mutex(0)
+    let registry = MeetingRegistry(
+      dataRoot: dataRoot,
+      clock: clock,
+      makeID: {
+        ids.withLock { next in
+          next += 1
+          return "meeting-\(next)"
+        }
+      },
+      startCapture: { id, _ in calls.withLock { $0.append("start:\(id)") } },
+      stopCapture: { id, _ in calls.withLock { $0.append("stop:\(id)") } })
+
+    let a = try await registry.start(MeetingStartParams(title: "a", sources: ["mic"]))
+    let b = try await registry.start(MeetingStartParams(title: "b", sources: ["mic"]))
+
+    // The superseded meeting releases the shared mic (stop) before the
+    // successor claims it (start) — so the new meeting rebuilds against its own
+    // directory, never the old one's.
+    #expect(calls.withLock { $0 } == ["start:\(a.id)", "stop:\(a.id)", "start:\(b.id)"])
+  }
+
+  @Test("boot resumes only the latest-started meeting; older active records are orphaned")
+  func bootSweepResumesOneOrphansRest() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base.advanced(by: 10_000))
+
+    // Two meetings left `active` on disk by a previous daemon instance.
+    let stale = Meeting(
+      id: "stale", identity: MeetingIdentity(platform: "meet", externalID: "old"),
+      title: "old", state: .active, started: base,
+      intervals: [MeetingInterval(start: base)], sources: ["browser:meet:a"],
+      trigger: .browserExtension)
+    let recent = Meeting(
+      id: "recent", identity: MeetingIdentity(platform: "meet", externalID: "new"),
+      title: "new", state: .active, started: base.advanced(by: 500),
+      intervals: [MeetingInterval(start: base.advanced(by: 500))], sources: ["browser:meet:b"],
+      trigger: .browserExtension)
+    try MeetingStore.write(stale, dataRoot: dataRoot)
+    try MeetingStore.write(recent, dataRoot: dataRoot)
+
+    let startCaptures = Mutex<[String]>([])
+    let ids = Mutex(0)
+    let registry = MeetingRegistry(
+      dataRoot: dataRoot,
+      clock: clock,
+      makeID: {
+        ids.withLock { next in
+          next += 1
+          return "m-\(next)"
+        }
+      },
+      startCapture: { id, _ in startCaptures.withLock { $0.append(id) } })
+    await registry.loadFromDisk()
+
+    #expect(try await registry.get(id: "recent").state == .active)
+    #expect(try await registry.get(id: "stale").state == .ended)
+    let staleTimeline = MeetingEventLog.readAll(dataRoot: dataRoot, meetingID: "stale")
+    #expect(staleTimeline.last?.reason == "orphaned")
+
+    // Only the survivor resumed capture; the orphan ran its on_end pipeline.
+    #expect(startCaptures.withLock { $0 } == ["recent"])
+    let live = await registry.list().filter { $0.state != .ended }
+    #expect(live.map(\.id) == ["recent"])
+  }
+
   // MARK: - pause / resume (intervals are marks, never capture control)
 
   @Test("pause closes the open interval; resume opens a new one")
