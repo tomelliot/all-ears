@@ -20,8 +20,9 @@ import Synchronization
 /// exiting — rather than killing the process mid-write.
 enum FollowRuntime {
   static func run(
-    arguments: EarsCLI.Arguments, inputs: TranscribeFollowPipeline.Inputs
-  ) async -> Int32 {
+    arguments: EarsCLI.Arguments, inputs: TranscribeFollowPipeline.Inputs,
+    diagnostics: RunDiagnostics = RunDiagnostics()
+  ) async -> RunOutcome {
     let environment = ProcessInfo.processInfo.environment
     let homeDirectory = FileManager.default.homeDirectoryForCurrentUser.path
     let flagsLayer = configLayer(
@@ -37,15 +38,17 @@ enum FollowRuntime {
     switch loadConfig(loadInputs) {
     case .success(let value): loaded = value
     case .failure(let error):
-      writeStderr(describe(error))
-      return 1
+      let message = describe(error)
+      writeStderr(message)
+      return RunOutcome(exitCode: 1, error: message)
     }
 
     let root = loaded.value
     let dataRootPath = stringValue(root, ["data_root"])
     guard !dataRootPath.isEmpty else {
-      writeStderr("error: data_root is not configured")
-      return 1
+      let message = "error: data_root is not configured"
+      writeStderr(message)
+      return RunOutcome(exitCode: 1, error: message)
     }
     let outputRootPath = stringValue(root, ["output_root"])
     let backendName = stringValue(root, ["transcribe", "backend"], default: "fluidaudio")
@@ -82,10 +85,11 @@ enum FollowRuntime {
           modelIdentifier: modelIdentifier.isEmpty ? nil : modelIdentifier,
           compute: compute),
         publisher: publisher,
-        isStopped: { stopRequested.withLock { $0 } })
+        isStopped: { stopRequested.withLock { $0 } },
+        onError: { diagnostics.recordError($0) })
     )
     await publisher.shutdown()
-    return exitCode
+    return diagnostics.outcome(exitCode: exitCode)
   }
 
   /// Installs SIGINT + SIGTERM handlers that call `onStop` on each

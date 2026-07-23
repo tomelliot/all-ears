@@ -6,13 +6,17 @@ import EarsCLISupport
 /// socket. See `docs/architecture.md`.
 ///
 /// Every invocation still runs `EarsCLI.run(tool:version:arguments:)`
-/// first, unchanged -- the day-one config/logging contract every tool
-/// satisfies (`--print-config`/`--config-path`, and for a normal run, the
-/// `LogSink` bootstrap plus `run.start`/`run.summary` JSON Lines records). A
-/// normal invocation (neither flag set) that clears that step then runs
-/// ``EarsdRuntime``: it loads `earsd`'s own composed config schema, resolves
-/// `[[earsd.source]]` into a real `EarsDaemon`, starts it, and keeps the
-/// process alive until `SIGTERM`.
+/// first -- the day-one config/logging contract every tool satisfies
+/// (`--print-config`/`--config-path`, and for a normal run, the `LogSink`
+/// bootstrap plus a `run.start` JSON Lines record). Unlike the one-shot tools,
+/// `earsd` passes no `work` closure, so the shared bootstrap logs no
+/// `run.summary`: a daemon's run completes at shutdown, not at startup, so
+/// ``EarsdRuntime`` logs its own `run.summary` from the `SIGTERM` handler
+/// rather than claiming `status=ok` before capture has even started (issue
+/// #25). A normal invocation (neither flag set) then runs ``EarsdRuntime``: it
+/// loads `earsd`'s own composed config schema, resolves `[[earsd.source]]`
+/// into a real `EarsDaemon`, starts it, and keeps the process alive until
+/// `SIGTERM`.
 @main
 struct Earsd: AsyncParsableCommand {
   static let configuration = CommandConfiguration(

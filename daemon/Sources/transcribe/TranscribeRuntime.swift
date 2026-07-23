@@ -18,7 +18,10 @@ import Foundation
 /// config file to be unit tested. Mirrors `earsd`'s
 /// `EarsdRuntime`/`DaemonConfigResolution` split.
 enum TranscribeRuntime {
-  static func run(arguments: EarsCLI.Arguments, inputs: TranscribePipeline.Inputs) async -> Int32 {
+  static func run(
+    arguments: EarsCLI.Arguments, inputs: TranscribePipeline.Inputs,
+    diagnostics: RunDiagnostics = RunDiagnostics()
+  ) async -> RunOutcome {
     let environment = ProcessInfo.processInfo.environment
     let homeDirectory = FileManager.default.homeDirectoryForCurrentUser.path
     let flagsLayer = configLayer(
@@ -34,16 +37,18 @@ enum TranscribeRuntime {
     switch loadConfig(loadInputs) {
     case .success(let value): loaded = value
     case .failure(let error):
-      writeStderr(describe(error))
-      return 1
+      let message = describe(error)
+      writeStderr(message)
+      return RunOutcome(exitCode: 1, error: message)
     }
 
     let root = loaded.value
     let dataRootPath = stringValue(root, ["data_root"])
     let configuredSocketPath = stringValue(root, ["socket_path"])
     guard !dataRootPath.isEmpty else {
-      writeStderr("error: data_root is not configured")
-      return 1
+      let message = "error: data_root is not configured"
+      writeStderr(message)
+      return RunOutcome(exitCode: 1, error: message)
     }
     let outputRootPath = stringValue(root, ["output_root"])
     let backendName = stringValue(root, ["transcribe", "backend"], default: "fluidaudio")
@@ -57,7 +62,7 @@ enum TranscribeRuntime {
       configuredSocketPath.isEmpty
       ? DefaultSocketPath.resolve(dataRoot: dataRootPath) : configuredSocketPath
 
-    return await TranscribePipeline.run(
+    let code = await TranscribePipeline.run(
       inputs: inputs,
       dataRoot: URL(fileURLWithPath: dataRootPath),
       outputRoot: URL(fileURLWithPath: outputRootPath.isEmpty ? "." : outputRootPath),
@@ -66,8 +71,11 @@ enum TranscribeRuntime {
       dependencies: .production(
         loadOptions: LoadOptions(
           modelIdentifier: modelIdentifier.isEmpty ? nil : modelIdentifier,
-          compute: compute))
+          compute: compute),
+        onError: { diagnostics.recordError($0) },
+        onSummary: { diagnostics.recordSummary($0) })
     )
+    return diagnostics.outcome(exitCode: code)
   }
 
   /// `transcribe --file`'s entry point: the file path needs only the model
@@ -76,8 +84,9 @@ enum TranscribeRuntime {
   /// ``TranscribeFilePipeline``. Kept here beside ``run(arguments:inputs:)`` so
   /// both share the same private config readers rather than duplicating them.
   static func runFiles(
-    arguments: EarsCLI.Arguments, inputs: TranscribeFilePipeline.Inputs
-  ) async -> Int32 {
+    arguments: EarsCLI.Arguments, inputs: TranscribeFilePipeline.Inputs,
+    diagnostics: RunDiagnostics = RunDiagnostics()
+  ) async -> RunOutcome {
     let environment = ProcessInfo.processInfo.environment
     let homeDirectory = FileManager.default.homeDirectoryForCurrentUser.path
     let flagsLayer = configLayer(
@@ -93,8 +102,9 @@ enum TranscribeRuntime {
     switch loadConfig(loadInputs) {
     case .success(let value): loaded = value
     case .failure(let error):
-      writeStderr(describe(error))
-      return 1
+      let message = describe(error)
+      writeStderr(message)
+      return RunOutcome(exitCode: 1, error: message)
     }
 
     let root = loaded.value
@@ -103,13 +113,15 @@ enum TranscribeRuntime {
     let compute = computePreference(
       stringValue(root, ["transcribe", "compute"], default: "automatic"))
 
-    return await TranscribeFilePipeline.run(
+    let code = await TranscribeFilePipeline.run(
       inputs: inputs,
       backendName: backendName,
       dependencies: .production(
         loadOptions: LoadOptions(
           modelIdentifier: modelIdentifier.isEmpty ? nil : modelIdentifier,
-          compute: compute)))
+          compute: compute),
+        onError: { diagnostics.recordError($0) }))
+    return diagnostics.outcome(exitCode: code)
   }
 
   private static func describe(_ error: ConfigLoadError) -> String {

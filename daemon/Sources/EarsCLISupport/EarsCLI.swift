@@ -11,10 +11,12 @@ import Foundation
 /// loading with the full flag/env/file/default layering, and the day-one
 /// logging requirements from `docs/logging.md` — bootstrap a `LogSink`, log
 /// a `run.start` startup event (resolved config path, effective log level,
-/// version, key parameters), and log a final `run.summary` before exiting.
+/// version, key parameters), run the caller's `work`, and log a final
+/// `run.summary` whose status reflects that work's outcome (issue #25).
 ///
-/// Each executable is currently a stub with nothing real to do, so "run" is
-/// exactly this sequence; it lives here once so the five don't duplicate it.
+/// The `run.start`/config/logging bootstrap lives here once so the five tools
+/// don't duplicate it; each passes its real work as the `work` closure so the
+/// summary is logged after — never before — the work that can still fail.
 /// This type does real I/O (reads the environment, the real clock, the
 /// filesystem) and so is tier-2/3 glue per `docs/engineering-practices.md`:
 /// it is exercised end-to-end by `CLISmokeTests` against the built `earsd`
@@ -53,10 +55,24 @@ public enum EarsCLI {
     }
   }
 
-  /// Runs the full stub lifecycle for `tool` and returns the process exit
-  /// code (0 on success, non-zero on a config or logging-bootstrap failure —
-  /// never a silent fallback, per `docs/configuration.md`).
-  public static func run(tool: String, version: String, arguments: Arguments) async -> Int32 {
+  /// Runs the shared config/logging lifecycle for `tool` and returns the
+  /// process exit code (0 on success, non-zero on a config or
+  /// logging-bootstrap failure — never a silent fallback, per
+  /// `docs/configuration.md`).
+  ///
+  /// `work` is the tool's real work, run *between* `run.start` and
+  /// `run.summary`: whatever it returns as a ``RunOutcome`` decides the
+  /// summary's `status` (`ok` on exit 0, `error` otherwise), its `error`
+  /// field, and any headline counts — so the structured summary reflects the
+  /// actual outcome instead of an optimistic `status=ok` logged before the
+  /// work even ran (issue #25). When `work` is `nil` the caller owns its own
+  /// lifecycle logging (`ears`' fast-path-only invocations; `earsd`'s
+  /// long-running daemon, which logs its own `run.summary` at shutdown), so
+  /// no `run.summary` is emitted here.
+  public static func run(
+    tool: String, version: String, arguments: Arguments,
+    work: (@Sendable (LogBootstrap) async -> RunOutcome)? = nil
+  ) async -> Int32 {
     let environment = ProcessInfo.processInfo.environment
     let homeDirectory = FileManager.default.homeDirectoryForCurrentUser.path
 
@@ -90,8 +106,8 @@ public enum EarsCLI {
     }
 
     do {
-      try await bootstrapLoggingAndRun(tool: tool, version: version, loaded: loaded)
-      return 0
+      return try await bootstrapLoggingAndRun(
+        tool: tool, version: version, loaded: loaded, work: work)
     } catch {
       writeStderr("error: \(tool) failed to start: \(error)")
       return 1
@@ -180,13 +196,21 @@ public enum EarsCLI {
   }
 
   /// The normal-run path: bootstrap the ``LogSink`` from resolved config,
-  /// emit `run.start` and `run.summary`. Both records are only sent to the
-  /// sink when they clear the effective `[log].level` threshold, so
-  /// `--log-level error` visibly silences them — the "changes what's
-  /// logged" requirement from `docs/configuration.md`.
-  private static func bootstrapLoggingAndRun(tool: String, version: String, loaded: LoadedConfig)
-    async throws
-  {
+  /// emit `run.start`, run the tool's `work`, then emit `run.summary`
+  /// reflecting its outcome. Both records are only sent to the sink when they
+  /// clear the effective `[log].level` threshold, so `--log-level error`
+  /// visibly silences the info-level `run.start`/successful `run.summary` —
+  /// the "changes what's logged" requirement from `docs/configuration.md` —
+  /// while a *failed* run's `run.summary` is logged at `.error` so it surfaces
+  /// alongside the errors that led to it.
+  ///
+  /// Crucially, `run.summary` is emitted only *after* `work` returns, so its
+  /// `status` matches the run's real exit disposition rather than an
+  /// optimistic `ok` logged before the work that can still fail (issue #25).
+  private static func bootstrapLoggingAndRun(
+    tool: String, version: String, loaded: LoadedConfig,
+    work: (@Sendable (LogBootstrap) async -> RunOutcome)?
+  ) async throws -> Int32 {
     let config = loaded.value
     let dataRoot = stringValue(config, ["data_root"])
     let outputRoot = stringValue(config, ["output_root"])
@@ -218,17 +242,37 @@ public enum EarsCLI {
       try await sink.log(startup)
     }
 
+    // No `work` means the caller owns its own lifecycle summary: `earsd`
+    // passes none and logs its own `run.summary` at shutdown, since a daemon's
+    // run completes then, not at boot. (`ears` never reaches here at all — its
+    // `EarsCLI.run` calls always take a `--print-config`/`--config-path` fast
+    // path above.) Emitting a `status=ok` summary here regardless was exactly
+    // the bug in issue #25, so we don't.
+    guard let work else { return 0 }
+
+    let outcome = await work(bootstrap)
+
+    var summaryFields: [LogField] = [
+      LogField("status", .string(outcome.exitCode == 0 ? "ok" : "error"))
+    ]
+    if outcome.exitCode != 0, let error = outcome.error {
+      summaryFields.append(LogField("error", .string(error)))
+    }
+    summaryFields.append(contentsOf: outcome.fields)
+
     let summary = RunSummary.record(
       ts: clock.now(),
+      level: outcome.exitCode == 0 ? .info : .error,
       tool: tool,
       subsystem: subsystem,
       category: tool,
       pid: pid,
-      fields: [LogField("status", .string("ok"))]
+      fields: summaryFields
     )
     if summary.level >= effectiveLevel {
       try await sink.log(summary)
     }
+    return outcome.exitCode
   }
 
   private static func describe(_ error: ConfigLoadError) -> String {

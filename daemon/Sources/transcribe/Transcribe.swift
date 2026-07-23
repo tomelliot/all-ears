@@ -5,11 +5,14 @@ import EarsCLISupport
 /// ASR model, and writes a transcript to the output location. See
 /// `docs/architecture.md`.
 ///
-/// Every invocation still runs `EarsCLI.run(tool:version:arguments:)` first,
-/// unchanged -- the day-one config/logging contract every tool satisfies
+/// Every invocation runs through `EarsCLI.run(tool:version:arguments:work:)`
+/// -- the day-one config/logging contract every tool satisfies
 /// (`--print-config`/`--config-path`, and for a normal run, the `LogSink`
-/// bootstrap plus `run.start`/`run.summary` JSON Lines records). A normal
-/// invocation (neither flag set) that clears that step then runs
+/// bootstrap plus a `run.start` JSON Lines record). The real work is passed as
+/// that call's `work` closure, so the final `run.summary` is logged *after* it
+/// completes and reflects its true outcome -- a failed run logs a failure
+/// status and the error message, never an optimistic `status=ok` (issue #25).
+/// A normal invocation (neither flag set) runs
 /// ``TranscribeRuntime``: it resolves `--last`/`--source`/`--out` into a
 /// requested range and sources, reads each source's real captured audio,
 /// runs the ASR backend, and writes the transcript. `--follow <source>`
@@ -93,10 +96,57 @@ struct Transcribe: AsyncParsableCommand {
       logFile: logFile
     )
 
-    let exitCode = await EarsCLI.run(tool: "transcribe", version: "0.1.0", arguments: arguments)
-    guard exitCode == 0 else { throw ExitCode(exitCode) }
-    guard !printConfig, !configPath else { return }
+    // Pure argument-combination validation runs first, as usage errors: they
+    // must reject an invalid invocation without producing a `run.summary` for
+    // a run that never started, so they stay ArgumentParser `ValidationError`s
+    // (usage exit) rather than a logged failure outcome.
+    try validateArgumentCombinations()
 
+    // Snapshot the flags into locals the `@Sendable` work closure captures.
+    let files = self.files
+    let follow = self.follow
+    let json = self.json
+    let last = self.last
+    let from = self.from
+    let to = self.to
+    let session = self.session
+    let meeting = self.meeting
+    let sources = self.sources
+    let out = self.out
+
+    // The real run happens inside `work`, between `run.start` and
+    // `run.summary`; the summary now reflects the outcome we return here,
+    // never a `status=ok` logged before the work could fail (issue #25). The
+    // `--print-config`/`--config-path` fast paths return before `work` runs.
+    let diagnostics = RunDiagnostics()
+    let exitCode = await EarsCLI.run(
+      tool: "transcribe", version: "0.1.0", arguments: arguments
+    ) { _ in
+      if !files.isEmpty {
+        return await TranscribeRuntime.runFiles(
+          arguments: arguments,
+          inputs: TranscribeFilePipeline.Inputs(files: files, out: out),
+          diagnostics: diagnostics)
+      }
+      if let follow {
+        return await FollowRuntime.run(
+          arguments: arguments,
+          inputs: TranscribeFollowPipeline.Inputs(source: follow, json: json, out: out),
+          diagnostics: diagnostics)
+      }
+      return await TranscribeRuntime.run(
+        arguments: arguments,
+        inputs: TranscribePipeline.Inputs(
+          last: last, from: from, to: to, session: session, meeting: meeting, sourceIDs: sources,
+          out: out),
+        diagnostics: diagnostics)
+    }
+    guard exitCode == 0 else { throw ExitCode(exitCode) }
+  }
+
+  /// Rejects mutually exclusive flag combinations before any run. Mirrors the
+  /// per-mode guards the dispatch in ``run()`` relies on having already passed.
+  private func validateArgumentCombinations() throws {
     if !files.isEmpty {
       // `--file` is a standalone-file batch: every range/source/session
       // selector and the live-`--follow` attach make no sense against a file
@@ -109,14 +159,9 @@ struct Transcribe: AsyncParsableCommand {
           "--file cannot be combined with "
             + "--follow/--last/--from/--to/--session/--meeting/--source/--json")
       }
-      let filesExitCode = await TranscribeRuntime.runFiles(
-        arguments: arguments,
-        inputs: TranscribeFilePipeline.Inputs(files: files, out: out))
-      guard filesExitCode == 0 else { throw ExitCode(filesExitCode) }
       return
     }
-
-    if let follow {
+    if follow != nil {
       // Follow is attach-and-tail; batch is resolve-a-range-and-exit. The
       // flags that shape a batch range make no sense here, so mixing them
       // is a precise error rather than a silent ignore.
@@ -125,11 +170,6 @@ struct Transcribe: AsyncParsableCommand {
         throw ValidationError(
           "--follow cannot be combined with --last/--from/--to/--session/--meeting/--source")
       }
-      let followExitCode = await FollowRuntime.run(
-        arguments: arguments,
-        inputs: TranscribeFollowPipeline.Inputs(source: follow, json: json, out: out)
-      )
-      guard followExitCode == 0 else { throw ExitCode(followExitCode) }
       return
     }
     guard !json else {
@@ -143,13 +183,5 @@ struct Transcribe: AsyncParsableCommand {
           "--meeting cannot be combined with --last/--from/--to/--session/--source")
       }
     }
-
-    let transcribeExitCode = await TranscribeRuntime.run(
-      arguments: arguments,
-      inputs: TranscribePipeline.Inputs(
-        last: last, from: from, to: to, session: session, meeting: meeting, sourceIDs: sources,
-        out: out)
-    )
-    guard transcribeExitCode == 0 else { throw ExitCode(transcribeExitCode) }
   }
 }

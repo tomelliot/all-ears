@@ -31,7 +31,10 @@ enum SummarizePipeline {
     var log: @Sendable (String) -> Void
     var writeStderr: @Sendable (String) -> Void
 
-    static func production(llmBackend: any LLMBackend) -> Dependencies {
+    static func production(
+      llmBackend: any LLMBackend,
+      onError: (@Sendable (String) -> Void)? = nil
+    ) -> Dependencies {
       Dependencies(
         clock: SystemClock(),
         llmBackend: llmBackend,
@@ -40,6 +43,7 @@ enum SummarizePipeline {
         },
         writeStderr: { line in
           FileHandle.standardError.write(Data((line + "\n").utf8))
+          onError?(line)
         }
       )
     }
