@@ -400,8 +400,18 @@ enum TranscribePipeline {
       }
     }
 
+    // How many of the meeting's listed sources actually resolved to a store
+    // versus had no data anywhere — so a "successful" empty run is honestly
+    // distinguishable from silence (issue #21's "summary honesty":
+    // sources-resolved / sources-missing counts). Every non-`--meeting` path
+    // has already fail-fast-rejected unknown sources above, so all its sources
+    // are resolved and `sources_missing` is 0.
+    let sourcesResolved = readOutcomes.filter { $0.storeExists }.count
+    let sourcesMissing = readOutcomes.count - sourcesResolved
+
     dependencies.log(
       "run.summary: segments=\(document.segments.count) words=\(document.frontmatter.wordCount) "
+        + "sources_resolved=\(sourcesResolved) sources_missing=\(sourcesMissing) "
         + "speech_seconds=\(speechSeconds) duration_seconds=\(requestedRange.duration) "
         + "output=\(paths.markdown.path)"
     )
@@ -409,6 +419,8 @@ enum TranscribePipeline {
       LogField("segments", .int(document.segments.count)),
       LogField("words", .int(document.frontmatter.wordCount)),
       LogField("sources", .int(sourceIDs.count)),
+      LogField("sources_resolved", .int(sourcesResolved)),
+      LogField("sources_missing", .int(sourcesMissing)),
       LogField("speech_seconds", .double(speechSeconds)),
       LogField("duration_seconds", .double(requestedRange.duration)),
       LogField("output", .string(paths.markdown.path)),
