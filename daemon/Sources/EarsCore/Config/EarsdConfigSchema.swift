@@ -43,6 +43,10 @@ public enum EarsdConfigSchema {
         "ingest_close_grace_s": .int(120),
         "local_sources": .array([.string("mic")]),
       ]),
+      "retention": .table([
+        "evict_after_transcript_seconds": .int(7200),
+        "max_audio_age_seconds": .int(604800),
+      ]),
       "source": .array([
         .table([
           "id": .string("mic"),
@@ -164,6 +168,20 @@ public enum EarsdConfigSchema {
                 fields: [
                   "ingest_close_grace_s": ConfigSchema.Field(type: .int),
                   "local_sources": ConfigSchema.Field(type: .array),
+                ]
+              )
+            ),
+            // Transcript-driven retention: evict a meeting's audio this many
+            // seconds after its transcript completes successfully, or — for a
+            // meeting whose transcript never completed — this many seconds
+            // after it ended, whichever deadline comes first. Transcripts are
+            // never evicted. See `EvictionSweeper`.
+            "retention": ConfigSchema.Field(
+              type: .table,
+              children: ConfigSchema(
+                fields: [
+                  "evict_after_transcript_seconds": ConfigSchema.Field(type: .int),
+                  "max_audio_age_seconds": ConfigSchema.Field(type: .int),
                 ]
               )
             ),

@@ -96,6 +96,8 @@ enum DaemonConfigResolution {
       ? ["mic"]
       : stringArray(meetingsTable, "local_sources").map { SourceID($0) }
 
+    let retentionTable = nestedTable(earsd, "retention")
+
     let configuration = EarsDaemonConfiguration(
       sources: descriptors,
       dataRoot: URL(fileURLWithPath: dataRoot.isEmpty ? "." : dataRoot),
@@ -107,6 +109,10 @@ enum DaemonConfigResolution {
       defaultTimeCapSeconds: defaults.defaultTimeCapSeconds,
       evictionSweepIntervalSeconds: Double(
         int(earsd, "eviction_sweep_interval_s", default: 60)),
+      evictAfterTranscriptSeconds: Double(
+        int(retentionTable, "evict_after_transcript_seconds", default: 7_200)),
+      maxAudioAgeSeconds: Double(
+        int(retentionTable, "max_audio_age_seconds", default: 604_800)),
       ingestWebSocket: resolveIngestWebSocket(earsd),
       controlWebSocket: resolveControlWebSocket(earsd),
       meetingIngestCloseGraceSeconds: Double(

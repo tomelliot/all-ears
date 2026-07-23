@@ -37,12 +37,20 @@ public struct EarsDaemonConfiguration: Sendable {
   public var codec: String
   public var bitrate: Int
   public var defaultTimeCapSeconds: Int
-  /// How often the daemon's ``EvictionSweeper`` runs its time-cap pass across
-  /// every source, in seconds. The cap itself is per-source
-  /// (`defaultTimeCapSeconds` / each source's `time_cap_seconds`); this only
-  /// bounds how far past the cap a recording can linger before being expired
-  /// (worst case ≈ cap + this interval). Default 60 s.
+  /// How often the daemon's ``EvictionSweeper`` runs its retention pass across
+  /// every meeting, in seconds. This bounds how far past a meeting's eviction
+  /// deadline its audio can linger before being deleted (worst case ≈ deadline
+  /// + this interval). Default 60 s.
   public var evictionSweepIntervalSeconds: Double
+  /// `[earsd.retention].evict_after_transcript_seconds`: how long after a
+  /// meeting's transcript completes successfully its audio is kept before the
+  /// sweeper deletes it. Default 7200 s (2 h).
+  public var evictAfterTranscriptSeconds: Double
+  /// `[earsd.retention].max_audio_age_seconds`: the hard cap — a meeting whose
+  /// transcript never completed keeps its audio only this long after it ended,
+  /// then it is deleted regardless so a failed transcription can still be
+  /// retried up to this point. Default 604800 s (7 days).
+  public var maxAudioAgeSeconds: Double
   /// `[earsd.ingest_ws]`, or `nil` when disabled (the default) — gates
   /// whether ``EarsDaemon/start()`` also binds the loopback ingest
   /// WebSocket.
@@ -82,6 +90,8 @@ public struct EarsDaemonConfiguration: Sendable {
     bitrate: Int = 64_000,
     defaultTimeCapSeconds: Int = 7_200,
     evictionSweepIntervalSeconds: Double = 60,
+    evictAfterTranscriptSeconds: Double = 7_200,
+    maxAudioAgeSeconds: Double = 604_800,
     ingestWebSocket: IngestWebSocketConfiguration? = nil,
     controlWebSocket: ControlWebSocketConfiguration? = nil,
     meetingIngestCloseGraceSeconds: Double = 120,
@@ -99,6 +109,8 @@ public struct EarsDaemonConfiguration: Sendable {
     self.outputRoot = outputRoot
     self.defaultTimeCapSeconds = defaultTimeCapSeconds
     self.evictionSweepIntervalSeconds = evictionSweepIntervalSeconds
+    self.evictAfterTranscriptSeconds = evictAfterTranscriptSeconds
+    self.maxAudioAgeSeconds = maxAudioAgeSeconds
     self.ingestWebSocket = ingestWebSocket
     self.controlWebSocket = controlWebSocket
     self.meetingIngestCloseGraceSeconds = meetingIngestCloseGraceSeconds
