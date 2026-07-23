@@ -228,8 +228,12 @@ struct TranscribePipelineTests {
   func sessionEndToEnd() async throws {
     let dataRoot = makeTempDirectory("session")
     let outputRoot = makeTempDirectory("session-output")
+    // Sessions are materialized from meetings with slug = meeting id, and a
+    // meeting's audio lives under its own directory — so the fixture audio
+    // goes under meetings/<slug>/sources/mic/, where the pipeline reads it.
     try await writeFixtureSource(
-      sourceID: "mic", dataRoot: dataRoot,
+      sourceID: "mic",
+      dataRoot: DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: "standup"),
       chunkStart: now.advanced(by: -20), chunkDuration: 20,
       vadSpeechStart: now.advanced(by: -15), vadSpeechEnd: now.advanced(by: -5))
 
@@ -278,7 +282,8 @@ struct TranscribePipelineTests {
     // A speech span well before the session's nominal start (-10), but
     // within a 16s pre-roll window (nominal start - 16 = -26).
     try await writeFixtureSource(
-      sourceID: "mic", dataRoot: dataRoot,
+      sourceID: "mic",
+      dataRoot: DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: "standup"),
       chunkStart: now.advanced(by: -30), chunkDuration: 30,
       vadSpeechStart: now.advanced(by: -24), vadSpeechEnd: now.advanced(by: -20))
 
@@ -319,6 +324,60 @@ struct TranscribePipelineTests {
         explicitOut: nil, sessionSlug: "standup"
       ).markdown)
     #expect(markdown.contains("pre-roll speech"))
+  }
+
+  @Test("--meeting reads the meeting's audio from its own directory and writes a transcript")
+  func meetingEndToEnd() async throws {
+    let dataRoot = makeTempDirectory("meeting")
+    let outputRoot = makeTempDirectory("meeting-output")
+    let meetingID = "fixture-meeting"
+
+    // meeting.toml lives under the global data root; the audio lives under
+    // the meeting's own directory — the pipeline must read each from its
+    // respective root.
+    let meeting = Meeting(
+      id: meetingID,
+      title: "call",
+      state: .ended,
+      started: now.advanced(by: -20),
+      ended: now,
+      intervals: [MeetingInterval(start: now.advanced(by: -20), end: now)],
+      sources: ["mic"])
+    try MeetingStore.write(meeting, dataRoot: dataRoot)
+
+    try await writeFixtureSource(
+      sourceID: "mic",
+      dataRoot: DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: meetingID),
+      chunkStart: now.advanced(by: -20), chunkDuration: 20,
+      vadSpeechStart: now.advanced(by: -15), vadSpeechEnd: now.advanced(by: -5))
+
+    let scripted = ScriptedTranscriber(results: [
+      [Segment(start: 0, end: 2, text: "meeting hello")]
+    ])
+
+    let exitCode = await TranscribePipeline.run(
+      inputs: .init(meeting: meetingID, sourceIDs: [], out: nil),
+      dataRoot: dataRoot,
+      outputRoot: outputRoot,
+      backendName: "fluidaudio",
+      dependencies: .init(
+        clock: ManualClock(now),
+        transcriberFactory: { scripted },
+        loadOptions: LoadOptions(),
+        log: { _ in },
+        writeStderr: { line in Issue.record("unexpected stderr: \(line)") }
+      )
+    )
+
+    #expect(exitCode == 0)
+    #expect(scripted.recordedCalls.count == 1)
+
+    let paths = OutputPathResolution.resolve(
+      outputRoot: outputRoot, requestedStart: now.advanced(by: -20), sourceIDs: ["mic"],
+      explicitOut: nil, sessionSlug: meetingID)
+    let markdown = try outputText(at: paths.markdown)
+    #expect(markdown.contains("meeting hello"))
+    #expect(markdown.contains("meeting: \(meetingID)"))
   }
 
   @Test("segments from two sources are merged onto one shared timeline, ordered by time")
