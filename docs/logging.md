@@ -71,7 +71,7 @@ Expensive stages (ASR decode, LLM calls, encode/flush) are additionally wrapped 
 - Log **startup**: resolved config path, effective log level, version, key parameters.
 - Log **every state transition** and external interaction (device open, socket connect, file write, model load, LLM request/response with token counts and latency).
 - Log **errors with cause and the action taken** (retry, reopen, abort). No silent catches.
-- One-shot tools emit a final `run.summary` record (counts, durations, output paths) and exit non-zero on any error.
+- One-shot tools emit a final `run.summary` record (counts, durations, output paths) and exit non-zero on any error. It carries a `status` field (`ok` on a zero exit, `error` otherwise) and, on failure, an `error` field with the message — and is emitted *after* the work completes, so `status` always matches the exit code rather than being logged optimistically up front. A failed run's summary is logged at the `error` level so it surfaces alongside the errors that led to it. Long-running `earsd` logs its `run.summary` at shutdown, not at startup, for the same reason.
 - Never log audio content or transcript/LLM bodies above `debug` — metadata and counts only, so logs stay shareable.
 - Anything actionable lives in a **field**, so no consumer ever has to regex `msg`.
 

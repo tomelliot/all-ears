@@ -21,7 +21,10 @@ struct SummarizeCLIInputs: Sendable {
 /// relative to `data_root`), then delegates to ``SummarizePipeline``.
 /// Mirrors `cleanup`'s `CleanupRuntime`/`CleanupPipeline` split.
 enum SummarizeRuntime {
-  static func run(arguments: EarsCLI.Arguments, inputs: SummarizeCLIInputs) async -> Int32 {
+  static func run(
+    arguments: EarsCLI.Arguments, inputs: SummarizeCLIInputs,
+    diagnostics: RunDiagnostics = RunDiagnostics()
+  ) async -> RunOutcome {
     let environment = ProcessInfo.processInfo.environment
     let homeDirectory = FileManager.default.homeDirectoryForCurrentUser.path
     let flagsLayer = configLayer(
@@ -41,8 +44,9 @@ enum SummarizeRuntime {
     ) {
     case .success(let value): loaded = value
     case .failure(let error):
-      writeStderr(describe(error))
-      return 1
+      let message = describe(error)
+      writeStderr(message)
+      return RunOutcome(exitCode: 1, error: message)
     }
 
     let root = loaded.value
@@ -55,8 +59,9 @@ enum SummarizeRuntime {
     let command =
       backend == "command" ? configuredCommand : "llm" + (model.isEmpty ? "" : " -m \(model)")
     guard !command.isEmpty else {
-      writeStderr("error: no [llm] command resolved (backend=\(backend), model='\(model)')")
-      return 1
+      let message = "error: no [llm] command resolved (backend=\(backend), model='\(model)')"
+      writeStderr(message)
+      return RunOutcome(exitCode: 1, error: message)
     }
     let llmBackend = CommandLLMBackend(
       info: LLMBackendInfo(name: backend, model: model.isEmpty ? nil : model), command: command)
@@ -69,16 +74,19 @@ enum SummarizeRuntime {
       selected = configuredPresets.filter { inputs.presetNames.contains($0.name) }
       let missing = Set(inputs.presetNames).subtracting(selected.map(\.name))
       guard missing.isEmpty else {
-        writeStderr("error: unknown preset(s): \(missing.sorted().joined(separator: ", "))")
-        return 1
+        let message = "error: unknown preset(s): \(missing.sorted().joined(separator: ", "))"
+        writeStderr(message)
+        return RunOutcome(exitCode: 1, error: message)
       }
     } else {
-      writeStderr("error: at least one --preset is required (or pass --all-presets)")
-      return 1
+      let message = "error: at least one --preset is required (or pass --all-presets)"
+      writeStderr(message)
+      return RunOutcome(exitCode: 1, error: message)
     }
     guard !selected.isEmpty else {
-      writeStderr("error: no [[summarize.preset]] entries are configured")
-      return 1
+      let message = "error: no [[summarize.preset]] entries are configured"
+      writeStderr(message)
+      return RunOutcome(exitCode: 1, error: message)
     }
 
     let presets = selected.map { preset in
@@ -86,11 +94,13 @@ enum SummarizeRuntime {
         name: preset.name, promptContent: readPromptFile(preset.promptFile, dataRoot: dataRoot))
     }
 
-    return await SummarizePipeline.run(
+    let code = await SummarizePipeline.run(
       inputs: SummarizePipeline.Inputs(
         transcriptPaths: inputs.transcriptPaths, presets: presets, out: inputs.out),
-      dependencies: .production(llmBackend: llmBackend)
+      dependencies: .production(
+        llmBackend: llmBackend, onError: { diagnostics.recordError($0) })
     )
+    return diagnostics.outcome(exitCode: code)
   }
 
   private struct ConfigPreset {

@@ -57,6 +57,14 @@ public actor MeetingRegistry {
     case client
     /// The orphan grace timer fired.
     case ingestIdle = "ingest-idle"
+    /// A new `meeting.start` for a different identity force-ended this one to
+    /// hold the single-active-meeting invariant (see ``start(_:)``). One meeting
+    /// ended `superseded` is one grep away from the start that killed it.
+    case superseded
+    /// Found `active`/`paused` on disk at boot but not chosen as the single
+    /// meeting to resume — swept by ``loadFromDisk()`` and run through the
+    /// normal on_end pipeline so its audio isn't stranded.
+    case orphaned
   }
 
   /// Called after every meeting end with the final meeting and the sessions
@@ -152,27 +160,65 @@ public actor MeetingRegistry {
 
   // MARK: - Startup
 
-  /// Reloads every non-ended meeting from disk — called once at daemon
-  /// start. An `active` meeting with an open interval survives a restart
-  /// as-is; a reloaded *browser* meeting whose streams don't return starts
-  /// its orphan grace clock from daemon boot. A still-active meeting resumes
-  /// capture of its (config-declared) sources, so a daemon restart mid-meeting
-  /// keeps recording rather than silently going idle.
+  /// Reloads meetings from disk — called once at daemon start. The
+  /// single-active-meeting invariant applies here too: at most **one** meeting
+  /// resumes. The most-recently-started live record is treated as the genuine
+  /// in-progress call (a mid-meeting daemon restart) and resumes as-is —
+  /// including capture of its (config-declared) sources, so a restart mid-call
+  /// keeps recording. Every *other* `active`/`paused` record on disk is a stale
+  /// leak from an earlier instance (the daemon died without a `meeting.end`) and
+  /// is ended as ``EndReason/orphaned`` through the normal on_end pipeline, so
+  /// its audio is materialized rather than stranded — and can never claim
+  /// capture actors ahead of a real meeting (#19/#24).
+  ///
+  /// A resumed *browser* meeting whose streams don't return starts its orphan
+  /// grace clock from daemon boot, so even the survivor converges to `ended` if
+  /// it's actually dead.
   public func loadFromDisk() async {
-    for meeting in MeetingStore.readAll(
+    let live = MeetingStore.readAll(
       dataRoot: dataRoot,
-      onSkip: { [log] id, error in log("meeting registry: skipping meetings/\(id): \(error)") })
-    where meeting.state != .ended {
+      onSkip: { [log] id, error in log("meeting registry: skipping meetings/\(id): \(error)") }
+    ).filter { $0.state != .ended }
+
+    // The survivor: the most-recently-started live meeting. Ties (identical
+    // `started`) resolve by id for determinism.
+    let survivor = live.max {
+      ($0.started, $0.id) < ($1.started, $1.id)
+    }
+
+    for meeting in live where meeting.id != survivor?.id {
+      log(
+        "boot: orphaning stale meeting \(meeting.id) identity=\(identityLabel(meeting)) "
+          + "state=\(meeting.state.rawValue) age=\(ageSeconds(meeting)) "
+          + "lastActivity=\(ISO8601InstantCodec.format(lastActivity(meeting))) "
+          + "sources=\(sourceLabel(meeting)) rule=not-latest-active")
       meetings[meeting.id] = meeting
       if let identity = meeting.identity {
         byIdentity[identity] = meeting.id
       }
-      if meeting.isBrowserMeeting {
-        scheduleGraceExpiry(meetingID: meeting.id)
+      do {
+        _ = try await end(id: meeting.id, reason: .orphaned)
+      } catch {
+        log("boot: orphaning stale meeting \(meeting.id) failed: \(error)")
       }
-      if meeting.state == .active {
-        await startCapture(meeting.id, meeting.sources)
-      }
+    }
+
+    guard let survivor else { return }
+    log(
+      "boot: resuming meeting \(survivor.id) identity=\(identityLabel(survivor)) "
+        + "state=\(survivor.state.rawValue) age=\(ageSeconds(survivor)) "
+        + "lastActivity=\(ISO8601InstantCodec.format(lastActivity(survivor))) "
+        + "sources=\(sourceLabel(survivor)) rule=latest-active")
+    meetings[survivor.id] = survivor
+    if let identity = survivor.identity {
+      byIdentity[identity] = survivor.id
+    }
+    if survivor.isBrowserMeeting {
+      scheduleGraceExpiry(meetingID: survivor.id)
+    }
+    if survivor.state == .active {
+      log("boot: resuming capture for meeting \(survivor.id) sources=\(sourceLabel(survivor))")
+      await startCapture(survivor.id, survivor.sources)
     }
   }
 
@@ -182,6 +228,20 @@ public actor MeetingRegistry {
   /// returns its current state (merging any newly-named sources) — the
   /// recovery path for service-worker eviction and daemon restart alike.
   /// Without an identity this creates a manual meeting.
+  ///
+  /// ## Single active meeting invariant
+  ///
+  /// A start for a *new* identity (or a manual start) **supersedes** any meeting
+  /// still live: one user, one Mac, one call at a time. The superseded meeting
+  /// is run through its full end pipeline (interval close, session
+  /// materialization, on_end, capture teardown — ``EndReason/superseded``)
+  /// *before* the successor is created, so the new meeting rebuilds its capture
+  /// actors against its own directory and the wrong-directory hazard (#19)
+  /// becomes structurally impossible: at most one active meeting means exactly
+  /// one legal meeting directory for any capture actor at any moment. A
+  /// duplicate/racing start for the *same* identity is idempotent (handled
+  /// above) and never supersedes itself, which absorbs extension reconnect churn
+  /// (reconnects carry the same identity tag).
   public func start(_ params: MeetingStartParams) async throws -> Meeting {
     if let identity = params.identity,
       let existingID = byIdentity[identity],
@@ -194,6 +254,10 @@ public actor MeetingRegistry {
         await publish(&existing)
       }
       meetings[existing.id] = existing
+      log(
+        "meeting.start idempotent re-declare: meeting=\(existing.id) "
+          + "identity=\(identityLabel(existing)) merged_sources=\(merged) "
+          + "sources=\(sourceLabel(existing))")
       // Idempotent daemon-side: re-declaring the same meeting only starts
       // capture for sources it hasn't already claimed.
       await startCapture(existing.id, existing.sources)
@@ -203,6 +267,26 @@ public actor MeetingRegistry {
     let now = clock.now()
     let identity = params.identity
     let trigger = params.trigger ?? .manual
+
+    // Enforce the single-active-meeting invariant: supersede every meeting still
+    // live before creating this one. Under the invariant there is at most one,
+    // but sweep all defensively (sorted for a deterministic, oldest-first log).
+    let newIdentityLabel = identity.map { "\($0.platform):\($0.externalID)" } ?? "-"
+    let toSupersede = meetings.values
+      .filter { $0.state != .ended }
+      .sorted { ($0.started, $0.id) < ($1.started, $1.id) }
+    for old in toSupersede {
+      log(
+        "meeting.start supersede: new_meeting_identity=\(newIdentityLabel) "
+          + "superseded_meeting=\(old.id) superseded_identity=\(identityLabel(old)) "
+          + "age=\(ageSeconds(old)) lastActivity=\(ISO8601InstantCodec.format(lastActivity(old))) "
+          + "reason=superseded")
+      do {
+        _ = try await end(id: old.id, reason: .superseded)
+      } catch {
+        log("meeting.start supersede of \(old.id) failed: \(error)")
+      }
+    }
     // Tagged ingest streams that opened before this start claim their
     // membership now (see `link(source:to:)`).
     var declared = params.sources
@@ -228,6 +312,10 @@ public actor MeetingRegistry {
     if let identity {
       byIdentity[identity] = meeting.id
     }
+    log(
+      "meeting.start: meeting=\(meeting.id) identity=\(newIdentityLabel) "
+        + "trigger=\(trigger.rawValue) sources=\(sourceLabel(meeting)) "
+        + "superseded=\(toSupersede.count)")
     await startCapture(meeting.id, meeting.sources)
     return meeting
   }
@@ -425,10 +513,29 @@ public actor MeetingRegistry {
     if let identity {
       await link(source: source, to: identity)
     }
-    for meeting in meetings.values
-    where meeting.state != .ended && meeting.sources.contains(source) {
+
+    // Scope the grace cancellation to the meeting this open's identity tag
+    // resolves to — NOT every non-ended meeting whose roster happens to include
+    // the (slot-style, non-unique) `source` label. Bumping the generation for
+    // unrelated meetings sharing a `browser:meet:speaker-N` slot is exactly what
+    // kept stale meetings perpetually alive (#24). With no tag, fall back to the
+    // meetings that name the source (at most one under the single-active
+    // invariant).
+    let resolvedIdentity = identity.map { "\($0.platform):\($0.externalID)" } ?? "-"
+    let resolvedMeetings: [String]
+    if let identity, let id = byIdentity[identity] {
+      resolvedMeetings = [id]
+    } else {
+      resolvedMeetings = meetings.values
+        .filter { $0.state != .ended && $0.sources.contains(source) }
+        .map(\.id)
+    }
+    for id in resolvedMeetings {
       // Bump the generation: any in-flight grace timer becomes a no-op.
-      graceGeneration[meeting.id, default: 0] += 1
+      graceGeneration[id, default: 0] += 1
+      log(
+        "grace cancelled: meeting=\(id) cause=ingest.open source=\(source.rawValue) "
+          + "resolved_identity=\(resolvedIdentity) generation=\(graceGeneration[id]!)")
     }
   }
 
@@ -487,6 +594,10 @@ public actor MeetingRegistry {
   private func scheduleGraceExpiry(meetingID: String) {
     graceGeneration[meetingID, default: 0] += 1
     let generation = graceGeneration[meetingID]!
+    let deadline = clock.now().advanced(by: graceSeconds)
+    log(
+      "grace scheduled: meeting=\(meetingID) "
+        + "deadline=\(ISO8601InstantCodec.format(deadline)) generation=\(generation)")
     let wait = sleep
     let seconds = graceSeconds
     Task { [weak self] in
@@ -501,7 +612,13 @@ public actor MeetingRegistry {
       meeting.state != .ended,
       meeting.isBrowserMeeting,
       !hasLiveIngest(meeting)
-    else { return }
+    else {
+      log(
+        "grace expiry no-op: meeting=\(meetingID) generation=\(generation) "
+          + "current_generation=\(graceGeneration[meetingID].map(String.init) ?? "-")")
+      return
+    }
+    log("grace expiry firing: meeting=\(meetingID) generation=\(generation) reason=ingest-idle")
     do {
       _ = try await end(id: meetingID, reason: .ingestIdle)
       log("meeting \(meetingID) ended: ingest idle past grace")
@@ -635,5 +752,37 @@ public actor MeetingRegistry {
   private static func defaultTitle(identity: MeetingIdentity?) -> String {
     guard let identity else { return "meeting" }
     return "\(identity.platform) \(identity.externalID)"
+  }
+
+  // MARK: - Log helpers
+
+  /// `platform:external_id`, or `-` for a manual meeting — a stable, greppable
+  /// identity token for the supersede/boot logs.
+  private func identityLabel(_ meeting: Meeting) -> String {
+    meeting.identity.map { "\($0.platform):\($0.externalID)" } ?? "-"
+  }
+
+  /// A comma-joined source list, or `-` when empty.
+  private func sourceLabel(_ meeting: Meeting) -> String {
+    meeting.sources.isEmpty ? "-" : meeting.sources.map(\.rawValue).joined(separator: ",")
+  }
+
+  /// Whole seconds since this meeting started, at the current clock — how a
+  /// weeks-old "active" meeting reads as anomalous in the boot/supersede logs.
+  private func ageSeconds(_ meeting: Meeting) -> Int {
+    Int(clock.now().interval(since: meeting.started))
+  }
+
+  /// The most recent interval boundary (or `started` if none) — the meeting's
+  /// last observable activity, surfaced alongside age in the supersede/boot logs.
+  private func lastActivity(_ meeting: Meeting) -> Instant {
+    var latest = meeting.started
+    for interval in meeting.intervals {
+      latest = max(latest, interval.start)
+      if let end = interval.end {
+        latest = max(latest, end)
+      }
+    }
+    return latest
   }
 }

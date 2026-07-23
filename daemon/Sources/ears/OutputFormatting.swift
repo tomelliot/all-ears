@@ -38,14 +38,16 @@ enum OutputFormatting {
 
   static func humanStatus(_ data: StatusData) -> String {
     var lines = ["uptime: \(data.uptimeSeconds)s"]
-    lines.append(contentsOf: data.sources.map(humanSourceLine))
+    lines.append(contentsOf: data.sources.map { "source\t" + humanSourceLine($0) })
+    // Meetings and sessions each carry an explicit row-kind prefix so a meeting
+    // id can't be read as a source id (or a session) in the flat status list.
     if !data.meetings.isEmpty {
       lines.append(contentsOf: data.meetings.map(humanMeetingLine))
     }
     if !data.sessions.isEmpty {
       lines.append(
         contentsOf: data.sessions.map {
-          "session \($0.id)\t\($0.state.rawValue)"
+          "session\t\($0.id)\t\($0.state.rawValue)"
         })
     }
     return lines.joined(separator: "\n")
@@ -92,6 +94,7 @@ enum OutputFormatting {
 
   static func humanMeetingLine(_ meeting: Meeting) -> String {
     var parts = [
+      "meeting",
       meeting.id,
       meeting.state.rawValue,
       "\"\(meeting.title)\"",
@@ -103,7 +106,24 @@ enum OutputFormatting {
     if !meeting.attendees.isEmpty {
       parts.append("attendees=\(meeting.attendees.count)")
     }
+    // Age surfacing (#24): the start instant, and the last interval boundary as
+    // last-activity, so a weeks-old still-`active` meeting is visually anomalous.
+    parts.append("started=\(ISO8601InstantCodec.format(meeting.started))")
+    parts.append("last_activity=\(ISO8601InstantCodec.format(lastActivity(meeting)))")
     return parts.joined(separator: "\t")
+  }
+
+  /// The most recent interval boundary (or `started` if none) — mirrors the
+  /// daemon's own last-activity notion for the CLI's meeting rows.
+  private static func lastActivity(_ meeting: Meeting) -> Instant {
+    var latest = meeting.started
+    for interval in meeting.intervals {
+      latest = max(latest, interval.start)
+      if let end = interval.end {
+        latest = max(latest, end)
+      }
+    }
+    return latest
   }
 
   static func humanEvent(_ frame: EventFrame) -> String {

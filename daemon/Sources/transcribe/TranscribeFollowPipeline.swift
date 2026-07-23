@@ -113,7 +113,8 @@ enum TranscribeFollowPipeline {
     static func production(
       loadOptions: LoadOptions,
       publisher: SegmentEventPublisher,
-      isStopped: @escaping @Sendable () -> Bool
+      isStopped: @escaping @Sendable () -> Bool,
+      onError: (@Sendable (String) -> Void)? = nil
     ) -> Dependencies {
       Dependencies(
         clock: SystemClock(),
@@ -136,6 +137,7 @@ enum TranscribeFollowPipeline {
         },
         writeStderr: { line in
           FileHandle.standardError.write(Data((line + "\n").utf8))
+          onError?(line)
         }
       )
     }

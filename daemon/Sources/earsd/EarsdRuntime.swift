@@ -47,6 +47,13 @@ enum EarsdRuntime {
         await logHandle.emit("SIGTERM received, shutting down")
         await handle.stopIfStarted()
         await logHandle.emit("stopped")
+        // A daemon's run "completes" at shutdown, not at startup, so its
+        // `run.summary` belongs here — logging `status=ok` at boot (as the
+        // shared CLI bootstrap used to) claimed success before capture had
+        // even started, and before the failures issue #25 describes (a
+        // `run.summary status=ok` immediately followed by fatal capture
+        // errors). A clean SIGTERM shutdown is the honest success signal.
+        await logHandle.emitRunSummary()
         exit(0)
       }
     }
@@ -87,7 +94,7 @@ enum EarsdRuntime {
       loaded: loaded, tool: "earsd", clock: SystemClock())
     {
       daemonLogSink = bootstrap.sink
-      await logHandle.set(bootstrap.sink)
+      await logHandle.set(bootstrap.sink, effectiveLevel: bootstrap.effectiveLevel)
     }
 
     let resolution = DaemonConfigResolution.resolve(config: loaded.value, now: SystemClock().now())
@@ -190,16 +197,23 @@ enum EarsdRuntime {
 /// escaping signal-handler `Task` and `run(arguments:)` both touch it.
 private actor LogHandle {
   private var sink: (any LogRecordSink)?
+  /// The effective `[log].level`, captured alongside the sink so the shutdown
+  /// `run.summary` respects the same threshold the CLI bootstrap applies to
+  /// `run.start` (a `--log-level error` run keeps both info-level records out
+  /// of the file). Defaults to `.info` until ``set(_:effectiveLevel:)`` runs.
+  private var effectiveLevel: LogLevel = .info
   private let pid = ProcessInfo.processInfo.processIdentifier
   private let clock = SystemClock()
 
-  func set(_ sink: any LogRecordSink) {
+  func set(_ sink: any LogRecordSink, effectiveLevel: LogLevel) {
     self.sink = sink
+    self.effectiveLevel = effectiveLevel
   }
 
   /// Logs one lifecycle message as a `daemon.log` ``LogRecord`` through the
-  /// sink once ``set(_:)`` has run; before that (e.g. a `SIGTERM` during early
-  /// startup) it writes the bare message to stderr so nothing is lost.
+  /// sink once ``set(_:effectiveLevel:)`` has run; before that (e.g. a
+  /// `SIGTERM` during early startup) it writes the bare message to stderr so
+  /// nothing is lost.
   func emit(_ message: String, level: LogLevel = .notice, event: String = "daemon.log") async {
     guard let sink else {
       FileHandle.standardError.write(Data(("earsd: " + message + "\n").utf8))
@@ -209,6 +223,20 @@ private actor LogHandle {
       ts: clock.now(), level: level, tool: "earsd",
       subsystem: "net.tomelliot.ears", category: "earsd", pid: pid,
       event: event, msg: message)
+    try? await sink.log(record)
+  }
+
+  /// Emits the daemon's final `run.summary` at shutdown. Gated by the
+  /// effective log level (like the CLI bootstrap's `run.start`), and skipped
+  /// entirely before the sink exists — a `SIGTERM` during the pre-config
+  /// startup window has no meaningful run to summarize.
+  func emitRunSummary(status: String = "ok") async {
+    guard let sink else { return }
+    guard LogLevel.info >= effectiveLevel else { return }
+    let record = RunSummary.record(
+      ts: clock.now(), level: .info, tool: "earsd",
+      subsystem: "net.tomelliot.ears", category: "earsd", pid: pid,
+      fields: [LogField("status", .string(status))])
     try? await sink.log(record)
   }
 }
