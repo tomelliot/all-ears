@@ -1,7 +1,7 @@
 import { gzipSync } from "node:zlib";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { installHook, setCollectionsListener, setEncodedAudioListener, type EncodedAudioFrameLike } from "./rtc-hook";
-import type { CollectionsSpeakingEvent } from "./identity/meet-collections";
+import type { CollectionsMuteEvent } from "./identity/meet-collections";
 
 // Node has global ReadableStream/WritableStream (18+); no DOM needed. We fake
 // just enough of the browser surface (window === globalThis, location,
@@ -321,7 +321,7 @@ describe("Meet collections datachannel (rtc-hook.ts)", () => {
 
   it("parses a collections-labeled channel's message and forwards it to the registered listener", async () => {
     const { pc } = installAndConnect();
-    const events: CollectionsSpeakingEvent[] = [];
+    const events: CollectionsMuteEvent[] = [];
     setCollectionsListener((e) => events.push(e));
 
     const channel = fakeDataChannel("collections");
@@ -334,12 +334,12 @@ describe("Meet collections datachannel (rtc-hook.ts)", () => {
     // races the decode.
     await waitFor(() => events.length > 0);
 
-    expect(events).toEqual([{ deviceId: "spaces/abc/devices/377", speaking: true }]);
+    expect(events).toEqual([{ deviceId: "spaces/abc/devices/377", micOpen: true }]);
   });
 
   it("ignores datachannels not labeled 'collections'", async () => {
     const { pc } = installAndConnect();
-    const events: CollectionsSpeakingEvent[] = [];
+    const events: CollectionsMuteEvent[] = [];
     setCollectionsListener((e) => events.push(e));
 
     const channel = fakeDataChannel("some-other-channel");
@@ -352,7 +352,7 @@ describe("Meet collections datachannel (rtc-hook.ts)", () => {
 
   it("drops unparseable messages silently — no listener call, no throw", async () => {
     const { pc } = installAndConnect();
-    const events: CollectionsSpeakingEvent[] = [];
+    const events: CollectionsMuteEvent[] = [];
     setCollectionsListener((e) => events.push(e));
 
     const channel = fakeDataChannel("collections");

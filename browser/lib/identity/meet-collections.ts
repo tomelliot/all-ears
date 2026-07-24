@@ -11,40 +11,49 @@
 // Wire shape: gzip-compressed protobuf. Field-number path from the message
 // root:
 //   1.2.3.2.6    string  device id, "spaces/<space>/devices/<device>"
-//   1.2.3.2.10.1 varint  speaking flag: 0 = turn start, 1 = turn end (debounced)
+//   1.2.3.2.10.1 varint  mute flag: 0 = mic open (unmute), 1 = muted
 //
 // LIVE-VERIFIED 2026-07-19 against a real 3-participant Meet call (journal
-// follow-up entries after #54) — this corrected the speaking-flag path from
-// what journal #49 originally documented (1.2.3.10.1, four levels). The real
+// follow-up entries after #54) — this corrected the flag path from what
+// journal #49 originally documented (1.2.3.10.1, four levels). The real
 // wire nests the flag one level deeper, inside the same per-device record
 // (field 2) that holds the device id, not as a sibling of it under field 3:
 // 1.2.3.2.10.1 (five levels). #49's device-id path was already correct.
-// Verified by capturing real messages while manually unmuting two
-// participants and watching field 1.2.3.2.10.1 flip 0/1 in lockstep — see the
-// real (not synthetic) fixtures in meet-collections.test.ts.
+//
+// RE-INTERPRETED 2026-07-24 (dev/captures/2026-07-24-meet-collections-drift.md):
+// the flag is a MUTE-STATE EDGE, not a speaking-turn indicator. A controlled
+// two-account call showed zero collections messages during minutes of
+// conversation with clean turn-taking, and one message per deliberate
+// mute/unmute toggle (flag 0 on unmute, 1 on mute, decoded offline from raw
+// captures). The 2026-07-19 verification watched manual unmutes, which is why
+// the flag looked like a turn indicator. Whether per-turn events ever existed
+// on this channel or the 07-19 run was always seeing mute edges is unknowable
+// now; what matters is the current build only emits mute edges. Identity
+// correlation therefore pairs these edges against track-level unmute events
+// (see meet.ts), not against decoded-audio speaking onsets.
 //
 // (1.2.3.2.4, the secondary participant-number string, is documented in the
 // prompt but unused — identify() only needs the device id.)
 
-export interface CollectionsSpeakingEvent {
+export interface CollectionsMuteEvent {
   deviceId: string;
-  /** true = turn start (flag 0), false = turn end (flag 1, debounced 0.4-1.5s after audio stops). */
-  speaking: boolean;
+  /** true = mic open (flag 0, sent on unmute and on joining unmuted), false = muted (flag 1). */
+  micOpen: boolean;
 }
 
 const DEVICE_ID_PATH = [1, 2, 3, 2, 6] as const;
-const SPEAKING_FLAG_PATH = [1, 2, 3, 2, 10, 1] as const;
+const MUTE_FLAG_PATH = [1, 2, 3, 2, 10, 1] as const;
 
 /** Parse a raw datachannel message payload end to end. Never throws. */
-export async function parseCollectionsMessage(raw: ArrayBuffer): Promise<CollectionsSpeakingEvent | null> {
+export async function parseCollectionsMessage(raw: ArrayBuffer): Promise<CollectionsMuteEvent | null> {
   try {
     const inflated = await inflateGzip(raw);
     if (!inflated) return null;
     const deviceId = readStringAtPath(inflated, DEVICE_ID_PATH);
     if (!deviceId) return null;
-    const flag = readVarintAtPath(inflated, SPEAKING_FLAG_PATH);
+    const flag = readVarintAtPath(inflated, MUTE_FLAG_PATH);
     if (flag !== 0 && flag !== 1) return null;
-    return { deviceId, speaking: flag === 0 };
+    return { deviceId, micOpen: flag === 0 };
   } catch {
     return null;
   }

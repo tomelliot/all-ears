@@ -134,3 +134,55 @@ describe("SpeakingCorrelator", () => {
     expect(match).toEqual({ trackKey: "track-a", deviceId: "device-377", confirmations: 2 });
   });
 });
+
+// MeetAdapter's second correlator instance: collections mic-open edge ↔ the
+// track-level "unmute" event, with a 2s window (the two edges ride different
+// transports; the 2026-07-24 controlled test measured them ≤ ~900ms apart on
+// every deliberate toggle — dev/captures/2026-07-24-meet-collections-drift.md).
+// Same class, wider window; these tests replay the live timelines.
+describe("SpeakingCorrelator as the unmute-edge correlator (2s window)", () => {
+  const UNMUTE_WINDOW_MS = 2000;
+
+  it("pairs a mic-open edge with a track unmute ~900ms apart (live 2026-07-24 timing)", () => {
+    const c = new SpeakingCorrelator(UNMUTE_WINDOW_MS);
+    // Track unmute at 17:31:49.0xx, collections flag=0 at 17:31:49.909.
+    expect(c.recordAudioOnset("track-0915597b", 109_000)).toBeNull();
+    const match = c.recordDeviceOnset("spaces/KGtf2n-bR-gB/devices/105", 109_909);
+    expect(match).toEqual({
+      trackKey: "track-0915597b",
+      deviceId: "spaces/KGtf2n-bR-gB/devices/105",
+      confirmations: 1,
+    });
+  });
+
+  it("pairs the join-unmuted case where the edges land within the same second", () => {
+    const c = new SpeakingCorrelator(UNMUTE_WINDOW_MS);
+    // Guest joined unmuted: collections flag=0 at 17:03:28.x, track unmute same second.
+    expect(c.recordDeviceOnset("spaces/nN-Aql2-48gB/devices/87", 208_500)).toBeNull();
+    const match = c.recordAudioOnset("track-b485e2d8", 208_900);
+    expect(match).toEqual({
+      trackKey: "track-b485e2d8",
+      deviceId: "spaces/nN-Aql2-48gB/devices/87",
+      confirmations: 1,
+    });
+  });
+
+  it("refuses to pair when a DTX-resume unmute from another track shares the window", () => {
+    // A remote track also fires "unmute" when RTP resumes after DTX silence,
+    // with no collections edge. If one coincides with someone else's real
+    // toggle, the pairing is ambiguous and must stay unconsumed.
+    const c = new SpeakingCorrelator(UNMUTE_WINDOW_MS);
+    c.recordAudioOnset("track-toggler", 50_000);
+    c.recordAudioOnset("track-dtx-resume", 50_600);
+    expect(c.recordDeviceOnset("devices/105", 50_400)).toBeNull();
+  });
+
+  it("lets a lone DTX-resume unmute age out without ever matching", () => {
+    const c = new SpeakingCorrelator(UNMUTE_WINDOW_MS);
+    c.recordAudioOnset("track-dtx-resume", 10_000); // no collections edge follows
+    // A real toggle 5s later pairs with its own unmute only.
+    c.recordAudioOnset("track-toggler", 15_000);
+    const match = c.recordDeviceOnset("devices/105", 15_400);
+    expect(match).toEqual({ trackKey: "track-toggler", deviceId: "devices/105", confirmations: 1 });
+  });
+});

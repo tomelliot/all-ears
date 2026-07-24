@@ -129,24 +129,24 @@ function realFixtureBuffer(bytes: readonly number[]): ArrayBuffer {
 }
 
 describe("parseCollectionsMessage (real captured fixtures, live 2026-07-19)", () => {
-  it("device 444, flag 0 (turn start) → speaking=true", async () => {
+  it("device 444, flag 0 (mic open) → micOpen=true", async () => {
     const parsed = await parseCollectionsMessage(realFixtureBuffer(REAL_FIXTURES.device444_flag0));
-    expect(parsed).toEqual({ deviceId: "spaces/ghjFzv4akzYB/devices/444", speaking: true });
+    expect(parsed).toEqual({ deviceId: "spaces/ghjFzv4akzYB/devices/444", micOpen: true });
   });
 
-  it("device 444, flag 1 (turn end) → speaking=false", async () => {
+  it("device 444, flag 1 (muted) → micOpen=false", async () => {
     const parsed = await parseCollectionsMessage(realFixtureBuffer(REAL_FIXTURES.device444_flag1));
-    expect(parsed).toEqual({ deviceId: "spaces/ghjFzv4akzYB/devices/444", speaking: false });
+    expect(parsed).toEqual({ deviceId: "spaces/ghjFzv4akzYB/devices/444", micOpen: false });
   });
 
-  it("device 445, flag 0 (turn start) → speaking=true", async () => {
+  it("device 445, flag 0 (mic open) → micOpen=true", async () => {
     const parsed = await parseCollectionsMessage(realFixtureBuffer(REAL_FIXTURES.device445_flag0));
-    expect(parsed).toEqual({ deviceId: "spaces/ghjFzv4akzYB/devices/445", speaking: true });
+    expect(parsed).toEqual({ deviceId: "spaces/ghjFzv4akzYB/devices/445", micOpen: true });
   });
 
-  it("device 445, flag 1 (turn end) → speaking=false", async () => {
+  it("device 445, flag 1 (muted) → micOpen=false", async () => {
     const parsed = await parseCollectionsMessage(realFixtureBuffer(REAL_FIXTURES.device445_flag1));
-    expect(parsed).toEqual({ deviceId: "spaces/ghjFzv4akzYB/devices/445", speaking: false });
+    expect(parsed).toEqual({ deviceId: "spaces/ghjFzv4akzYB/devices/445", micOpen: false });
   });
 
   it("the real captured channel-open handshake message (33B) parses as null, not a crash", async () => {
@@ -160,16 +160,16 @@ describe("parseCollectionsMessage (real captured fixtures, live 2026-07-19)", ()
 });
 
 describe("parseCollectionsMessage (end to end)", () => {
-  it("extracts device id and speaking=true for flag 0 (turn start)", async () => {
+  it("extracts device id and micOpen=true for flag 0 (mic open)", async () => {
     const msg = buildMessage({ deviceId: "spaces/SNeKtGxvmH0B/devices/377", participantNumber: "112470408", flag: 0 });
     const parsed = await parseCollectionsMessage(gzipOf(msg));
-    expect(parsed).toEqual({ deviceId: "spaces/SNeKtGxvmH0B/devices/377", speaking: true });
+    expect(parsed).toEqual({ deviceId: "spaces/SNeKtGxvmH0B/devices/377", micOpen: true });
   });
 
-  it("extracts device id and speaking=false for flag 1 (turn end)", async () => {
+  it("extracts device id and micOpen=false for flag 1 (muted)", async () => {
     const msg = buildMessage({ deviceId: "spaces/SNeKtGxvmH0B/devices/378", flag: 1 });
     const parsed = await parseCollectionsMessage(gzipOf(msg));
-    expect(parsed).toEqual({ deviceId: "spaces/SNeKtGxvmH0B/devices/378", speaking: false });
+    expect(parsed).toEqual({ deviceId: "spaces/SNeKtGxvmH0B/devices/378", micOpen: false });
   });
 
   it("returns null when the device id field is absent", async () => {
@@ -177,7 +177,7 @@ describe("parseCollectionsMessage (end to end)", () => {
     expect(await parseCollectionsMessage(gzipOf(msg))).toBeNull();
   });
 
-  it("returns null when the speaking flag field is absent", async () => {
+  it("returns null when the mute flag field is absent", async () => {
     const msg = buildMessage({ deviceId: "spaces/x/devices/1" });
     expect(await parseCollectionsMessage(gzipOf(msg))).toBeNull();
   });

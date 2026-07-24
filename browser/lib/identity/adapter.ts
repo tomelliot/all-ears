@@ -21,6 +21,15 @@ export interface PlatformAdapter {
    */
   onTrackSpeaking?(track: MediaStreamTrack, speaking: boolean): void;
   /**
+   * Optional: called by audio-tap.ts when a remote track fires its "unmute"
+   * event — the platform resumed sending RTP for it. On Meet this pairs with
+   * the collections channel's per-device mic-open edge (the only per-device
+   * event that channel still carries — see meet-collections.ts, 2026-07-24
+   * re-interpretation) to correlate a track to a device id. Same best-effort
+   * contract as onTrackSpeaking.
+   */
+  onTrackUnmute?(track: MediaStreamTrack): void;
+  /**
    * Optional: register a callback for a later, asynchronous identity upgrade
    * — an id resolved after identify() already returned null (or a fallback)
    * for that track at +track time. At most one upgrade per track is expected;

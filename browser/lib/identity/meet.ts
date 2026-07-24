@@ -1,7 +1,7 @@
 import { registerAdapter, type PlatformAdapter } from "./adapter";
 import type { ParticipantId, RosterEntry } from "../protocol";
 import { setCollectionsListener } from "../rtc-hook";
-import type { CollectionsSpeakingEvent } from "./meet-collections";
+import type { CollectionsMuteEvent } from "./meet-collections";
 import { SpeakingCorrelator, type CorrelatorMatch } from "./meet-correlator";
 
 // Meet identity — Phase 4: tile-DOM correlation (identify(), synchronous),
@@ -30,12 +30,26 @@ import { SpeakingCorrelator, type CorrelatorMatch } from "./meet-correlator";
 //      RTCDataChannel (meet-collections.ts) and forwards events here via
 //      setCollectionsListener.
 //   2. audio-tap.ts calls onTrackSpeaking(track, speaking) on every track's
-//      audio-domain speaking edge (unconditionally, not debug-gated).
-//   3. Both onset streams feed a SpeakingCorrelator (meet-correlator.ts, pure
-//      logic, independently unit-tested): a device onset and exactly one
-//      live track's audio onset within ~200ms of each other is a candidate
-//      pairing. Requires CONFIRM_THRESHOLD (1, see its own comment below)
-//      consecutive confirming turns before it's trusted.
+//      audio-domain speaking edge (unconditionally, not debug-gated), and
+//      onTrackUnmute(track) on every track's "unmute" event.
+//   3. TWO SpeakingCorrelator instances (meet-correlator.ts, pure logic,
+//      independently unit-tested) pair device events against track events:
+//      - `correlator`: collections mic-open edge ↔ decoded-audio speaking
+//        onset within ~200ms. This was the original design when the flag was
+//        believed to be a per-turn speaking indicator; on the current build
+//        the channel emits NO per-turn events (verified 2026-07-24,
+//        dev/captures/2026-07-24-meet-collections-drift.md), so this pairing
+//        can only fire in the join-unmuted case where the mic-open edge lands
+//        with the first audio. Kept because it costs nothing and re-arms
+//        automatically if a future build brings per-turn events back.
+//      - `unmuteCorrelator`: collections mic-open edge ↔ the track-level
+//        "unmute" event, within ~2s. This is the pairing the current build
+//        actually supports: the controlled 2026-07-24 test showed the two
+//        edges landing within the same second on every deliberate toggle.
+//        One shot per participant per unmute, but reliable — anyone who joins
+//        muted and unmutes to speak produces exactly this pair.
+//      Both require CONFIRM_THRESHOLD (1, see its own comment below)
+//      consecutive confirming pairings before being trusted.
 //   4. Once confirmed, the upgraded id is pushed via the onIdentify(cb)
 //      callback registered by audio-tap.ts, which restarts that track's
 //      pipeline as a new segment under the real id (see audio-tap.ts's
@@ -304,6 +318,12 @@ function mediaStreamOf(el: MediaElementLike): StreamRef | null {
 // use ever shows a single-turn upgrade landing on the wrong participant.
 const CONFIRM_THRESHOLD = 1;
 const CORRELATION_WINDOW_MS = 200; // journal #50: onset pairs landed within tens of ms
+// The collections mic-open edge and the track's "unmute" event land close but
+// not tens-of-ms close: the DC message rides a different transport than the
+// RTP unmute, and the 2026-07-24 controlled test measured them within the
+// same second (≤ ~900ms apart) on every toggle. 2s covers that with margin
+// while staying far under the ~5s a human takes between deliberate toggles.
+const UNMUTE_CORRELATION_WINDOW_MS = 2_000;
 
 class MeetAdapter implements PlatformAdapter {
   readonly platform = "meet" as const;
@@ -318,9 +338,12 @@ class MeetAdapter implements PlatformAdapter {
 
   // ── Collections-datachannel upgrade state (see file-header doc comment) ──
   private readonly correlator = new SpeakingCorrelator(CORRELATION_WINDOW_MS);
-  /** deviceId → last-known speaking state, for future use (e.g. debugging);
+  /** Pairs the collections mic-open edge with the track-level unmute event —
+   * the only pairing the current Meet build's channel supports (see header). */
+  private readonly unmuteCorrelator = new SpeakingCorrelator(UNMUTE_CORRELATION_WINDOW_MS);
+  /** deviceId → last-known mic state, for future use (e.g. debugging);
    * not read for the correlation decision itself, which lives in correlator. */
-  private readonly deviceState = new Map<string, { speaking: boolean; lastSeen: number }>();
+  private readonly deviceState = new Map<string, { micOpen: boolean; lastSeen: number }>();
   /** track.id → live track, so a later match can hand the real track object
    * back to onIdentify. Populated from both identify() and onTrackSpeaking(),
    * whichever sees a track first; never explicitly pruned (bounded by the
@@ -405,12 +428,31 @@ class MeetAdapter implements PlatformAdapter {
     }
   }
 
-  private onCollectionsEvent(event: CollectionsSpeakingEvent): void {
+  /** audio-tap.ts calls this on every track's "unmute" event. A remote track
+   * unmutes when its RTP resumes — for a mic toggle that's the same moment the
+   * collections channel emits the device's mic-open edge, and the
+   * unmuteCorrelator pairs the two. (RTP also resumes after DTX silence with
+   * no collections edge; those unmutes just age out of the correlator's
+   * history, and its distinct-tracks ambiguity rule holds when one coincides
+   * with someone else's toggle.) */
+  onTrackUnmute(track: MediaStreamTrack): void {
     if (this.disposed) return;
     try {
-      this.deviceState.set(event.deviceId, { speaking: event.speaking, lastSeen: Date.now() });
-      if (!event.speaking) return; // only turn-start (flag 0) feeds the correlator
-      this.applyMatch(this.correlator.recordDeviceOnset(event.deviceId, Date.now()));
+      this.liveTracksById.set(track.id, track);
+      this.applyMatch(this.unmuteCorrelator.recordAudioOnset(track.id, Date.now()));
+    } catch {
+      // best-effort — same contract as onTrackSpeaking
+    }
+  }
+
+  private onCollectionsEvent(event: CollectionsMuteEvent): void {
+    if (this.disposed) return;
+    try {
+      const now = Date.now();
+      this.deviceState.set(event.deviceId, { micOpen: event.micOpen, lastSeen: now });
+      if (!event.micOpen) return; // only the mic-open edge is a correlatable onset
+      this.applyMatch(this.correlator.recordDeviceOnset(event.deviceId, now));
+      this.applyMatch(this.unmuteCorrelator.recordDeviceOnset(event.deviceId, now));
     } catch {
       // best-effort — same contract as onTrackSpeaking
     }

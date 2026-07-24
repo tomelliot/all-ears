@@ -232,7 +232,16 @@ function startPipeline(
   const end = () => stopPipeline(track);
   track.addEventListener("ended", end);
   track.addEventListener("mute", () => console.debug(`[ears][capture] mute → ${participantId}`));
-  track.addEventListener("unmute", () => console.debug(`[ears][capture] unmute → ${participantId}`));
+  track.addEventListener("unmute", () => {
+    console.debug(`[ears][capture] unmute → ${participantId}`);
+    // Meet identity: an unmute pairs with the collections channel's per-device
+    // mic-open edge (the only per-device event that channel still carries).
+    try {
+      cfg.adapter?.onTrackUnmute?.(track);
+    } catch {
+      // best-effort — identity must never affect capture
+    }
+  });
 }
 
 function stopPipeline(track: MediaStreamTrack): void {
@@ -828,6 +837,57 @@ interface FrameForensic {
   toc: number;
 }
 
+/**
+ * Unwrap an RFC 2198 RED payload to its primary (current) block, or return
+ * null when `data` doesn't parse as RED.
+ *
+ * Meet wraps its Opus stream in RED adaptively (redundancy kicks in under
+ * packet loss), and those packets reach the encoded-audio tee as-is: the
+ * 2026-07-24 live captures show every "AudioDecoder error: Decoding error"
+ * frame starting 0xEF — not an Opus TOC but the RED block header
+ * `F=1 | PT=111` (111 is Meet's Opus payload type). Feeding RED to a plain
+ * Opus decoder fails per-packet, which is journal #45's entire error class.
+ *
+ * Wire shape (RFC 2198): N redundant-block headers (4 bytes each, F bit set:
+ * F|PT, 14-bit timestamp offset, 10-bit block length), one primary header
+ * (1 byte, F bit clear), then the blocks in header order — redundant blocks
+ * first at their declared lengths, primary block last taking the remainder.
+ * The primary block is the current frame; redundant blocks re-carry earlier
+ * frames the decoder has usually already seen, so only the primary is fed.
+ *
+ * Defensive by contract: a genuine Opus TOC can also carry the high bit, so
+ * a payload is only treated as RED when the full header chain parses — every
+ * header PT identical and the declared redundant lengths fitting exactly
+ * inside the payload. Anything else returns null and is fed to the decoder
+ * unchanged.
+ */
+export function unwrapRedPayload(data: ArrayBuffer): ArrayBuffer | null {
+  const bytes = new Uint8Array(data);
+  let offset = 0;
+  let redundantBytes = 0;
+  let redundantHeaders = 0;
+  let primaryPT = -1;
+  while (offset < bytes.length) {
+    const first = bytes[offset]!;
+    const pt = first & 0x7f;
+    if (primaryPT === -1) primaryPT = pt;
+    else if (pt !== primaryPT) return null; // mixed PTs — not a RED chain
+    if ((first & 0x80) === 0) {
+      // Primary header (1 byte) — blocks follow.
+      if (redundantHeaders === 0) return null; // no redundancy → plain payload
+      const blocksStart = offset + 1;
+      const primaryStart = blocksStart + redundantBytes;
+      if (primaryStart >= bytes.length) return null; // lengths don't fit
+      return bytes.slice(primaryStart).buffer;
+    }
+    if (offset + 4 > bytes.length) return null; // truncated header
+    redundantBytes += ((bytes[offset + 2]! & 0x03) << 8) | bytes[offset + 3]!;
+    redundantHeaders += 1;
+    offset += 4;
+  }
+  return null; // ran out of bytes before a primary header
+}
+
 export class MeetDecodeSource implements FrameSource {
   private stopped = false;
   private decoder?: AudioDecoderLike;
@@ -854,6 +914,8 @@ export class MeetDecodeSource implements FrameSource {
   private totalFramesDecoded = 0;
   private totalErrors = 0;
   private framesDroppedRecovering = 0;
+  /** RED payloads unwrapped to their primary block (see unwrapRedPayload). */
+  private redFramesUnwrapped = 0;
   private firstErrorReason?: string;
   private lastErrorReason?: string;
 
@@ -898,7 +960,15 @@ export class MeetDecodeSource implements FrameSource {
         output: (frame) => this.onDecodedFrame(frame),
         error: (err) => this.onDecoderError(`AudioDecoder error: ${err.message ?? String(err)}`),
       });
-      this.decoder.configure({ codec: "opus", sampleRate: 48000, numberOfChannels: 1 });
+      // Stereo, not mono: every "Decoding error" frame captured live carries
+      // TOC 0xef — Opus config 29 with the STEREO flag set. Meet switches its
+      // per-speaker stream between mono and stereo packets mid-call, and a
+      // mono-configured decoder dies on each stereo packet (journal #45's
+      // whole error class, root-caused 2026-07-24 during the drift capture —
+      // dev/captures/2026-07-24-meet-collections-drift.md). An Opus decoder
+      // configured stereo decodes BOTH: mono packets upmix to two identical
+      // channels, and consume()'s downmix folds either shape back to mono.
+      this.decoder.configure({ codec: "opus", sampleRate: 48000, numberOfChannels: 2 });
       this.framesSinceBuild = 0;
       this.coolingSince = undefined;
       return true;
@@ -994,7 +1064,8 @@ export class MeetDecodeSource implements FrameSource {
       `[ears][capture] ${this.track.id} giving up — capture summary: ` +
         `${this.totalFramesDecoded} frame(s) decoded over ${seconds}s, ` +
         `${this.totalErrors} decoder error(s), ${this.restarts.length} restart(s) in window, ` +
-        `${this.framesDroppedRecovering} frame(s) dropped while recovering; ` +
+        `${this.framesDroppedRecovering} frame(s) dropped while recovering, ` +
+        `${this.redFramesUnwrapped} RED payload(s) unwrapped; ` +
         `first error: ${this.firstErrorReason ?? "n/a"}; last error: ${this.lastErrorReason ?? "n/a"}`,
     );
     this.onFatalError(
@@ -1020,8 +1091,22 @@ export class MeetDecodeSource implements FrameSource {
     }
   }
 
-  private onEncodedFrame(frame: EncodedAudioFrameLike): void {
+  private onEncodedFrame(raw: EncodedAudioFrameLike): void {
     if (this.stopped) return;
+    // Meet interleaves RED-encapsulated packets into the Opus stream when its
+    // redundancy kicks in; unwrap those to their primary Opus block before
+    // decode (see unwrapRedPayload). Non-RED payloads pass through untouched.
+    let frame = raw;
+    const primary = unwrapRedPayload(raw.data);
+    if (primary) {
+      frame = { data: primary, timestamp: raw.timestamp };
+      this.redFramesUnwrapped++;
+      if (this.redFramesUnwrapped === 1) {
+        console.debug(
+          `[ears][capture] ${this.track.id} RED-encapsulated audio detected — unwrapping primary Opus blocks`,
+        );
+      }
+    }
     this.recordFrame(frame);
     if (!this.decoder) {
       // Decoder died and is cooling down: drop frames from before the next

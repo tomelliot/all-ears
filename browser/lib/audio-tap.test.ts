@@ -9,6 +9,7 @@ import {
   SILENT_CAPTURE_GRACE_MS,
   SilentCaptureWatchdog,
   silentReport,
+  unwrapRedPayload,
   type MeetDecodeDeps,
 } from "./audio-tap";
 import type { EncodedAudioListener } from "./rtc-hook";
@@ -214,6 +215,65 @@ class FakeChunk {
 
 const DECODING_ERROR = new Error("Decoding error.");
 const aFrame = () => ({ data: new ArrayBuffer(2), timestamp: 0 });
+
+describe("unwrapRedPayload", () => {
+  const PT = 111; // Meet's Opus payload type — RED headers carry 0x80|111 = 0xEF
+
+  /** Build an RFC 2198 RED payload: redundant blocks (4-byte headers), one
+   * primary (1-byte header), blocks in header order. */
+  function redPayload(redundantBlocks: number[][], primary: number[]): ArrayBuffer {
+    const bytes: number[] = [];
+    for (const block of redundantBlocks) {
+      const tsOffset = 960; // arbitrary 14-bit value
+      bytes.push(0x80 | PT, (tsOffset >> 6) & 0xff, ((tsOffset & 0x3f) << 2) | ((block.length >> 8) & 0x03), block.length & 0xff);
+    }
+    bytes.push(PT); // primary header, F clear
+    for (const block of redundantBlocks) bytes.push(...block);
+    bytes.push(...primary);
+    return new Uint8Array(bytes).buffer;
+  }
+
+  it("extracts the primary block from a one-redundancy payload (the live 0xEF shape)", () => {
+    const redundant = [1, 2, 3, 4, 5];
+    const primary = [0x78, 9, 8, 7]; // 0x78 = a plausible mono Opus TOC
+    const payload = redPayload([redundant], primary);
+    expect(new Uint8Array(payload)[0]).toBe(0xef); // matches every captured failing frame
+    expect([...new Uint8Array(unwrapRedPayload(payload)!)]).toEqual(primary);
+  });
+
+  it("extracts the primary block past multiple redundant blocks", () => {
+    const primary = [0x78, 42];
+    const payload = redPayload([[1, 1, 1], [2, 2]], primary);
+    expect([...new Uint8Array(unwrapRedPayload(payload)!)]).toEqual(primary);
+  });
+
+  it("returns null for a plain Opus payload whose TOC has the high bit set", () => {
+    // A genuine CELT TOC (e.g. 0xFB) is not a RED chain: read as a RED header
+    // its declared lengths won't fit the payload exactly.
+    const opus = new Uint8Array([0xfb, 1, 2, 3, 4, 5]).buffer;
+    expect(unwrapRedPayload(opus)).toBeNull();
+  });
+
+  it("returns null when header PTs disagree (not a RED chain)", () => {
+    const bytes = [0x80 | PT, 0, 0, 2, 0x80 | 96, 0, 0, 1, PT, 9, 9, 8, 7];
+    expect(unwrapRedPayload(new Uint8Array(bytes).buffer)).toBeNull();
+  });
+
+  it("returns null for a redundancy-free payload (F clear on the first byte)", () => {
+    const opus = new Uint8Array([0x78, 1, 2, 3]).buffer; // ordinary mono TOC
+    expect(unwrapRedPayload(opus)).toBeNull();
+  });
+
+  it("returns null when declared redundant lengths overrun the payload", () => {
+    const bytes = [0x80 | PT, 0, 0, 200, PT, 1, 2, 3]; // claims 200B redundant, has 3
+    expect(unwrapRedPayload(new Uint8Array(bytes).buffer)).toBeNull();
+  });
+
+  it("returns null for a truncated header chain", () => {
+    const bytes = [0x80 | PT, 0]; // 4-byte header cut short
+    expect(unwrapRedPayload(new Uint8Array(bytes).buffer)).toBeNull();
+  });
+});
 
 describe("MeetDecodeSource decoder recovery", () => {
   let clock = 0;

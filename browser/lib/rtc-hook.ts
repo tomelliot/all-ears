@@ -3,7 +3,7 @@ import {
   debugDecodeStructure,
   inflateGzip,
   parseCollectionsMessage,
-  type CollectionsSpeakingEvent,
+  type CollectionsMuteEvent,
 } from "./identity/meet-collections";
 
 // The RTCPeerConnection constructor hook — the singleton part of the capture
@@ -164,7 +164,7 @@ export function installHook(): void {
 // "warn once, degrade silently otherwise" shape as installMeetEncodedAudioTee
 // and meet.ts's maybeWarnStructure().
 
-export type CollectionsListener = (event: CollectionsSpeakingEvent) => void;
+export type CollectionsListener = (event: CollectionsMuteEvent) => void;
 
 interface CollectionsWindow extends Window {
   __earsCollectionsListener?: CollectionsListener;
@@ -694,21 +694,52 @@ function installMeetWebAudioProbe(): void {
       (a) => `processor="${String(a[1])}" ch=${(a[2] as { channelCount?: number })?.channelCount ?? "?"}`,
       () => (probeAudioWorkletNodeCount += 1),
     );
-    wrapCtor(
-      "MediaStreamTrackGenerator",
-      (a) => `kind=${(a[0] as { kind?: string })?.kind ?? String(a[0])}`,
-      () => (probeTrackGeneratorCount += 1),
-    );
+    // Audio generators are the leading candidate output of Meet's post-RTP
+    // pipeline (2026-07-24 drift capture): register each constructed audio
+    // generator (it IS a MediaStreamTrack) so a live session can reach the
+    // object, and fingerprint its energy when the debug flag is on.
+    {
+      const Native = w.MediaStreamTrackGenerator;
+      if (typeof Native === "function") {
+        const N = Native as new (...a: unknown[]) => object;
+        const Wrapped = function (this: unknown, ...args: unknown[]): object {
+          probeTrackGeneratorCount += 1;
+          const kind = (args[0] as { kind?: string })?.kind ?? String(args[0]);
+          console.debug(`[ears][probe][webaudio] new MediaStreamTrackGenerator — kind=${kind}`);
+          const instance = new N(...args);
+          if (kind === "audio") {
+            const track = instance as unknown as MediaStreamTrack;
+            registerWebAudioTrack(track, "generator");
+            monitorTrackEnergy(track, "generator");
+          }
+          return instance;
+        } as unknown as new (...a: unknown[]) => object;
+        Wrapped.prototype = N.prototype;
+        Object.setPrototypeOf(Wrapped, N);
+        w.MediaStreamTrackGenerator = Wrapped;
+      }
+    }
 
     // createMediaStreamSource tells us which stream (→ which participant) Meet
     // routes into WebAudio, if any. Pass-through method wrap on the prototype.
+    // Each audio track fed in is registered + energy-fingerprinted: on the
+    // drift-affected build the RTP receiver tracks are silent decoys, and
+    // whatever Meet hands to WebAudio here is where decoded participant audio
+    // actually lives — energy-per-track answers whether it's still
+    // per-participant (re-tappable) or already mixed.
     const acProto = (w.AudioContext as { prototype?: Record<string, unknown> } | undefined)?.prototype;
     const orig = acProto?.createMediaStreamSource;
     if (acProto && typeof orig === "function") {
       const native = orig as (...a: unknown[]) => unknown;
+      nativeCreateMediaStreamSource = native;
       acProto.createMediaStreamSource = function (this: unknown, ...args: unknown[]): unknown {
         probeMediaStreamSourceCount += 1;
         console.debug(`[ears][probe][webaudio] createMediaStreamSource(audioTracks=${streamTracks(args[0])})`);
+        const tracks = (args[0] as { getAudioTracks?: () => MediaStreamTrack[] } | null)?.getAudioTracks?.() ?? [];
+        for (const track of tracks) {
+          registerWebAudioTrack(track, "createMediaStreamSource");
+          monitorTrackEnergy(track, "createMediaStreamSource");
+        }
         return native.apply(this, args);
       };
     }
@@ -736,5 +767,117 @@ function installMeetWebAudioProbe(): void {
     }
   } catch (err) {
     console.debug("[ears][probe][webaudio] probe failed to install (non-fatal):", err);
+  }
+}
+
+// ── Re-tap investigation: WebAudio track registry + energy fingerprint ──────
+//
+// 2026-07-24 (dev/captures/2026-07-24-meet-collections-drift.md): Meet migrated
+// call audio off the RTCRtpReceiver path mid-call — receiver tracks stayed
+// live-but-silent while playback ran through a page-side NetEQ AudioWorklet fed
+// from tracks the hook never saw. The next instrumented call needs two things
+// this section provides:
+//
+//   1. `window.__earsWebAudioTracks` — the actual MediaStreamTrack objects Meet
+//      routes through WebAudio (createMediaStreamSource inputs, audio
+//      MediaStreamTrackGenerator outputs), keyed by track id. During the live
+//      capture session the track objects were unreachable (only their ids had
+//      been logged), which blocked measuring them; this registry closes that gap.
+//   2. Per-track energy fingerprints (`[ears][probe][webaudio] energy …`),
+//      gated by the same `__earsDebugAudio` localStorage flag as audio-tap's
+//      instrumentation: a throttled peak log per registered track, which
+//      answers THE feasibility question — is the WebAudio-side audio still
+//      per-participant (re-tappable), or already mixed?
+
+interface WebAudioTrackRecord {
+  track: MediaStreamTrack;
+  via: string;
+  registeredAt: string;
+}
+interface WebAudioTrackWindow extends Window {
+  __earsWebAudioTracks?: Map<string, WebAudioTrackRecord>;
+}
+
+/** Native (unwrapped) createMediaStreamSource, captured by the probe so the
+ * energy monitor never re-enters its own wrap. */
+let nativeCreateMediaStreamSource: ((...a: unknown[]) => unknown) | null = null;
+/** Lazy shared context for energy monitoring — one per page, only ever built
+ * when the debug flag is on and a track gets monitored. */
+let energyProbeContext: AudioContext | null = null;
+let monitoredTrackCount = 0;
+const ENERGY_PROBE_MAX_TRACKS = 16;
+const ENERGY_PROBE_INTERVAL_MS = 5_000;
+
+function webAudioTrackRegistry(): Map<string, WebAudioTrackRecord> {
+  const g = window as unknown as WebAudioTrackWindow;
+  if (!g.__earsWebAudioTracks) g.__earsWebAudioTracks = new Map();
+  return g.__earsWebAudioTracks;
+}
+
+function registerWebAudioTrack(track: MediaStreamTrack, via: string): void {
+  try {
+    const registry = webAudioTrackRegistry();
+    if (registry.has(track.id)) return;
+    registry.set(track.id, { track, via, registeredAt: new Date().toISOString() });
+  } catch {
+    // diagnostic only — never throws into Meet's audio path
+  }
+}
+
+function energyProbeEnabled(): boolean {
+  try {
+    return localStorage.getItem("__earsDebugAudio") === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Attach a throttled peak meter to `track`, logging only while it carries
+ * signal. Diagnostic only, `__earsDebugAudio`-gated, capped at
+ * ENERGY_PROBE_MAX_TRACKS so a tile-heavy call can't build unbounded graph. */
+function monitorTrackEnergy(track: MediaStreamTrack, via: string): void {
+  try {
+    if (!energyProbeEnabled() || !nativeCreateMediaStreamSource) return;
+    if (monitoredTrackCount >= ENERGY_PROBE_MAX_TRACKS) return;
+    monitoredTrackCount += 1;
+
+    if (!energyProbeContext) {
+      const Ctor = (window as unknown as { AudioContext?: typeof AudioContext }).AudioContext;
+      if (!Ctor) return;
+      energyProbeContext = new Ctor();
+    }
+    const ctx = energyProbeContext;
+    const source = nativeCreateMediaStreamSource.call(ctx, new MediaStream([track])) as MediaStreamAudioSourceNode;
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    source.connect(analyser); // analyser has no output connection — no playback
+    const buf = new Float32Array(analyser.fftSize);
+
+    const timer = setInterval(() => {
+      if (track.readyState === "ended") {
+        clearInterval(timer);
+        try {
+          source.disconnect();
+        } catch {
+          // already gone
+        }
+        console.debug(`[ears][probe][webaudio] energy via=${via} track=${track.id} — track ended, meter off`);
+        return;
+      }
+      analyser.getFloatTimeDomainData(buf);
+      let peak = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const a = Math.abs(buf[i]!);
+        if (a > peak) peak = a;
+      }
+      // Silent samples are the common case — only signal is worth a line.
+      if (peak > 0.001) {
+        console.debug(
+          `[ears][probe][webaudio] energy via=${via} track=${track.id} peak=${peak.toFixed(4)} (AUDIO)`,
+        );
+      }
+    }, ENERGY_PROBE_INTERVAL_MS);
+  } catch (err) {
+    console.debug("[ears][probe][webaudio] energy meter failed to attach (non-fatal):", err);
   }
 }
