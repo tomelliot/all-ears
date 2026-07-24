@@ -44,7 +44,7 @@ rotate_max_files = 5
 
 # --- Capture daemon ---
 [earsd]
-chunk_seconds            = 30
+chunk_seconds            = 30     # bounds live-transcription latency; use ~10 for `transcribe --follow`
 codec                    = "aac"  # aac | opus
 bitrate                  = 64000
 native_sample_rate       = 48000  # listenable chunks/ feed

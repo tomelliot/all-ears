@@ -5,7 +5,7 @@
 
 Local. Composable. Split by source (instead of untangled later).
 
-All Ears runs a small daemon that continuously records every audio source you configure (microphone, system audio, per-app audio, meeting-tab audio) into a rolling local buffer. It transcribes, cleans up, and summarises on demand or automatically when a meeting ends.
+All Ears runs a small daemon that continuously records every audio source you configure (microphone, system audio, per-app audio, meeting-tab audio) into a rolling local buffer. It transcribes live while you're in the meeting, and cleans up and summarises when the meeting ends.
 
 ## Why All Ears
 
@@ -13,7 +13,6 @@ All Ears runs a small daemon that continuously records every audio source you co
 - **Knows who said what, by name, on Google Meet.** The browser extension isolates each remote participant's audio into its own stream and reads their real display name straight off the call UI, without manual labelling or voice-print guessing. Zoom gets the same per-participant separation from the call's own tracks. Teams gets attributed `Speaker N` streams instead.
 - **Sources are separated before transcription, not after.** Mic, system audio, each app, and each meeting participant are captured as distinct streams from the start. Transcription and diarization run on a clean single-speaker signal instead of untangling a blended recording after the fact, so accuracy and speaker attribution are both better for it.
 - **Local-first.** Audio and transcripts stay on disk on your Mac. The only network calls are to whichever LLM you configure for cleanup and summaries.
-- **Retroactive capture.** The daemon is always recording into a bounded local buffer (2 hours by default). Realise ten minutes in that you should've been taking notes? The audio is already there. Just ask for a transcript of the last 30 minutes.
 
 ## Install
 
@@ -70,16 +69,32 @@ leading `.build/release/`.
 
 ## Usage
 
-**Retroactive capture.** Something worth keeping just happened:
+**Live transcription.** Start a meeting and watch the transcript arrive as people speak:
 
 ```sh
-transcribe --last 20m --source mic --out standup.transcript.md
+ears meeting start --source mic
+transcribe --follow mic
 ```
 
-**Full pipeline.** Transcribe, correct, and summarise:
+`--follow` attaches to the live source and streams finalised segments to stdout until you stop it (add `--json` for JSON lines instead of plain text).
+
+Live latency follows the daemon's chunk length: `--follow` reads finalised capture chunks, so segments trail speech by up to `chunk_seconds` (default 30) plus a moment of decoding. For live transcription, set a shorter chunk in `~/.config/ears/config.toml` and restart the daemon — 10 seconds puts the transcript ~5–15 s behind your speech, at the cost of more, smaller files in the buffer:
+
+```toml
+[earsd]
+chunk_seconds = 10
+```
 
 ```sh
-transcribe --last 45m --source mic --out call.transcript.md
+launchctl kickstart -k gui/$UID/net.tomelliot.ears.earsd
+ears config show | grep chunk    # confirm the resolved value
+```
+
+**Full pipeline.** When the meeting ends, transcribe, correct, and summarise it as a unit:
+
+```sh
+ears meeting end <meeting-id>
+transcribe --meeting <meeting-id> --out call.transcript.md
 cleanup call.transcript.md --out call.clean.md
 summarize call.clean.md --preset action-items --out call.summary.md
 ```
@@ -91,18 +106,6 @@ ears session open --slug weekly-sync --source mic --source browser:meet
 # ... take the call ...
 ears session close <session-id>
 transcribe --session <session-id> --out weekly-sync.md
-```
-
-**Retroactively mark a range** you didn't think to open a session for:
-
-```sh
-ears mark --last 30m --slug hallway-conversation --source mic
-```
-
-**Live transcript** while a source is running:
-
-```sh
-transcribe --follow mic
 ```
 
 **Browser-captured meeting audio.** The [browser extension](browser/) isolates each remote participant's audio in Google Meet, Zoom, and Teams tabs and streams it to the daemon as its own source. Install it once, join a call, and it shows up as `browser:<platform>:<participant>` alongside your other sources.
@@ -123,7 +126,7 @@ Each is a separate binary sharing only the on-disk formats and the control socke
 
 ## Status
 
-Active development. Retroactive capture and transcription (mic, system audio, per-app, and browser-routed sources) are in daily use. The LLM cleanup/summary stages are in use; diarization is not built yet — see [current status](docs/overview.md#status). There is no signed, notarized build yet: build from source.
+Active development. Capture and live transcription (mic, system audio, per-app, and browser-routed sources) are in daily use. The LLM cleanup/summary stages are in use; diarization is not built yet — see [current status](docs/overview.md#status). There is no signed, notarized build yet: build from source.
 
 ## Project layout
 

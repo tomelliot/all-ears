@@ -4,9 +4,11 @@ import EarsTranscribeKit
 import Foundation
 
 /// `transcribe --follow`'s pipeline, per `docs/specs/transcribe.md`'s
-/// "Streaming mode": attach to a live source, tail its `index.jsonl` for
-/// newly-written `chunk`/`vad` events (byte-offset tail, no re-polling of the
-/// whole file — ``IndexTailReader``), decode incrementally through a real
+/// "Streaming mode": attach to a live source — resolved through the meeting
+/// currently capturing it, since live capture writes only under
+/// `meetings/<id>/sources/<source>/` — tail its index for newly-written
+/// `chunk`/`vad` events (byte-offset tail, no re-polling of the whole file —
+/// ``IndexTailReader``), decode incrementally through a real
 /// ``StreamingTranscriber``, and emit finalised segments to three sinks:
 ///
 /// 1. **stdout**, one segment per line (`--json` for the live feed's exact
@@ -55,8 +57,9 @@ import Foundation
 /// boundary (end of stream *is* a boundary) and ``StreamingDelta/finish()``
 /// flushes any held-back partial as a final commit — except a trailing
 /// U+FFFD, which is discarded (see that type's doc for the decision). Exit
-/// is non-zero only for setup failures (unknown source, non-streaming
-/// backend, model load) or a final transcript write that never succeeded.
+/// is non-zero only for setup failures (no live meeting capturing the
+/// source, non-streaming backend, model load) or a final transcript write
+/// that never succeeded.
 /// Exiting when the source's *session* closes arrives with `--session`
 /// support (deferred alongside batch mode's own `--session` flag, per
 /// `TranscribeRangeResolution`'s doc comment) — until then, follow runs
@@ -152,17 +155,37 @@ enum TranscribeFollowPipeline {
   ) async -> Int32 {
     let sourceID = SourceID(inputs.source)
 
-    // Same fail-fast unknown-source check (and rationale) as batch mode.
-    let sourceDirectory = DataStoreLayout.sourceDirectory(dataRoot: dataRoot, sourceID: sourceID)
-    guard FileManager.default.fileExists(atPath: sourceDirectory.path) else {
+    // Live capture is meeting-scoped (a CaptureActor's data root is its
+    // meeting's directory), so a live tail must resolve the source through
+    // the meeting currently capturing it. The legacy global ring
+    // (`<data-root>/sources/`) is never written by a live capture and
+    // deliberately not consulted: attaching to it would tail a dead index
+    // forever with no output and no error.
+    let liveMeetings = MeetingStore.readAll(dataRoot: dataRoot).filter { meeting in
+      meeting.state != .ended && meeting.sources.contains(sourceID)
+    }
+    guard let meeting = liveMeetings.max(by: { $0.started < $1.started }) else {
       dependencies.writeStderr(
-        "error: unknown source '\(sourceID.rawValue)': no data found under \(sourceDirectory.path)")
+        "error: source '\(sourceID.rawValue)' is not live: no active meeting is capturing it "
+          + "(start one with `ears meeting start --source \(sourceID.rawValue)`)")
       return 1
     }
+    let meetingRoot = DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: meeting.id)
+
+    let sourceDirectory = DataStoreLayout.sourceDirectory(
+      dataRoot: meetingRoot, sourceID: sourceID)
+    guard FileManager.default.fileExists(atPath: sourceDirectory.path) else {
+      dependencies.writeStderr(
+        "error: source '\(sourceID.rawValue)' is claimed by meeting '\(meeting.id)' "
+          + "but no data found under \(sourceDirectory.path)")
+      return 1
+    }
+    dependencies.log(
+      "attaching to meeting '\(meeting.id)' (\(meeting.title)) for source '\(sourceID.rawValue)'")
 
     let descriptor: SourceDescriptor
     do {
-      descriptor = try SourceMetaStore.read(sourceID: sourceID, dataRoot: dataRoot)
+      descriptor = try SourceMetaStore.read(sourceID: sourceID, dataRoot: meetingRoot)
     } catch {
       dependencies.writeStderr(
         "error: failed to read source metadata for '\(sourceID.rawValue)': \(error)")
@@ -186,7 +209,7 @@ enum TranscribeFollowPipeline {
 
     let run = FollowRun(
       inputs: inputs,
-      dataRoot: dataRoot,
+      dataRoot: meetingRoot,
       outputRoot: outputRoot,
       backendName: backendName,
       dependencies: dependencies,
