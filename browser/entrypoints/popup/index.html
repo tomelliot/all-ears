@@ -242,6 +242,17 @@
         font-size: 11px;
         color: var(--muted);
       }
+      .debug-log-row {
+        margin-top: 14px;
+      }
+      .debug-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      .debug-actions .debug-btn {
+        margin-top: 0;
+      }
     </style>
   </head>
   <body>
@@ -281,6 +292,19 @@
       <!-- Debug: dump MAIN-world capture/probe/hook state to each open meeting
            tab's console (filter the console by [ears][debug][state]). -->
       <button type="button" id="debug-report" class="debug-btn">Report state to console</button>
+      <!-- Debug logging: tee every context's console into a persisted ring
+           buffer, exportable as a .jsonl file. Off by default. -->
+      <label class="row debug-log-row">
+        <span class="switch">
+          <input type="checkbox" role="switch" id="debug-log-toggle" disabled />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </span>
+        <span>Debug logging to disk</span>
+      </label>
+      <div class="debug-actions">
+        <button type="button" id="download-log" class="debug-btn">Download log</button>
+        <button type="button" id="clear-log" class="debug-btn">Clear log</button>
+      </div>
       <div id="debug-report-note" class="debug-note" aria-live="polite"></div>
     </main>
     <script type="module" src="./main.ts"></script>

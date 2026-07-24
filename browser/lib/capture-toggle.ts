@@ -29,6 +29,16 @@ export const CAPTURE_ENABLED_KEY = "captureEnabled";
 export const DEBUG_REPORT_KEY = "debugReportNonce";
 
 /**
+ * Boolean flag (storage.local) gating debug logging. When true, every context
+ * tees its `console.*` output into a persisted IndexedDB ring (log-store.ts)
+ * the popup can export as a file; the MAIN-world hook learns the flag over the
+ * same control channel as the capture toggle. Off by default — a missing key,
+ * a failed read, or any non-`true` value means no logs are captured, so debug
+ * capture is never silently left running.
+ */
+export const DEBUG_LOG_KEY = "debugLogging";
+
+/**
  * Resolve the raw stored value to the effective toggle state. Capture defaults
  * to ON: only an explicit stored `false` disables it, so a missing key (fresh
  * install), a failed read, or a corrupt value never silently kills capture.

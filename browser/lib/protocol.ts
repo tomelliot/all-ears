@@ -5,6 +5,8 @@
 //
 // "win" = window.postMessage (main↔isolated). "rt" = chrome.runtime (browser.*).
 
+import type { LogEntry } from "./debug-log";
+
 /** Marker on every window.postMessage envelope crossing the world boundary. */
 export const EARS_MARKER = "__ears" as const;
 
@@ -63,7 +65,11 @@ export type MainMessage =
   // and the call ended (capture toggled off / teardown). May arrive after
   // capture starts — sessions never gate capture.
   | { kind: "meeting-started"; platform: Platform; externalMeetingId: string }
-  | { kind: "meeting-ended"; platform: Platform; externalMeetingId: string };
+  | { kind: "meeting-ended"; platform: Platform; externalMeetingId: string }
+  // Debug logging only: a batch of the MAIN-world hook's tapped console
+  // entries, which the isolated relay forwards to the background's log store.
+  // The MAIN world has no extension APIs, so this is its only route to disk.
+  | { kind: "log"; entries: LogEntry[] };
 
 /** The envelope actually posted; `event.source === window` + marker gate it. */
 export interface MainEnvelope {
@@ -103,7 +109,11 @@ export type ControlMessage =
   // Debug: dump a MAIN-world capture/probe/hook state snapshot to this tab's
   // console. Triggered from the popup via a storage-key nudge (content.ts),
   // so it reaches every open meeting tab and needs no extra permissions.
-  | { kind: "report-state" };
+  | { kind: "report-state" }
+  // Debug logging flag, mirrored from storage.local (which the MAIN world
+  // can't read) so the hook installs/removes its console tap. Same
+  // storage ⇄ content ⇄ MAIN path as capture-state.
+  | { kind: "debug-log-state"; enabled: boolean };
 
 export interface ControlEnvelope {
   [EARS_CTL_MARKER]: true;

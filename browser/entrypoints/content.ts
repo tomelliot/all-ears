@@ -1,6 +1,12 @@
 import { defineContentScript } from "#imports";
 import { browser } from "wxt/browser";
-import { CAPTURE_ENABLED_KEY, DEBUG_REPORT_KEY, resolveCaptureToggleState } from "../lib/capture-toggle";
+import {
+  CAPTURE_ENABLED_KEY,
+  DEBUG_LOG_KEY,
+  DEBUG_REPORT_KEY,
+  resolveCaptureToggleState,
+} from "../lib/capture-toggle";
+import { createBatcher, installConsoleTap } from "../lib/debug-log";
 import { ReconnectingPort } from "../lib/pcm-port";
 import {
   isMainEnvelope,
@@ -45,12 +51,37 @@ export default defineContentScript({
       .get(CAPTURE_ENABLED_KEY)
       .then((v) => publishToggle((v as Record<string, unknown>)[CAPTURE_ENABLED_KEY]))
       .catch(() => publishToggle(undefined)); // unreadable ⇒ default (on)
+    // Debug logging: tap this isolated world's console straight to the
+    // background store, and mirror the flag into the MAIN world (which can't
+    // read storage) so the hook taps too. Entries are batched to one message
+    // per second rather than one per line.
+    const relayLog = createBatcher((entries) =>
+      browser.runtime.sendMessage({ kind: "log-batch", entries }).catch(() => {}),
+    );
+    let relayUntap: (() => void) | null = null;
+    const setDebugLogging = (on: boolean): void => {
+      postToMain({ kind: "debug-log-state", enabled: on });
+      if (on && !relayUntap) {
+        relayUntap = installConsoleTap("relay", (e) => relayLog.push(e));
+      } else if (!on && relayUntap) {
+        relayUntap();
+        relayUntap = null;
+        relayLog.flush();
+      }
+    };
+    browser.storage.local
+      .get(DEBUG_LOG_KEY)
+      .then((v) => setDebugLogging((v as Record<string, unknown>)[DEBUG_LOG_KEY] === true))
+      .catch(() => {});
+
     browser.storage.local.onChanged?.addListener?.((changes) => {
       const c = changes[CAPTURE_ENABLED_KEY];
       if (c) publishToggle(c.newValue);
       // The popup's "Report state" button writes a fresh nonce here; nudge the
       // MAIN world to dump its state to this tab's console.
       if (changes[DEBUG_REPORT_KEY]) postToMain({ kind: "report-state" });
+      const dl = changes[DEBUG_LOG_KEY];
+      if (dl) setDebugLogging(dl.newValue === true);
     });
 
     // Lifecycle facts this document knows, mirrored from the hook's messages:
@@ -179,6 +210,13 @@ function relay(msg: MainMessage, port: ReconnectingPort, state: RelayState): voi
       break;
     case "status":
       console.debug(`[ears][relay] status: ${msg.text}`);
+      break;
+    case "log":
+      // The MAIN-world hook's tapped console entries; hand them straight to
+      // the background store (already batched by the hook).
+      if (msg.entries.length) {
+        browser.runtime.sendMessage({ kind: "log-batch", entries: msg.entries }).catch(() => {});
+      }
       break;
     case "capture-failed": {
       // The participant is still in the call but their capture pipeline died;

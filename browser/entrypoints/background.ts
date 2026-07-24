@@ -3,7 +3,11 @@ import { browser } from "wxt/browser";
 import { EarsSocket, type TransportStatus } from "../lib/transport";
 import { ControlSocket } from "../lib/control-transport";
 import { MeetingTracker, type BadgeState, type MeetingState } from "../lib/meeting-tracker";
+import { applyActionBadge } from "../lib/action-badge";
 import { KEEPALIVE_ALARM, SessionTracker } from "../lib/session-state";
+import { DEBUG_LOG_KEY } from "../lib/capture-toggle";
+import { createBatcher, installConsoleTap, type LogEntry } from "../lib/debug-log";
+import { appendEntries, clearEntries, readAllEntries } from "../lib/log-store";
 import type { PortMessage } from "../lib/protocol";
 
 // Background context: owns the two WebSockets to earsd. The ingest socket
@@ -47,11 +51,15 @@ export default defineBackground(() => {
   }
 
   function broadcastStatus(): void {
+    const state = badgeState();
+    // Reflect the state onto the toolbar icon (badge + tooltip), so it's
+    // visible without opening the popup.
+    applyActionBadge(browser.action, state);
     // Best-effort: tell any open popup. Ignored if none is listening.
     browser.runtime
       .sendMessage({
         kind: "status",
-        status: badgeState(),
+        status: state,
         meeting: { active: meetings.meetingActive, paused: meetings.paused },
       })
       .catch(() => {});
@@ -72,6 +80,38 @@ export default defineBackground(() => {
     console.debug(`[ears][bg] meeting state: ${s}`);
     broadcastStatus();
   });
+
+  // Seed the toolbar icon before the first socket status lands (starts
+  // disconnected: clears the badge, sets the "not reachable" tooltip).
+  applyActionBadge(browser.action, badgeState());
+
+  // ── Debug logging: tee console → persisted IndexedDB ring ─────────────────
+  // The background is the sink: it taps its own console and also receives
+  // batched entries forwarded from the content relay and MAIN-world hook (which
+  // have no IndexedDB of the extension's origin). All of it lands in a capped
+  // ring the popup exports as a file. Gated on DEBUG_LOG_KEY; off by default.
+  let debugLogging = false;
+  const logBatch = createBatcher((entries) => void appendEntries(entries).catch(() => {}));
+  let untap: (() => void) | null = null;
+
+  function setDebugLogging(on: boolean): void {
+    if (on === debugLogging) return;
+    debugLogging = on;
+    if (on) {
+      untap = installConsoleTap("bg", (e) => logBatch.push(e));
+      console.debug("[ears][bg] debug logging enabled");
+    } else {
+      console.debug("[ears][bg] debug logging disabled");
+      untap?.();
+      untap = null;
+      logBatch.flush();
+    }
+  }
+
+  browser.storage.local
+    .get(DEBUG_LOG_KEY)
+    .then((v) => setDebugLogging((v as Record<string, unknown>)[DEBUG_LOG_KEY] === true))
+    .catch(() => {});
 
   // v2 recovery loop: every (re)connect hands the tracker a fresh snapshot,
   // and it re-declares whatever the DOM says is live (meeting.start is
@@ -122,6 +162,8 @@ export default defineBackground(() => {
     if (c && Number.isInteger(Number(c.newValue))) socket.setPort(Number(c.newValue));
     const cc = changes[CONTROL_PORT_STORAGE_KEY];
     if (cc && Number.isInteger(Number(cc.newValue))) control.setPort(Number(cc.newValue));
+    const dl = changes[DEBUG_LOG_KEY];
+    if (dl) setDebugLogging(dl.newValue === true);
   });
 
   const counts = new Map<string, number>();
@@ -202,7 +244,25 @@ export default defineBackground(() => {
 
   // Popup queries and the pause-transcription toggle.
   browser.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    const m = msg as { kind?: string; paused?: boolean };
+    const m = msg as { kind?: string; paused?: boolean; entries?: LogEntry[] };
+    // Debug-log traffic: batches forwarded from the relay/hook, plus the
+    // popup's export/clear requests.
+    if (m.kind === "log-batch") {
+      if (debugLogging && m.entries?.length) void appendEntries(m.entries).catch(() => {});
+      return undefined; // fire-and-forget
+    }
+    if (m.kind === "get-debug-log") {
+      readAllEntries()
+        .then((entries) => sendResponse({ entries }))
+        .catch(() => sendResponse({ entries: [] }));
+      return true;
+    }
+    if (m.kind === "clear-debug-log") {
+      clearEntries()
+        .then(() => sendResponse({ ok: true }))
+        .catch(() => sendResponse({ ok: false }));
+      return true;
+    }
     if (m.kind === "get-status") {
       sendResponse({
         status: badgeState(),

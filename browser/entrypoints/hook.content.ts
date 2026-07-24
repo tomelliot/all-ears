@@ -5,6 +5,7 @@ import { initCapture, captureDebugState, __devCaptureStream } from "../lib/audio
 import { selectAdapter, type PlatformAdapter } from "../lib/identity/adapter";
 import { MeetMeetingIdWatcher } from "../lib/identity/meet-meeting-id";
 import { isControlEnvelope, isMainEnvelope, postToIsolated, type Platform } from "../lib/protocol";
+import { createBatcher, installConsoleTap } from "../lib/debug-log";
 // Side-effect imports: each adapter registers itself with selectAdapter.
 import "../lib/identity/meet";
 import "../lib/identity/zoom";
@@ -73,12 +74,34 @@ export default defineContentScript({
     };
     (window as unknown as { __earsReportState?: () => void }).__earsReportState = reportDebugState;
 
+    // Debug logging: tap the console and forward entries to the isolated relay
+    // (which ships them to the background store). This realm is the page's own,
+    // so the tap sees the host site's console too — keep only our `[ears]…`
+    // entries. Gated by the debug-log-state control message below.
+    const hookLog = createBatcher((entries) => postToIsolated({ kind: "log", entries }));
+    let hookUntap: (() => void) | null = null;
+    const setDebugLogging = (on: boolean): void => {
+      if (on && !hookUntap) {
+        hookUntap = installConsoleTap("hook", (e) => {
+          if (e.msg.startsWith("[ears]")) hookLog.push(e);
+        });
+      } else if (!on && hookUntap) {
+        hookUntap();
+        hookUntap = null;
+        hookLog.flush();
+      }
+    };
+
     window.addEventListener("message", (event: MessageEvent) => {
       if (event.source !== window) return; // only same-window
       if (!isControlEnvelope(event.data)) return;
       const msg = event.data.msg;
       if (msg.kind === "report-state") {
         reportDebugState();
+        return;
+      }
+      if (msg.kind === "debug-log-state") {
+        setDebugLogging(msg.enabled);
         return;
       }
       if (msg.kind !== "capture-state" || msg.enabled === captureOn) return;

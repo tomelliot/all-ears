@@ -1,5 +1,11 @@
 import { browser } from "wxt/browser";
-import { CAPTURE_ENABLED_KEY, DEBUG_REPORT_KEY, resolveCaptureToggleState } from "../../lib/capture-toggle";
+import {
+  CAPTURE_ENABLED_KEY,
+  DEBUG_LOG_KEY,
+  DEBUG_REPORT_KEY,
+  resolveCaptureToggleState,
+} from "../../lib/capture-toggle";
+import { toJsonl, type LogEntry } from "../../lib/debug-log";
 import type { BadgeState } from "../../lib/meeting-tracker";
 
 // Popup: capture on/off toggle + earsd status badge + (while a meeting is
@@ -100,6 +106,8 @@ toggleEl?.addEventListener("change", () => {
 browser.storage.local.onChanged?.addListener?.((changes) => {
   const c = changes[CAPTURE_ENABLED_KEY];
   if (c) renderToggle(resolveCaptureToggleState(c.newValue));
+  const dl = changes[DEBUG_LOG_KEY];
+  if (dl) renderDebugLog(dl.newValue === true);
 });
 
 // ── Pause-transcription toggle → background MeetingTracker ──────────────────
@@ -129,6 +137,69 @@ debugBtnEl?.addEventListener("click", () => {
     })
     .catch(() => {
       if (debugNoteEl) debugNoteEl.textContent = "Couldn't trigger the report.";
+    });
+});
+
+// ── Debug logging: persist console to disk (IndexedDB ring + export) ────────
+
+// The toggle flips DEBUG_LOG_KEY; every context reads it and taps its console.
+// "Download log" pulls the accumulated ring from the background and saves a
+// .jsonl file (the popup has DOM, so it does the object-URL download — no
+// downloads permission needed). "Clear log" empties the ring.
+const debugLogToggleEl = document.getElementById("debug-log-toggle") as HTMLInputElement | null;
+const downloadLogEl = document.getElementById("download-log") as HTMLButtonElement | null;
+const clearLogEl = document.getElementById("clear-log") as HTMLButtonElement | null;
+
+function renderDebugLog(on: boolean): void {
+  if (debugLogToggleEl) {
+    debugLogToggleEl.checked = on;
+    debugLogToggleEl.disabled = false;
+  }
+}
+
+browser.storage.local
+  .get(DEBUG_LOG_KEY)
+  .then((v) => renderDebugLog((v as Record<string, unknown>)[DEBUG_LOG_KEY] === true))
+  .catch(() => renderDebugLog(false));
+
+debugLogToggleEl?.addEventListener("change", () => {
+  renderDebugLog(debugLogToggleEl.checked);
+  browser.storage.local.set({ [DEBUG_LOG_KEY]: debugLogToggleEl.checked }).catch(() => {});
+});
+
+downloadLogEl?.addEventListener("click", () => {
+  browser.runtime
+    .sendMessage({ kind: "get-debug-log" })
+    .then((res) => {
+      const entries = (res as { entries?: LogEntry[] } | undefined)?.entries ?? [];
+      if (entries.length === 0) {
+        if (debugNoteEl) debugNoteEl.textContent = "No log entries captured yet.";
+        return;
+      }
+      const blob = new Blob([toJsonl(entries)], { type: "application/x-ndjson" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ears-debug-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.jsonl`;
+      a.click();
+      URL.revokeObjectURL(url);
+      if (debugNoteEl) {
+        debugNoteEl.textContent = `Downloaded ${entries.length} log ${entries.length === 1 ? "entry" : "entries"}.`;
+      }
+    })
+    .catch(() => {
+      if (debugNoteEl) debugNoteEl.textContent = "Couldn't read the log.";
+    });
+});
+
+clearLogEl?.addEventListener("click", () => {
+  browser.runtime
+    .sendMessage({ kind: "clear-debug-log" })
+    .then(() => {
+      if (debugNoteEl) debugNoteEl.textContent = "Log cleared.";
+    })
+    .catch(() => {
+      if (debugNoteEl) debugNoteEl.textContent = "Couldn't clear the log.";
     });
 });
 
