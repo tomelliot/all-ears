@@ -37,6 +37,7 @@ The rule: **prefer the per-meeting copy when it holds chunks in range, and fall 
 
 ## Streaming mode (`--follow <source>`)
 
+- Resolves the source through the meeting currently capturing it (live capture is meeting-scoped: audio lands under `meetings/<id>/sources/<source>/`), picking the most recently started non-ended meeting when several claim the source. No live meeting, or a claimed source with no data on disk, is a fail-fast error — never a silent attach to a dead index.
 - Tails the live source's index, reading newly-written chunks as they land.
 - Emits finalised segments to stdout as they stabilise (one per line; `--json` for JSON segment lines).
 - Appends to the session's transcript file — the same file batch mode would produce, so the file is complete when the session closes.

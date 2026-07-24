@@ -34,34 +34,49 @@ struct TranscribeFollowPipelineTests {
     }
   }
 
-  /// One growing fixture source: `meta.toml` + a real `index.jsonl` on disk,
-  /// with chunk audio served by a fake reader keyed on filename so decoded
-  /// frame counts exactly match the nominal chunk durations.
+  /// One growing fixture source, laid out the way live capture writes it:
+  /// an active meeting claiming the source, with `meta.toml` + a real index
+  /// under the *meeting's* source directory, and chunk audio served by a
+  /// fake reader keyed on filename so decoded frame counts exactly match
+  /// the nominal chunk durations.
   private final class Fixture: Sendable {
     let dataRoot: URL
     let outputRoot: URL
     let appender: IndexAppender
     let vadWriter: VADSegmentWriter
     let sourceID: SourceID
+    let meetingID: String
+    /// The meeting's directory — live capture's data root for this source.
+    let meetingRoot: URL
     private let chunkFrames = Mutex<[String: Int]>([:])
 
-    init(label: String, sourceID: SourceID, asrRate: Int, created: Instant) throws {
+    init(
+      label: String, sourceID: SourceID, asrRate: Int, created: Instant,
+      meetingState: MeetingState = .active
+    ) throws {
       let base = FileManager.default.temporaryDirectory.appendingPathComponent(
         "FollowPipelineTests-\(label)-\(UUID().uuidString)")
       dataRoot = base.appendingPathComponent("data")
       outputRoot = base.appendingPathComponent("output")
       try FileManager.default.createDirectory(at: dataRoot, withIntermediateDirectories: true)
+      meetingID = UUID().uuidString
+      try MeetingStore.write(
+        Meeting(
+          id: meetingID, title: label, state: meetingState, started: created,
+          sources: [sourceID]),
+        dataRoot: dataRoot)
+      meetingRoot = DataStoreLayout.meetingDirectory(dataRoot: dataRoot, meetingID: meetingID)
       try SourceMetaStore.write(
         SourceDescriptor(
           schema: 1, id: sourceID, sourceClass: sourceID.sourceClass ?? .mic,
           label: sourceID.rawValue, nativeSampleRate: asrRate, asrSampleRate: asrRate,
           storeNative: false, channels: 1, codec: "aac", bitrate: 64_000,
           created: created),
-        dataRoot: dataRoot)
+        dataRoot: meetingRoot)
       appender = IndexAppender(
-        fileURL: DataStoreLayout.structuralIndexFile(dataRoot: dataRoot, sourceID: sourceID))
+        fileURL: DataStoreLayout.structuralIndexFile(dataRoot: meetingRoot, sourceID: sourceID))
       vadWriter = VADSegmentWriter(
-        directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: sourceID))
+        directory: DataStoreLayout.vadDirectory(dataRoot: meetingRoot, sourceID: sourceID))
       self.sourceID = sourceID
     }
 
@@ -75,7 +90,7 @@ struct TranscribeFollowPipelineTests {
     /// replacement for grepping the old single index file.
     func vadContains(_ needle: String) -> Bool {
       VADSegmentStore.segmentURLs(
-        directory: DataStoreLayout.vadDirectory(dataRoot: dataRoot, sourceID: sourceID)
+        directory: DataStoreLayout.vadDirectory(dataRoot: meetingRoot, sourceID: sourceID)
       ).contains { segment in
         (try? String(contentsOf: segment.url, encoding: .utf8))?.contains(needle) == true
       }
@@ -413,7 +428,7 @@ struct TranscribeFollowPipelineTests {
     #expect(segment.text == "structured output")
   }
 
-  @Test("an unknown source is a precise, non-zero error")
+  @Test("a source no live meeting is capturing is a precise, non-zero error")
   func unknownSourceFailsFast() async throws {
     let fixture = try Fixture(label: "unknown", sourceID: sourceID, asrRate: asrRate, created: now)
     let harness = Harness()
@@ -429,6 +444,87 @@ struct TranscribeFollowPipelineTests {
     #expect(exitCode == 1)
     #expect(
       harness.stderrLines.withLock { $0 }.contains { $0.contains("app:no.such.app") })
+  }
+
+  @Test("legacy global-ring data without a live meeting is an error, never a silent dead tail")
+  func legacyGlobalRingDataDoesNotSatisfyFollow() async throws {
+    // The bug this guards against: `sources/<id>/` exists from a pre-meetings
+    // daemon, no meeting is live, and follow attaches to the dead index and
+    // produces nothing forever. It must refuse instead.
+    let fixture = try Fixture(
+      label: "legacy-ring", sourceID: sourceID, asrRate: asrRate, created: now,
+      meetingState: .ended)
+    try SourceMetaStore.write(
+      SourceDescriptor(
+        schema: 1, id: sourceID, sourceClass: .mic, label: sourceID.rawValue,
+        nativeSampleRate: asrRate, asrSampleRate: asrRate, storeNative: false,
+        channels: 1, codec: "aac", bitrate: 64_000, created: now),
+      dataRoot: fixture.dataRoot)
+    let harness = Harness()
+    let dependencies = harness.dependencies(
+      clock: ManualClock(now), transcriber: NullTranscriber(),
+      readerFactory: fixture.readerFactory)
+
+    let exitCode = await TranscribeFollowPipeline.run(
+      inputs: TranscribeFollowPipeline.Inputs(source: sourceID.rawValue, json: false, out: nil),
+      dataRoot: fixture.dataRoot, outputRoot: fixture.outputRoot, backendName: "fluidaudio",
+      dependencies: dependencies)
+
+    #expect(exitCode == 1)
+    #expect(harness.stderrLines.withLock { $0 }.contains { $0.contains("is not live") })
+  }
+
+  @Test("a live meeting claiming the source without data on disk is an error")
+  func claimedSourceWithoutDataFailsFast() async throws {
+    let fixture = try Fixture(label: "no-data", sourceID: sourceID, asrRate: asrRate, created: now)
+    try FileManager.default.removeItem(
+      at: DataStoreLayout.sourceDirectory(dataRoot: fixture.meetingRoot, sourceID: sourceID))
+    let harness = Harness()
+    let dependencies = harness.dependencies(
+      clock: ManualClock(now), transcriber: NullTranscriber(),
+      readerFactory: fixture.readerFactory)
+
+    let exitCode = await TranscribeFollowPipeline.run(
+      inputs: TranscribeFollowPipeline.Inputs(source: sourceID.rawValue, json: false, out: nil),
+      dataRoot: fixture.dataRoot, outputRoot: fixture.outputRoot, backendName: "fluidaudio",
+      dependencies: dependencies)
+
+    #expect(exitCode == 1)
+    #expect(harness.stderrLines.withLock { $0 }.contains { $0.contains("no data found") })
+  }
+
+  @Test("with several live meetings claiming the source, follow attaches to the newest")
+  func multipleLiveMeetingsPickNewest() async throws {
+    let fixture = try Fixture(label: "newest", sourceID: sourceID, asrRate: asrRate, created: now)
+    // An older still-active meeting also claims the source; the fixture's
+    // meeting started later and must win.
+    let olderID = UUID().uuidString
+    try MeetingStore.write(
+      Meeting(
+        id: olderID, title: "older", state: .active, started: now.advanced(by: -600),
+        sources: [sourceID]),
+      dataRoot: fixture.dataRoot)
+    try SourceMetaStore.write(
+      SourceDescriptor(
+        schema: 1, id: sourceID, sourceClass: .mic, label: sourceID.rawValue,
+        nativeSampleRate: asrRate, asrSampleRate: asrRate, storeNative: false,
+        channels: 1, codec: "aac", bitrate: 64_000, created: now),
+      dataRoot: DataStoreLayout.meetingDirectory(dataRoot: fixture.dataRoot, meetingID: olderID))
+    let harness = Harness()
+    let scripted = ScriptedStreamingTranscriber(stepTexts: [])
+    let dependencies = harness.dependencies(
+      clock: ManualClock(now), transcriber: scripted, readerFactory: fixture.readerFactory)
+    let run = launch(fixture: fixture, dependencies: dependencies)
+
+    await harness.waitForStart()
+    harness.stop()
+    #expect(await run.value == 0)
+
+    let attachLine = harness.logs.withLock { logs in
+      logs.first { $0.hasPrefix("attaching to meeting") }
+    }
+    #expect(attachLine?.contains(fixture.meetingID) == true)
+    #expect(attachLine?.contains(olderID) != true)
   }
 
   @Test("a backend without streaming support is a precise, non-zero error")
