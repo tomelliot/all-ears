@@ -158,6 +158,10 @@ install-agent: guard-user
 	@sed -e 's#@PREFIX@#$(PREFIX)#g' -e 's#@HOME@#$(HOME)#g' "$(PLIST_SRC)" > "$(PLIST_DEST)"
 	@echo "  reload agent (bootout + bootstrap gui/$$(id -u))"
 	@launchctl bootout gui/$$(id -u)/$(LABEL) 2>/dev/null || true
+	@# bootout is asynchronous: bootstrapping while the old instance is still
+	@# tearing down fails with "Bootstrap failed: 5: Input/output error".
+	@# Wait (up to ~5s) for the label to disappear before bootstrapping.
+	@i=0; while launchctl print gui/$$(id -u)/$(LABEL) >/dev/null 2>&1 && [ $$i -lt 20 ]; do sleep 0.25; i=$$((i+1)); done
 	@launchctl bootstrap gui/$$(id -u) "$(PLIST_DEST)"
 	@launchctl enable gui/$$(id -u)/$(LABEL) 2>/dev/null || true
 	@launchctl kickstart -k gui/$$(id -u)/$(LABEL) 2>/dev/null || true
