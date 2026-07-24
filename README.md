@@ -12,11 +12,15 @@ All Ears runs a small daemon that continuously records every audio source you co
 - **Small tools, not one app.** Capture, transcription, cleanup, and summarisation are separate command-line tools that read and write plain files, instead of one inscrutable binary. Script them, replace one, extend them.
 - **Knows who said what, by name, on Google Meet.** The browser extension isolates each remote participant's audio into its own stream and reads their real display name straight off the call UI, without manual labelling or voice-print guessing. Zoom gets the same per-participant separation from the call's own tracks. Teams gets attributed `Speaker N` streams instead.
 - **Sources are separated before transcription, not after.** Mic, system audio, each app, and each meeting participant are captured as distinct streams from the start. Transcription and diarization run on a clean single-speaker signal instead of untangling a blended recording after the fact, so accuracy and speaker attribution are both better for it.
-- **Local-first.** Audio and transcripts stay on disk on your Mac. The only network calls are to whichever LLM you configure for cleanup and summaries.
+- **Local-first.** Audio and transcripts stay on disk on your Mac; transcription runs on the Neural Engine. The only network calls are the one-time speech-model download and whichever LLM you configure for cleanup and summaries.
 
 ## Install
 
-Requires Apple Silicon, macOS 15+, and [Swift 6](https://www.swift.org/install/).
+Requirements:
+
+- **Apple Silicon, macOS 15+, and [Swift 6](https://www.swift.org/install/)** to build.
+- **The [`llm` CLI](https://llm.datasette.io/)** (`brew install llm`) for the `cleanup` and `summarize` stages, which shell out to it by default. Capture and transcription work without it, and `[llm] backend = "command"` routes those stages to any other command instead — see [Your model, your prompts](#your-model-your-prompts).
+- No model setup: the Parakeet speech model downloads automatically on the first transcription run.
 
 ```sh
 git clone https://github.com/tomelliot/all-ears.git
@@ -99,6 +103,9 @@ cleanup call.transcript.md --out call.clean.md
 summarize call.clean.md --preset action-items --out call.summary.md
 ```
 
+A summary preset is a prompt file you write, named in your config — see
+[Your model, your prompts](#your-model-your-prompts).
+
 **Meeting notes, hands-free.** Open a session around a call so it's transcribed as a unit instead of a raw time range:
 
 ```sh
@@ -109,6 +116,35 @@ transcribe --session <session-id> --out weekly-sync.md
 ```
 
 **Browser-captured meeting audio.** The [browser extension](browser/) isolates each remote participant's audio in Google Meet, Zoom, and Teams tabs and streams it to the daemon as its own source. Install it once, join a call, and it shows up as `browser:<platform>:<participant>` alongside your other sources.
+
+## Your model, your prompts
+
+`cleanup` and `summarize` call whatever LLM you configure in `~/.config/ears/config.toml` — no model is hard-coded:
+
+```toml
+[llm]
+backend = "llm-cli"          # runs the `llm` CLI: any model it can reach, hosted or local
+model   = "claude-sonnet-5"  # any `llm` model id; empty uses llm's own default
+
+# Or route both stages to any command that reads a prompt on stdin and
+# prints the completion on stdout — a local model, a wrapper script, anything:
+# backend = "command"
+# command = "ollama run llama3.2"
+
+[cleanup]
+prompt_file = ""             # empty = the built-in correction prompt; set a path to use yours
+
+[[summarize.preset]]
+name = "brief"
+prompt_file = "prompts/brief.md"
+[[summarize.preset]]
+name = "action-items"
+prompt_file = "prompts/action-items.md"
+```
+
+Summarisation prompts are entirely yours: each `[[summarize.preset]]` pairs a name with a prompt file you write, and `summarize --preset <name>` (or `--all-presets`) runs it over the transcript — one output file per preset. Both tools take `--model` to override the configured model for a single run. The full option reference is in [`docs/configuration.md`](docs/configuration.md).
+
+Transcription currently has one model: Parakeet, running locally on the Neural Engine via FluidAudio. A `[transcribe]` table arrives when there is more than one choice to make.
 
 ## How it works
 
