@@ -150,8 +150,10 @@ public actor CaptureActor {
   /// Wall-clock start of the *next* buffer to arrive, advanced by each
   /// consumed buffer's duration. Anchored to the encoder's current chunk start
   /// whenever consumption (re)starts, so `vad` events land on the same
-  /// buffer-derived timeline the encoder rolls chunks on — no wall-clock read
-  /// per buffer.
+  /// buffer-derived timeline the encoder rolls chunks on. Each consumed buffer
+  /// *checks* wall clock against this playhead (``reanchorAfterDeliveryGap``)
+  /// so a stalled delivery can't silently freeze the timeline, but between
+  /// gaps the timeline stays buffer-derived.
   private var playhead: Instant = Instant(secondsSinceEpoch: 0)
   /// The coarse VAD state most recently published to ``eventSink``, so the
   /// live feed carries *transitions* only (the spec's `vad` event is a state
@@ -371,10 +373,19 @@ public actor CaptureActor {
     }
   }
 
+  /// How far wall clock may run ahead of the buffer-derived playhead (seconds)
+  /// before ``reanchorAfterDeliveryGap`` re-anchors the timeline. Continuous
+  /// backends (the mic's realtime tap) never approach it; a push source that
+  /// only delivers while its speaker talks (Meet's per-speaker streams) trips
+  /// it at every silence longer than this. Gaps under the threshold stay
+  /// compressed, so it bounds the worst-case timestamp smear.
+  static let deliveryGapThreshold: Double = 2.0
+
   /// Processes one buffer: append its `vad` spans on the buffer-derived
   /// timeline, feed it to the encoder, and — if that append rolled a chunk
   /// over — track the finalized chunk and run the per-source eviction pass.
   private func consume(_ raw: AudioBuffer) async {
+    await reanchorAfterDeliveryGap(before: raw)
     let buffer: AudioBuffer
     if let normalizer {
       if raw.sampleRate != lastInputRate {
@@ -481,6 +492,48 @@ public actor CaptureActor {
     } else {
       playhead = bufferStart.advanced(by: buffer.duration)
     }
+  }
+
+  /// Detects a stalled delivery — wall clock more than
+  /// ``deliveryGapThreshold`` ahead of the buffer-derived playhead — and
+  /// re-syncs the timeline before `raw` is processed: the in-flight chunk is
+  /// finalized (its audio arrived before the stall), the missing interval is
+  /// recorded as a `gap`, and the encoder and playhead re-anchor to the
+  /// arriving buffer's wall-clock start.
+  ///
+  /// The accumulated timeline (each chunk's `start` = the previous chunk's
+  /// `end`) is correct only while audio arrives continuously. A push source
+  /// delivers PCM over a socket that carries no timestamps and can go quiet at
+  /// will — Meet's per-speaker streams send audio only while that speaker
+  /// talks — so without this check every silence is squeezed out of the
+  /// timeline and each later chunk is stamped further behind wall clock (a
+  /// 30-minute call drifted ~13 minutes; all-ears issue: mis-interleaved
+  /// meeting transcripts). The ingest close/reopen path is covered by the same
+  /// check: `start()` resumes the frozen playhead and the first buffer of the
+  /// new stream trips the threshold.
+  private func reanchorAfterDeliveryGap(before raw: AudioBuffer) async {
+    let now = clock.now()
+    guard now.interval(since: playhead) > Self.deliveryGapThreshold else { return }
+    // The buffer in hand was just delivered, so its audio began roughly one
+    // buffer-duration before `now`; clamp so the timeline never runs backwards
+    // if a single buffer is longer than the observed stall.
+    let anchor = max(playhead, now.advanced(by: -raw.duration))
+    let chunkStartBefore = await encoder.currentChunkStart
+    try? await encoder.flush()
+    await trackRollover(previousChunkStart: chunkStartBefore)
+    let gapSeconds = anchor.interval(since: playhead)
+    if gapSeconds > 0 {
+      try? await indexAppender.append(
+        .gap(start: playhead, end: anchor, reason: "delivery-stall"))
+    }
+    await encoder.reanchor(to: anchor)
+    playhead = anchor
+    await logEvent(
+      "capture.delivery_gap", level: .notice,
+      fields: [
+        LogField("source", .string(sourceID.rawValue)),
+        LogField("seconds", .double((gapSeconds * 1000).rounded() / 1000)),
+      ])
   }
 
   /// Publishes this buffer's coarse VAD state to ``eventSink`` iff it differs

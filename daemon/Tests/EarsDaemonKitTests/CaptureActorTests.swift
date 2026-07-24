@@ -543,6 +543,9 @@ struct CaptureActorTests {
       dataRoot: dataRoot, clock: clock, buffers: [makeBuffer(seconds: 0.5)], chunkSeconds: 30)
 
     try await actor.start()
+    // Drain before moving the clock: a buffer consumed *after* the jump would
+    // (correctly) read as a delivery stall and add a second gap event.
+    await actor.drainForTesting()
 
     clock.set(Instant(secondsSinceEpoch: startEpoch + 100))
     try await actor.pause()
@@ -604,6 +607,133 @@ struct CaptureActorTests {
       })
   }
 
+  /// Polls (bounded, real time) until `condition` holds. Push-backend tests
+  /// need it: the consume loop runs concurrently with the test body, so the
+  /// test must *observe* a buffer's consumption before advancing the clock.
+  private func waitUntil(_ condition: () throws -> Bool) async throws {
+    for _ in 0..<400 {
+      if try condition() { return }
+      try await Task.sleep(nanoseconds: 5_000_000)
+    }
+    Issue.record("timed out waiting for condition")
+  }
+
+  @Test("a mid-stream delivery stall re-anchors to wall clock and records a gap")
+  func deliveryStallReanchorsTimeline() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
+    let backend = PushCaptureBackend(source: "mic")
+    // chunkSeconds == buffer length, so each pushed buffer rolls one chunk.
+    let actor = try makeActor(
+      dataRoot: dataRoot, clock: clock, buffers: [], chunkSeconds: 0.5, backend: backend)
+
+    try await actor.start()
+    await backend.push(makeBuffer(seconds: 0.5))
+    try await waitUntil { try chunkEvents(dataRoot: dataRoot).count >= 1 }
+
+    // The push socket goes quiet for 60s of wall clock — a Meet per-speaker
+    // stream between utterances — then delivers again.
+    clock.set(Instant(secondsSinceEpoch: startEpoch + 60))
+    await backend.push(makeBuffer(seconds: 0.5))
+    try await waitUntil { try chunkEvents(dataRoot: dataRoot).count >= 2 }
+    await actor.stop()
+
+    let events = try indexEvents(dataRoot: dataRoot)
+    let gaps = events.compactMap { event -> (Instant, Instant, String)? in
+      if case .gap(let start, let end, let reason) = event { return (start, end, reason) }
+      return nil
+    }
+    let gap = try #require(gaps.first)
+    #expect(gaps.count == 1)
+    #expect(gap.2 == "delivery-stall")
+    #expect(abs(gap.0.interval(since: Instant(secondsSinceEpoch: startEpoch + 0.5))) < 0.001)
+    // The stalled interval ends where the arriving buffer's audio began:
+    // now (start + 60) minus the buffer's own 0.5s.
+    #expect(abs(gap.1.interval(since: Instant(secondsSinceEpoch: startEpoch + 59.5))) < 0.001)
+
+    let starts = try chunkEvents(dataRoot: dataRoot).compactMap { event -> Instant? in
+      if case .chunk(let start, _, _, _) = event { return start }
+      return nil
+    }
+    // Post-stall audio is stamped at wall clock, not at the frozen timeline's
+    // startEpoch + 0.5 — the drift that mis-interleaved meeting transcripts.
+    #expect(starts.contains { abs($0.interval(since: gap.1)) < 0.001 })
+    #expect(starts.allSatisfy { $0 == Instant(secondsSinceEpoch: startEpoch) || $0 >= gap.1 })
+  }
+
+  @Test("delivery jitter under the stall threshold keeps the timeline contiguous")
+  func deliveryJitterStaysContiguous() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
+    let backend = PushCaptureBackend(source: "mic")
+    let actor = try makeActor(
+      dataRoot: dataRoot, clock: clock, buffers: [], chunkSeconds: 0.4, backend: backend)
+
+    try await actor.start()
+    await backend.push(makeBuffer(seconds: 0.4))
+    try await waitUntil { try chunkEvents(dataRoot: dataRoot).count >= 1 }
+
+    // 1s of delivery jitter: wall clock runs ahead of the 0.4s of audio
+    // delivered, but stays under the threshold — no re-anchor, no gap.
+    clock.set(Instant(secondsSinceEpoch: startEpoch + 1.0))
+    await backend.push(makeBuffer(seconds: 0.4))
+    try await waitUntil { try chunkEvents(dataRoot: dataRoot).count >= 2 }
+    await actor.stop()
+
+    let events = try indexEvents(dataRoot: dataRoot)
+    #expect(
+      !events.contains { if case .gap = $0 { return true } else { return false } })
+    let starts = events.compactMap { event -> Instant? in
+      if case .chunk(let start, _, _, _) = event { return start }
+      return nil
+    }
+    // The second chunk continues the buffer-derived timeline exactly.
+    #expect(
+      starts.contains {
+        abs($0.interval(since: Instant(secondsSinceEpoch: startEpoch + 0.4))) < 0.001
+      })
+  }
+
+  @Test("an ingest close/reopen resumes at wall clock, not the frozen timeline")
+  func ingestReopenReanchorsTimeline() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(Instant(secondsSinceEpoch: startEpoch))
+    let backend = PushCaptureBackend(source: "mic")
+    let actor = try makeActor(
+      dataRoot: dataRoot, clock: clock, buffers: [], chunkSeconds: 30, backend: backend)
+
+    // First ingest stream: half a second of audio, then the tab closes.
+    try await actor.start()
+    await backend.push(makeBuffer(seconds: 0.5))
+    // stop() drains the queued buffer (clock still at startEpoch) and flushes
+    // it as a partial chunk, so no poll is needed before the clock moves.
+    await actor.stop()
+
+    // Two minutes later the stream reopens (same source, same actor).
+    clock.set(Instant(secondsSinceEpoch: startEpoch + 120))
+    try await actor.start()
+    await backend.push(makeBuffer(seconds: 0.5))
+    // stop() again drains then flushes: the reopened stream's buffer is
+    // consumed at +120, trips the stall check, and lands re-anchored.
+    await actor.stop()
+
+    let starts = try chunkEvents(dataRoot: dataRoot).compactMap { event -> Instant? in
+      if case .chunk(let start, _, _, _) = event { return start }
+      return nil
+    }
+    // The reopened stream's audio lands at ~startEpoch + 119.5 (wall clock
+    // minus the buffer's duration), not at the frozen startEpoch + 0.5.
+    #expect(
+      starts.contains {
+        abs($0.interval(since: Instant(secondsSinceEpoch: startEpoch + 119.5))) < 0.001
+      })
+    #expect(
+      !starts.contains {
+        $0 > Instant(secondsSinceEpoch: startEpoch + 0.4)
+          && $0 < Instant(secondsSinceEpoch: startEpoch + 119)
+      })
+  }
+
   @Test("pause() is idempotent and records only one gap across a double pause")
   func pauseIsIdempotent() async throws {
     let dataRoot = try makeDataRoot()
@@ -612,6 +742,8 @@ struct CaptureActorTests {
       dataRoot: dataRoot, clock: clock, buffers: [makeBuffer(seconds: 0.5)], chunkSeconds: 30)
 
     try await actor.start()
+    // Same drain-before-jump rationale as pauseResumeRecordsGap.
+    await actor.drainForTesting()
     clock.set(Instant(secondsSinceEpoch: startEpoch + 100))
     try await actor.pause()
     clock.set(Instant(secondsSinceEpoch: startEpoch + 120))

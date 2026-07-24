@@ -100,8 +100,9 @@ It maps wall-clock time to audio and records speech activity so transcription ca
 {"t":"vad","state":"speech","start":"2026-07-17T10:30:02.140Z","end":"2026-07-17T10:30:09.880Z"}
 {"t":"vad","state":"silence","start":"2026-07-17T10:30:09.880Z","end":"2026-07-17T10:30:14.020Z"}
 
-// a capture gap (daemon down, device lost, pause)
+// a capture gap (daemon down, device lost, pause, stalled push delivery)
 {"t":"gap","start":"2026-07-17T10:31:00Z","end":"2026-07-17T10:31:12Z","reason":"daemon_restart"}
+{"t":"gap","start":"2026-07-17T10:32:00Z","end":"2026-07-17T10:32:41.5Z","reason":"delivery-stall"}
 ```
 
 A reader reconstructs available audio for any range from `chunk` events, uses `vad` spans to skip silence, and honours `gap` events as known-missing. Both logs are append-only, so `tail -f chunks.jsonl` and `tail -f vad/*.jsonl` show live capture.

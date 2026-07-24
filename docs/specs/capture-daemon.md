@@ -119,6 +119,8 @@ Audio is one binary frame per PCM chunk, multiplexed by `stream_id` (no sequence
 
 A `browser:<label>` source is created lazily on its first-ever `ingest.open` and persists for the daemon's lifetime; a later `ingest.open` for the same label (a participant rejoining) resumes the same on-disk source. `ingest.close` flushes and indexes the in-progress chunk. The client side is specified in [browser/transport.md](./browser/transport.md), which this endpoint matches wire-for-wire.
 
+PCM frames carry no timestamps, and a pushed stream may go quiet at will (Meet's per-speaker streams deliver audio only while that speaker talks). Chunk/VAD timestamps normally accumulate from delivered audio duration, so the daemon re-anchors the source's timeline to wall clock whenever delivery resumes after a stall of more than ~2s, recording the quiet interval as a `gap` (`reason:"delivery-stall"`). Without this, every silence would be squeezed out of the timeline and the source's chunks would be stamped progressively further behind wall clock — mis-interleaving its transcript against continuously-captured sources. Sub-threshold jitter stays on the accumulated timeline.
+
 Both WebSocket servers are hand-rolled on the raw socket transport rather than `NWProtocolWebSocket`, which offers no hook to validate `Origin` before completing the upgrade.
 
 ### Live feed (pub/sub)
