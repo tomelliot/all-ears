@@ -162,6 +162,11 @@ public actor CaptureActor {
   /// ``teardownCapture()`` so the first speech after a resume/restart is
   /// re-announced rather than assumed continuous across the gap.
   private var lastPublishedVADState: VADState?
+  /// Periodic dry-spell check for push (browser) sources; `nil` for local
+  /// backends and while stopped/paused. See ``startDryWatchdog()``.
+  private var dryWatchdogTask: Task<Void, Never>?
+  /// Latch so one dry episode logs once; cleared when delivery resumes.
+  private var dryWarnedThisEpisode = false
 
   /// - Parameters:
   ///   - descriptor: This source's `meta.toml` model — supplies `codec`,
@@ -232,6 +237,7 @@ public actor CaptureActor {
     playhead = await encoder.currentChunkStart
     await transition(to: .capturing)
     startConsuming(stream)
+    startDryWatchdog()
   }
 
   /// Stop continuous capture and tear the backend down (generation-counter
@@ -307,6 +313,7 @@ public actor CaptureActor {
     playhead = await encoder.currentChunkStart
     await transition(to: .capturing)
     startConsuming(stream)
+    startDryWatchdog()
   }
 
   /// Finalize the current in-progress chunk and index it, then open a fresh
@@ -536,6 +543,63 @@ public actor CaptureActor {
       ])
   }
 
+  /// How long a push (browser) source may deliver nothing before
+  /// ``checkPushDrySpell()`` logs a breadcrumb, and how often it checks.
+  ///
+  /// Quiet is normal for a per-speaker stream — audio flows only while that
+  /// speaker talks — so a dry spell alone is never treated as an error. But
+  /// the 2026-07-24 Meet failure (browser/dev/captures/
+  /// 2026-07-24-meet-collections-drift.md) delivered 4 seconds of remote audio
+  /// and then went permanently dry with zero errors anywhere: the only daemon-
+  /// visible symptom was `now - playhead` growing without bound, and nothing
+  /// logged it. ``reanchorAfterDeliveryGap`` can't cover this case — it runs
+  /// when the *next* buffer arrives, and in a permanent stall there is no next
+  /// buffer. One notice per dry episode makes a dead delivery path visible in
+  /// the log without paging anyone over a participant who just stopped talking.
+  static let pushDryWarnSeconds: Double = 120
+  static let pushDryCheckSeconds: Double = 30
+
+  /// Arm the dry-spell watchdog for push sources. Local backends (mic, system,
+  /// app) have their own realtime stall watchdog (`StallDetector` inside the
+  /// backend) and are excluded — a quiet mic still delivers zero-filled
+  /// buffers, so playhead lag genuinely means a wedged engine there, which the
+  /// backend already handles by rebuilding.
+  private func startDryWatchdog() {
+    guard sourceID.sourceClass == .browser else { return }
+    dryWatchdogTask?.cancel()
+    dryWarnedThisEpisode = false
+    dryWatchdogTask = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(nanoseconds: UInt64(Self.pushDryCheckSeconds * 1_000_000_000))
+        guard !Task.isCancelled, let self else { return }
+        await self.checkPushDrySpell()
+      }
+    }
+  }
+
+  private func checkPushDrySpell() async {
+    guard runtimeState == .capturing else { return }
+    let drySeconds = clock.now().interval(since: playhead)
+    if drySeconds < Self.pushDryWarnSeconds {
+      dryWarnedThisEpisode = false
+      return
+    }
+    guard !dryWarnedThisEpisode else { return }
+    dryWarnedThisEpisode = true
+    await logEvent(
+      "capture.push_source_dry", level: .notice,
+      fields: [
+        LogField("source", .string(sourceID.rawValue)),
+        LogField("seconds", .double(drySeconds.rounded())),
+        LogField(
+          "hint",
+          .string(
+            "no PCM delivered — speaker may simply be silent, or the extension's"
+              + " audio path is down (Meet RTP migration, see"
+              + " browser/dev/captures/2026-07-24-meet-collections-drift.md)")),
+      ])
+  }
+
   /// Publishes this buffer's coarse VAD state to ``eventSink`` iff it differs
   /// from the last published one — the live feed's `vad` event is a *state
   /// change* (`docs/specs/capture-daemon.md`'s
@@ -574,6 +638,9 @@ public actor CaptureActor {
   /// the teardown can't be silently dropped (they would be, under strict
   /// flush-then-stop). No audio is left unindexed either way.
   private func teardownCapture() async {
+    dryWatchdogTask?.cancel()
+    dryWatchdogTask = nil
+    dryWarnedThisEpisode = false
     await backend.stop()
     await consumerTask?.value
     consumerTask = nil

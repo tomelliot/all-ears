@@ -760,6 +760,80 @@ struct MeetingRegistryTests {
       MeetingStartParams(platform: "meet", externalID: "abc", trigger: .browserExtension))
     #expect(meeting.sources == [])
   }
+
+  // MARK: - browser-audio watchdog
+
+  @Test("warns when a multi-party roster runs with no browser source")
+  func browserAudioMissingWarns() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let gate = SleepGate()
+    let logged = Mutex<[String]>([])
+    let registry = makeRegistry(
+      dataRoot: dataRoot, clock: clock,
+      sleep: { seconds in await gate.wait(seconds) },
+      log: { line in logged.withLock { $0.append(line) } })
+
+    let meeting = try await registry.start(
+      MeetingStartParams(
+        platform: "meet", externalID: "abc", sources: ["mic"], trigger: .browserExtension))
+    _ = try await registry.upsertAttendee(
+      MeetingAttendeeParams(meeting: meeting.id, id: "devices/1", displayName: "Host"))
+    _ = try await registry.upsertAttendee(
+      MeetingAttendeeParams(meeting: meeting.id, id: "devices/2", displayName: "Guest"))
+
+    await gate.releaseAll()
+    await waitUntil {
+      logged.withLock { $0.contains { $0.contains("meeting.browser_audio_missing") } }
+    }
+
+    let warnings = logged.withLock { $0.filter { $0.contains("meeting.browser_audio_missing") } }
+    #expect(warnings.count == 1)
+    #expect(warnings.first?.contains("named_attendees=2") == true)
+  }
+
+  @Test("stays quiet when a browser source opened")
+  func browserAudioPresentStaysQuiet() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let logged = Mutex<[String]>([])
+    let registry = makeRegistry(
+      dataRoot: dataRoot, clock: clock,
+      log: { line in logged.withLock { $0.append(line) } })
+
+    // No-op sleep (the helper default): every armed check fires immediately,
+    // so absence of the warning after the upserts is a real negative.
+    let meeting = try await registry.start(
+      MeetingStartParams(
+        platform: "meet", externalID: "abc", sources: ["mic", "browser:meet:speaker-1"],
+        trigger: .browserExtension))
+    _ = try await registry.upsertAttendee(
+      MeetingAttendeeParams(meeting: meeting.id, id: "devices/1", displayName: "Host"))
+    _ = try await registry.upsertAttendee(
+      MeetingAttendeeParams(meeting: meeting.id, id: "devices/2", displayName: "Guest"))
+    for _ in 0..<50 { await Task.yield() }
+
+    #expect(logged.withLock { !$0.contains { $0.contains("meeting.browser_audio_missing") } })
+  }
+
+  @Test("stays quiet while the roster has fewer than two named attendees")
+  func browserAudioSoloStaysQuiet() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let logged = Mutex<[String]>([])
+    let registry = makeRegistry(
+      dataRoot: dataRoot, clock: clock,
+      log: { line in logged.withLock { $0.append(line) } })
+
+    let meeting = try await registry.start(
+      MeetingStartParams(
+        platform: "meet", externalID: "abc", sources: ["mic"], trigger: .browserExtension))
+    _ = try await registry.upsertAttendee(
+      MeetingAttendeeParams(meeting: meeting.id, id: "devices/1", displayName: "Host"))
+    for _ in 0..<50 { await Task.yield() }
+
+    #expect(logged.withLock { !$0.contains { $0.contains("meeting.browser_audio_missing") } })
+  }
 }
 
 /// A controllable stand-in for the registry's sleep seam: waiters block until

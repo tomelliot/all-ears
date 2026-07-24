@@ -82,6 +82,10 @@ public actor MeetingRegistry {
   private let log: @Sendable (String) -> Void
   /// `[earsd.meetings].ingest_close_grace_s`.
   private let graceSeconds: Double
+  /// How long a browser-triggered meeting with a multi-party roster may run
+  /// with no `browser:*` source before the daemon logs a loud warning
+  /// (`meeting.browser_audio_missing`). 0 disables the watchdog.
+  private let browserAudioWarnSeconds: Double
   /// Injectable wait, so orphan-grace tests never sleep real time.
   private let sleep: @Sendable (Double) async -> Void
   private let sessionSchema: Int
@@ -125,6 +129,12 @@ public actor MeetingRegistry {
   /// Grace-timer invalidation: a scheduled expiry only fires if the
   /// meeting's generation still matches (a re-opened stream bumps it).
   private var graceGeneration: [String: Int] = [:]
+  /// Meetings the browser-audio watchdog has already warned about (one
+  /// warning per meeting); cleared on end.
+  private var browserAudioWarned: Set<String> = []
+  /// Meetings with a browser-audio check already in flight, so roster churn
+  /// arms at most one timer at a time.
+  private var browserAudioCheckPending: Set<String> = []
 
   public init(
     dataRoot: URL,
@@ -132,6 +142,7 @@ public actor MeetingRegistry {
     makeID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
     bus: EventBus? = nil,
     graceSeconds: Double = 120,
+    browserAudioWarnSeconds: Double = 120,
     sleep: @escaping @Sendable (Double) async -> Void = { seconds in
       try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
     },
@@ -148,6 +159,7 @@ public actor MeetingRegistry {
     self.makeID = makeID
     self.bus = bus
     self.graceSeconds = graceSeconds
+    self.browserAudioWarnSeconds = browserAudioWarnSeconds
     self.sleep = sleep
     self.sessionSchema = sessionSchema
     self.onEnded = onEnded
@@ -317,6 +329,9 @@ public actor MeetingRegistry {
         + "trigger=\(trigger.rawValue) sources=\(sourceLabel(meeting)) "
         + "superseded=\(toSupersede.count)")
     await startCapture(meeting.id, meeting.sources)
+    if trigger == .browserExtension {
+      scheduleBrowserAudioCheck(meetingID: meeting.id)
+    }
     return meeting
   }
 
@@ -353,6 +368,8 @@ public actor MeetingRegistry {
       byIdentity[identity] = nil
     }
     graceGeneration[meeting.id] = nil
+    browserAudioWarned.remove(meeting.id)
+    browserAudioCheckPending.remove(meeting.id)
 
     // Stop and tear down capture before the ended hook runs, so each source's
     // in-progress chunk is flushed and indexed to disk before transcription
@@ -483,6 +500,11 @@ public actor MeetingRegistry {
     }
     await publish(&meeting)
     meetings[meeting.id] = meeting
+    // A roster event is the watchdog's re-arm signal: a guest who joins (or
+    // gets named) mid-meeting starts a fresh browser-audio clock.
+    if meeting.trigger == .browserExtension && meeting.state != .ended {
+      scheduleBrowserAudioCheck(meetingID: meeting.id)
+    }
     return meeting
   }
 
@@ -601,6 +623,62 @@ public actor MeetingRegistry {
       .sorted { $0.rawValue < $1.rawValue }
     for source in claimed { pendingIngestLinks[source] = nil }
     return claimed
+  }
+
+  // MARK: - Browser-audio watchdog
+
+  /// Arm one browser-audio check `browserAudioWarnSeconds` from now, unless
+  /// one is already pending. Armed at `meeting.start` and re-armed by every
+  /// attendee upsert (a guest who joins mid-meeting restarts the clock), so
+  /// there is no self-rescheduling loop — each check either warns, or waits
+  /// for the next roster event to arm the next one.
+  ///
+  /// The 2026-07-24 Brivo call (browser/dev/captures/
+  /// 2026-07-24-meet-collections-drift.md) ran 21 minutes with the extension's
+  /// control channel healthy — meeting started, both names on the roster —
+  /// while not one byte of remote audio arrived: Meet had migrated call audio
+  /// off the RTP path the extension taps, silently. The daemon-visible shape
+  /// of that failure is precise: a browser-triggered meeting whose roster
+  /// proves a multi-party call (≥ 2 named attendees) but whose sources never
+  /// gain a single `browser:*` entry. This watchdog makes that shape loud.
+  private func scheduleBrowserAudioCheck(meetingID: String) {
+    guard browserAudioWarnSeconds > 0,
+      !browserAudioWarned.contains(meetingID),
+      !browserAudioCheckPending.contains(meetingID)
+    else { return }
+    browserAudioCheckPending.insert(meetingID)
+    let wait = sleep
+    let seconds = browserAudioWarnSeconds
+    Task { [weak self] in
+      await wait(seconds)
+      await self?.checkBrowserAudio(meetingID: meetingID)
+    }
+  }
+
+  private func checkBrowserAudio(meetingID: String) {
+    browserAudioCheckPending.remove(meetingID)
+    guard let meeting = meetings[meetingID],
+      meeting.state != .ended,
+      meeting.trigger == .browserExtension,
+      !browserAudioWarned.contains(meetingID)
+    else { return }
+    if meeting.sources.contains(where: { $0.sourceClass == .browser }) {
+      // The extension delivered at least one per-participant stream; a stream
+      // that later goes dead is CaptureActor's dry-spell watchdog's job.
+      return
+    }
+    let namedAttendees = meeting.attendees.filter { !($0.displayName ?? "").isEmpty }.count
+    // Fewer than 2 names doesn't prove a multi-party call (guest may still be
+    // in the lobby) — stay quiet; the upsert that names them re-arms the check.
+    guard namedAttendees >= 2 else { return }
+    browserAudioWarned.insert(meetingID)
+    log(
+      "⚠ meeting.browser_audio_missing: meeting=\(meetingID) "
+        + "named_attendees=\(namedAttendees) age=\(ageSeconds(meeting))s — "
+        + "roster shows a multi-party call but no browser:* audio source ever opened; "
+        + "remote participants are NOT being recorded "
+        + "(extension audio path down — see "
+        + "browser/dev/captures/2026-07-24-meet-collections-drift.md)")
   }
 
   private func scheduleGraceExpiry(meetingID: String) {
