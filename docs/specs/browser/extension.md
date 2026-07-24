@@ -59,6 +59,7 @@ The hook is a `world: "MAIN"`, `runAt: "document_start"` content script — the 
 - **Stop:** on `track.onended`, delete from the map before stopping, so a late frame can't resurrect a dead entry.
 - **Mute/replace:** `onmute`/`onunmute` gate emission. Teams delivers tracks `muted=true` until first speech — accept enabled-but-muted tracks.
 - An async identity upgrade (see Meet below) restarts the track's pipeline as a new segment under the upgraded id rather than renaming in place.
+- An identity that confirms **after its track has ended** can't restart anything; it is sent as a `participant-renamed` message instead (adapter `onRename`). The background upserts the dead track's source label onto the *named* attendee (`meeting.attendee` with `id=<device>` + `source=browser:<platform>:<fallback>`), so audio already recorded under a `speaker-<n>` source is still transcript-labeled by the participant's name.
 
 ## Platform adapters
 

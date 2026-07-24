@@ -58,7 +58,7 @@ export default defineContentScript({
     // what the MV3 service worker holds only in memory — the worker can be
     // evicted mid-call and respawn empty, so the relay replays these to every
     // fresh port (see ReconnectingPort's onReconnect).
-    const state: RelayState = { participants: new Map(), roster: new Map(), liveMeeting: null };
+    const state: RelayState = { participants: new Map(), roster: new Map(), renames: new Map(), liveMeeting: null };
 
     // Dedicated PCM/lifecycle port to the background.
     const port = new ReconnectingPort(
@@ -79,10 +79,16 @@ export default defineContentScript({
         for (const [platform, entries] of groupRosterByPlatform(state.roster)) {
           post({ type: "roster", platform, entries });
         }
+        // Renames are one-shot deltas like roster names; replay them too so a
+        // respawned worker still joins dead-track sources to named attendees.
+        for (const [fromId, r] of state.renames) {
+          post({ type: "renamed", platform: r.platform, fromId, toId: r.toId });
+        }
         console.debug(
           `[ears][relay] replayed to respawned worker: ` +
             `meeting=${state.liveMeeting?.externalMeetingId ?? "none"}, ` +
-            `${state.participants.size} participant(s), ${state.roster.size} roster name(s)`,
+            `${state.participants.size} participant(s), ${state.roster.size} roster name(s), ` +
+            `${state.renames.size} rename(s)`,
         );
       },
     );
@@ -104,6 +110,10 @@ interface RelayState {
   // (identity only, no capture pipeline). Replayed in full on worker respawn
   // because the MAIN world only ever sends deltas (#23).
   roster: Map<string, { platform: Platform; displayName: string }>;
+  // fromId → late-identity join (participant-renamed), keyed on the fallback
+  // id so a repeat confirmation overwrites rather than duplicates. Replayed on
+  // worker respawn for the same reason as the roster.
+  renames: Map<string, { platform: Platform; toId: string }>;
   liveMeeting: { platform: Platform; externalMeetingId: string } | null;
 }
 
@@ -162,6 +172,11 @@ function relay(msg: MainMessage, port: ReconnectingPort, state: RelayState): voi
       }
       break;
     }
+    case "participant-renamed":
+      state.renames.set(msg.fromId, { platform: msg.platform, toId: msg.toId });
+      port.post({ type: "renamed", platform: msg.platform, fromId: msg.fromId, toId: msg.toId });
+      console.debug(`[ears][relay] renamed ${msg.fromId} → ${msg.toId} (${msg.platform})`);
+      break;
     case "status":
       console.debug(`[ears][relay] status: ${msg.text}`);
       break;

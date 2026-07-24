@@ -43,6 +43,14 @@ export type MainMessage =
   // for a participant whose track never correlated to a device id (issue #23).
   | { kind: "participant-roster"; platform: Platform; entries: RosterEntry[] }
   | { kind: "pcm"; participantId: ParticipantId; generation: number; samples: Int16Array }
+  // A confirmed identity for a participant whose capture pipeline can no
+  // longer be restarted under the new id (the track died before the Meet
+  // collections correlation confirmed — the Etel case). The audio already
+  // recorded stays under `fromId`'s source; this message lets the daemon
+  // attach that source to the *named* attendee (`toId`) so the transcript
+  // still labels the speaker by name. Live-track upgrades keep using the
+  // restart path (see audio-tap.ts handleIdentityUpgrade) and never send this.
+  | { kind: "participant-renamed"; platform: Platform; fromId: ParticipantId; toId: ParticipantId }
   | { kind: "status"; text: string }
   // A participant's capture pipeline died for good (e.g. the Meet decoder gave
   // up after exhausting its restart budget). Distinct from participant-left: the
@@ -132,6 +140,10 @@ export type PortMessage =
   // background upserts each onto the daemon meeting's attendee roster without
   // treating them as capture participants (they don't gate meeting-end).
   | { type: "roster"; platform: Platform; entries: RosterEntry[] }
+  // A late identity for a dead-track participant (see MainMessage
+  // "participant-renamed"): the background upserts `fromId`'s source label
+  // onto the `toId` attendee, joining name and source on one roster row.
+  | { type: "renamed"; platform: Platform; fromId: ParticipantId; toId: ParticipantId }
   | { type: "left"; participantId: ParticipantId }
   // A participant's capture died mid-call (see MainMessage "capture-failed").
   | { type: "capture-failed"; participantId: ParticipantId; platform: Platform; reason: string }

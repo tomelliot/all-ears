@@ -62,7 +62,8 @@ export interface MeetingControl {
 type PendingPortEvent =
   | { kind: "joined"; platform: Platform; participantId: ParticipantId; displayName?: string }
   | { kind: "stream"; platform: Platform; participantId: ParticipantId }
-  | { kind: "roster"; platform: Platform; entries: RosterEntry[] };
+  | { kind: "roster"; platform: Platform; entries: RosterEntry[] }
+  | { kind: "renamed"; platform: Platform; fromId: ParticipantId; toId: ParticipantId };
 
 // Guard against unbounded growth if a port never declares a meeting (e.g. a
 // non-meeting tab that still opens a pcm port). Far above any real pre-declare
@@ -185,6 +186,28 @@ export class MeetingTracker {
     this.applyRoster(record, entries);
   }
 
+  /**
+   * A late identity join from the tab (see protocol.ts "participant-renamed"):
+   * `fromId`'s track died before its identity upgrade could restart the
+   * pipeline, so the audio already recorded stays under `fromId`'s source.
+   * Attach that source to the *named* `toId` attendee so name and source land
+   * on one roster row — which is what the transcript's speaker-name map keys
+   * on. Identity only: `toId` is not enrolled as a capture participant.
+   */
+  participantRenamed(
+    portId: string,
+    platform: Platform,
+    fromId: ParticipantId,
+    toId: ParticipantId,
+  ): void {
+    const record = this.findRecord(portId, platform);
+    if (!record) {
+      this.enqueuePending(portId, { kind: "renamed", platform, fromId, toId });
+      return;
+    }
+    this.applyRename(record, platform, fromId, toId);
+  }
+
   /** An ingest stream for this participant is confirmed open on earsd — link
    * the attendee to their per-participant source (which downstream feeds the
    * transcript's speaker-name map). */
@@ -213,6 +236,18 @@ export class MeetingTracker {
     });
   }
 
+  private applyRename(
+    record: MeetingRecord,
+    platform: Platform,
+    fromId: ParticipantId,
+    toId: ParticipantId,
+  ): void {
+    this.upsertAttendee(record, {
+      id: toId,
+      source: sourceLabel(platform, fromId),
+    });
+  }
+
   private applyRoster(record: MeetingRecord, entries: RosterEntry[]): void {
     for (const entry of entries) {
       if (!entry.displayName) continue; // never upsert an empty name (issue #23)
@@ -238,6 +273,7 @@ export class MeetingTracker {
       if (event.platform !== record.platform) continue; // different platform on the same port — not this meeting
       if (event.kind === "joined") this.applyJoined(record, event.participantId, event.displayName);
       else if (event.kind === "roster") this.applyRoster(record, event.entries);
+      else if (event.kind === "renamed") this.applyRename(record, event.platform, event.fromId, event.toId);
       else this.applyStream(record, event.platform, event.participantId);
     }
   }

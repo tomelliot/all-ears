@@ -49,6 +49,12 @@ const generations = new Map<ParticipantId, number>(); // participantId → segme
 // Fallback speaker ids are keyed to the track so a re-adopted track (epoch
 // handoff) keeps its id. WeakMap: entries vanish when the track is GC'd.
 const fallbackIds = new WeakMap<MediaStreamTrack, ParticipantId>();
+// track.id → the participant id its pipeline last captured under. Unlike
+// `fallbackIds` this is keyed by the *string* id and survives the track object,
+// so a late identity for an already-dead track (adapter onRename) can still be
+// translated back to the id whose audio is on disk. Bounded by the number of
+// tracks seen in the page's life; never cleared mid-call on purpose.
+const participantIdsByTrackId = new Map<string, ParticipantId>();
 let speakerCounter = 0;
 let cfg: CaptureConfig;
 
@@ -82,6 +88,7 @@ export function initCapture(config: CaptureConfig): void {
 
   setTrackSink(sink);
   cfg.adapter?.onIdentify?.(handleIdentityUpgrade);
+  cfg.adapter?.onRename?.(handleLateIdentity);
   // Forward roster names (id → display name) the adapter resolves to the daemon,
   // decoupled from track capture, so a participant's name reaches meeting.toml
   // even when the speaking-onset correlation never tied them to a track (#23).
@@ -131,31 +138,51 @@ export function captureDebugState(): {
  *
  * Chosen approach: stop the running pipeline and start a new one under the
  * upgraded id, rather than renaming the id on the live segment in place.
- * Reasons: (1) protocol.ts has no "rename" message — participantId is
- * embedded in every already-sent "pcm"/"participant-joined" message and in
- * the earsd source label (sourceLabel()), so relabeling an in-progress
- * recording would need a new wire message type and daemon-side handling,
- * out of scope here; (2) restart reuses the exact lifecycle audio-tap.ts
- * already has — stopPipeline's participant-left / startPipeline's
- * participant-joined, each with its own fresh `generations` counter — so
- * earsd sees the same "old segment ended, new one began" shape it already
- * handles for every reconnect; (3) it's exactly analogous to how a re-
- * adopted track across an epoch handoff already keeps continuity via
- * `fallbackIds`, just triggered by an identity event instead of an epoch.
- * Trade-off: a few frames of audio are lost across the restart (fresh
- * AudioDecoder/processor) — acceptable given upgrades are rare (≤ once per
- * track, after CONFIRM_THRESHOLD confirming turns) and the alternative is a
- * cross-process protocol change.
+ * Reasons: (1) restart reuses the exact lifecycle audio-tap.ts already has —
+ * stopPipeline's participant-left / startPipeline's participant-joined, each
+ * with its own fresh `generations` counter — so earsd sees the same "old
+ * segment ended, new one began" shape it already handles for every
+ * reconnect; (2) it's exactly analogous to how a re-adopted track across an
+ * epoch handoff already keeps continuity via `fallbackIds`, just triggered
+ * by an identity event instead of an epoch. Trade-off: a few frames of audio
+ * are lost across the restart (fresh AudioDecoder/processor) — acceptable
+ * given upgrades are rare (≤ once per track, after CONFIRM_THRESHOLD
+ * confirming turns).
+ *
+ * When the restart is impossible — the track already ended before the
+ * confirmation landed — the fallback is `handleLateIdentity`'s
+ * "participant-renamed" message, which joins the already-recorded audio's
+ * source to the named attendee daemon-side instead of relabeling anything.
  */
 function handleIdentityUpgrade(track: MediaStreamTrack, id: ParticipantId): void {
   if (!isCurrentEpoch(cfg.epoch)) return;
   const pipeline = pipelines.get(track);
   if (!pipeline || pipeline.participantId === id) return;
   const rec = liveTracks().get(track);
-  if (!rec) return; // track already ended; nothing to restart
+  if (!rec) {
+    // Track already ended between the correlator's match and this callback;
+    // nothing to restart — same late-join shape as the adapter's onRename.
+    handleLateIdentity(track.id, id);
+    return;
+  }
   console.debug(`[ears][capture] identity upgrade: track ${track.id} ${pipeline.participantId} → ${id} — restarting as a new segment`);
   stopPipeline(track);
   startPipeline(track, rec.stream, rec.transceiver, id);
+}
+
+/**
+ * A confirmed identity arrived for a track whose pipeline can no longer be
+ * restarted (the track died first — e.g. to the Meet AudioDecoder bug,
+ * journal #45). The audio already recorded stays under the fallback id's
+ * source; tell the daemon the two ids are the same person so the transcript
+ * still labels that source by the attendee's name.
+ */
+function handleLateIdentity(trackId: string, id: ParticipantId): void {
+  if (!isCurrentEpoch(cfg.epoch)) return;
+  const fromId = participantIdsByTrackId.get(trackId);
+  if (!fromId || fromId === id) return;
+  console.debug(`[ears][capture] late identity: track ${trackId} ${fromId} → ${id} — sending rename (track already ended)`);
+  postToIsolated({ kind: "participant-renamed", platform: cfg.platform, fromId, toId: id });
 }
 
 const sink: TrackSink = (track, stream, transceiver) => {
@@ -171,6 +198,7 @@ function startPipeline(
   forcedId?: ParticipantId,
 ): void {
   const participantId = forcedId ?? resolveIdentity(track, stream, transceiver);
+  participantIdsByTrackId.set(track.id, participantId);
   const generation = (generations.get(participantId) ?? 0) + 1;
   generations.set(participantId, generation);
 

@@ -262,6 +262,58 @@ describe("MeetingTracker (v2 signal forwarder)", () => {
     ]);
   });
 
+  it("participantRenamed attaches the dead track's source to the named attendee", async () => {
+    const control = new FakeControl();
+    const { tracker } = makeTracker(control);
+
+    tracker.meetingStarted("p1", "meet", "abc");
+    await flush();
+    // The Etel case: speaker-1's audio recorded, the roster named the device,
+    // and the track died before the identity upgrade could restart capture.
+    tracker.rosterUpdate("p1", "meet", [
+      { participantId: "spaces/s/devices/183", displayName: "Etel Friedmann" },
+    ]);
+    tracker.participantRenamed("p1", "meet", "speaker-1", "spaces/s/devices/183");
+    await flush();
+
+    expect(control.ofVerb("attendee")).toEqual([
+      { verb: "attendee", meeting: "m-1", attendee: { id: "spaces/s/devices/183", display_name: "Etel Friedmann" } },
+      // Name and source now land on the same attendee row — the join the
+      // transcript's speaker map needs. The id is sanitized into the label.
+      { verb: "attendee", meeting: "m-1", attendee: { id: "spaces/s/devices/183", source: "browser:meet:speaker-1" } },
+    ]);
+  });
+
+  it("a rename is identity-only: it does not enrol a capture participant or keep the meeting alive", async () => {
+    const control = new FakeControl();
+    const { tracker } = makeTracker(control);
+
+    tracker.meetingStarted("p1", "meet", "abc");
+    await flush();
+    tracker.participantJoined("p1", "meet", "speaker-1");
+    tracker.participantRenamed("p1", "meet", "speaker-1", "spaces/s/devices/183");
+    await flush();
+
+    tracker.participantLeft("p1", "speaker-1");
+    await flush();
+    expect(control.ofVerb("end")).toEqual([{ verb: "end", meeting: "m-1" }]);
+    expect(tracker.meetingActive).toBe(false);
+  });
+
+  it("buffers a rename that arrives before meeting-started and flushes it once it lands", async () => {
+    const control = new FakeControl();
+    const { tracker } = makeTracker(control);
+
+    tracker.participantRenamed("p1", "meet", "speaker-1", "spaces/s/devices/183");
+    expect(control.ofVerb("attendee")).toHaveLength(0); // no record yet — buffered
+
+    tracker.meetingStarted("p1", "meet", "abc");
+    await flush();
+    expect(control.ofVerb("attendee")).toEqual([
+      { verb: "attendee", meeting: "m-1", attendee: { id: "spaces/s/devices/183", source: "browser:meet:speaker-1" } },
+    ]);
+  });
+
   it("rosterUpdate with an empty batch is a no-op", async () => {
     const control = new FakeControl();
     const { tracker } = makeTracker(control);

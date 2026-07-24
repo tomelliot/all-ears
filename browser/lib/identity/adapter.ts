@@ -30,6 +30,15 @@ export interface PlatformAdapter {
    */
   onIdentify?(cb: (track: MediaStreamTrack, id: ParticipantId) => void): void;
   /**
+   * Optional: register a callback for an identity that confirmed *after* its
+   * track already ended — too late for onIdentify's pipeline restart. Carries
+   * the dead track's id (the adapter may no longer hold the track object) and
+   * the confirmed participant id. audio-tap.ts translates the track id back to
+   * the fallback participant id it captured under and tells the daemon the two
+   * are the same person, so already-recorded audio still gets a named speaker.
+   */
+  onRename?(cb: (trackId: string, id: ParticipantId) => void): void;
+  /**
    * Optional: register a callback for batches of resolved participant identities
    * (id → display name) read from the platform's own roster/UI, independent of
    * whether each id has been tied to a captured track. audio-tap.ts forwards

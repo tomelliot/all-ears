@@ -330,6 +330,7 @@ class MeetAdapter implements PlatformAdapter {
    * doesn't re-fire the callback. */
   private readonly upgradedTracks = new Map<string, ParticipantId>();
   private identifyCb: ((track: MediaStreamTrack, id: ParticipantId) => void) | null = null;
+  private renameCb: ((trackId: string, id: ParticipantId) => void) | null = null;
   private rosterCb: ((entries: RosterEntry[]) => void) | null = null;
   /** id → name already emitted via onRoster, so each tile re-scan pushes only
    * the delta (see rosterDelta). */
@@ -363,6 +364,10 @@ class MeetAdapter implements PlatformAdapter {
 
   onIdentify(cb: (track: MediaStreamTrack, id: ParticipantId) => void): void {
     this.identifyCb = cb;
+  }
+
+  onRename(cb: (trackId: string, id: ParticipantId) => void): void {
+    this.renameCb = cb;
   }
 
   onRoster(cb: (entries: RosterEntry[]) => void): void {
@@ -417,12 +422,18 @@ class MeetAdapter implements PlatformAdapter {
     const track = this.liveTracksById.get(match.trackKey);
     if (!track) {
       // The correlation confirmed, but the track it points at is already gone —
-      // log the failed join so an unresolved attendee is traceable to "matched
-      // but no track" rather than looking like the correlator never fired (#23).
+      // too late for onIdentify's pipeline restart. Push the join as a rename
+      // instead: the audio already recorded under the fallback id keeps its
+      // source, and the daemon attaches that source to the named attendee (the
+      // Etel case — a track that died to the AudioDecoder bug before its
+      // upgrade could land, journal #45).
+      this.upgradedTracks.set(match.trackKey, match.deviceId);
       console.debug(
-        `[ears][identity] Meet join failed: no live track for device ${match.deviceId} ` +
-          `(track ${match.trackKey} ended before ${match.confirmations}-turn confirmation landed)`,
+        `[ears][identity] Meet late join: no live track for device ${match.deviceId} ` +
+          `(track ${match.trackKey} ended before ${match.confirmations}-turn confirmation landed)` +
+          ` — pushing as a rename`,
       );
+      this.renameCb?.(match.trackKey, match.deviceId);
       return;
     }
     this.upgradedTracks.set(match.trackKey, match.deviceId);
