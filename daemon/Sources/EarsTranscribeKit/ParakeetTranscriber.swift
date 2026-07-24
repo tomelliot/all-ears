@@ -126,10 +126,21 @@ public final class ParakeetTranscriber: Transcriber, @unchecked Sendable {
       guard let manager = await self.state.manager else {
         throw ParakeetTranscriberError.notLoaded
       }
-      let samples = audio.samples
+      // Right-pad sub-minimum audio with silence, exactly as `step` does:
+      // FluidAudio throws `invalidAudioData` under 0.3s, and a slice that
+      // short is legitimate — an isolated interjection beside a capture gap
+      // stitches to only the covered fraction of its window. Failing the
+      // whole source over it is worse than decoding a padded blip.
+      var samples = audio.samples
+      let minimumFrameCount = ASRConstants.minimumRequiredSamples(
+        forSampleRate: audio.sampleRate)
+      if samples.count < minimumFrameCount {
+        samples.append(contentsOf: [Float](repeating: 0, count: minimumFrameCount - samples.count))
+      }
+      let decodeSamples = samples
       let result = try await self.gate.run { () async throws -> ASRResult in
         var decoderState = try TdtDecoderState()
-        return try await manager.transcribe(samples, decoderState: &decoderState)
+        return try await manager.transcribe(decodeSamples, decoderState: &decoderState)
       }
       return [
         Segment(
