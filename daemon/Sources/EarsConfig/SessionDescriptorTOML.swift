@@ -52,6 +52,7 @@ public enum SessionDescriptorTOML {
             "exit_class": .string(issue.exitClass ?? ""),
           ])
         }),
+      "published_notes": .array(session.publishedNotes.map { .string($0) }),
       "attendee": .array(
         session.attendees.map { attendee in
           .table([
@@ -231,6 +232,13 @@ public enum SessionDescriptorTOML {
           exitClass: issueFields.optionalString("exit_class")))
     }
 
+    // Post-dates schema 3's first files too: absent reads as none.
+    var publishedNotes: [String] = []
+    for element in fields.optionalArray("published_notes") {
+      guard case .string(let path) = element else { throw .invalidField("published_notes") }
+      publishedNotes.append(path)
+    }
+
     return Session(
       id: try fields.string("id"),
       identity: identity,
@@ -246,6 +254,7 @@ public enum SessionDescriptorTOML {
       trigger: trigger,
       transcriptCompleted: transcriptCompleted,
       pipelineIssues: pipelineIssues,
+      publishedNotes: publishedNotes,
       // Absent = 0: a file from before reconciliation was versioned, which
       // every consumer treats as "older than any current reconciler".
       reconcilerVersion: fields.optionalInt("reconciler_version"))

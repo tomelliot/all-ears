@@ -850,3 +850,172 @@ struct SummarizeMisattributedCallTests {
     #expect(backedUp.contains("barrasindustries.com"))
   }
 }
+
+/// The 2026-09-21 back-to-back calls. The Augustin Applegate call's summary
+/// was published two minutes into the next call, a four-minute 1:1 with Matt
+/// Silva that had no jottings. The locator took the fresh Augustin note as
+/// "edited during the call", and the Matt summary overwrote it.
+@Suite("SummarizePipeline — back-to-back calls")
+struct SummarizeBackToBackCallTests {
+  private static let start = Instant(secondsSinceEpoch: 1_790_004_723)  // 2026-09-21T15:32:03Z
+  private static let end = Instant(secondsSinceEpoch: 1_790_004_981)  // 15:36:21Z
+  /// When the Augustin summary landed: inside the Matt call.
+  private static let augustinPublished = Instant(secondsSinceEpoch: 1_790_004_933)
+  private static let mattSession = "9614295c-10ee-4db3-82af-dc16f5c79fe6"
+  private static let augustinSession = "aa4a2068-523f-464a-aebe-f5f77e27470c"
+  private static let dayFolder = "daily-notes/2026/09/39/2026-09-21"
+
+  private static func writeTranscript(at directory: URL) throws -> URL {
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let frontmatter = TranscriptFrontmatter(
+      schema: 1,
+      kind: .clean,
+      session: mattSession,
+      title: "Matt / Tom weekly 1:1",
+      started: start,
+      attendees: ["Matt Silva", "Tom Elliot (me)"],
+      sources: ["mic", "browser:meet:t1"],
+      range: TimeRange(start: start, end: end),
+      model: TranscriptModelInfo(name: "parakeet", backend: "fluidaudio", version: "0.6b"),
+      diarization: TranscriptDiarizationInfo(enabled: false),
+      generated: end,
+      durationSeconds: 258,
+      speechSeconds: 200,
+      wordCount: 766,
+      vocab: [])
+    let document = TranscriptDocument(
+      frontmatter: frontmatter,
+      segments: [
+        TranscriptSegment(
+          source: "browser:meet:t1", speaker: "Matt Silva",
+          segment: Segment(start: 0, end: 4, text: "Where are we on SOC 2?"))
+      ])
+    let url = directory.appendingPathComponent("2026-09-21 - Matt _ Tom weekly 1_1.md")
+    try TranscriptRenderer.renderMarkdown(document).write(
+      to: url, atomically: true, encoding: .utf8)
+    return url
+  }
+
+  /// A note in the day folder, stamped with `modified`.
+  private static func writeNote(
+    _ root: URL, name: String, content: String, modified: Instant
+  ) throws -> URL {
+    let day = root.appendingPathComponent(dayFolder)
+    try FileManager.default.createDirectory(at: day, withIntermediateDirectories: true)
+    let url = day.appendingPathComponent(name)
+    try content.write(to: url, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes(
+      [.modificationDate: Date(timeIntervalSince1970: modified.secondsSinceEpoch)],
+      ofItemAtPath: url.path)
+    return url
+  }
+
+  private static let augustinNote = """
+    ---
+    title: Augustin Applegate
+    transcript: "[[Transcripts/2026/09/21/2026-09-21 - Augustin Applegate.md]]"
+    ---
+
+    ## Augustin Applegate — 2026-09-21
+    """
+
+  private static func mattSessionRecord() -> Session {
+    Session(
+      id: mattSession, title: "Matt / Tom weekly 1:1", state: .ended, started: start, ended: end,
+      intervals: [SessionInterval(start: start, end: end)])
+  }
+
+  private static func run(
+    _ root: URL, transcript: URL, sessions: [Session]
+  ) async throws -> (Int32, FakeLLMBackend) {
+    let backend = FakeLLMBackend(results: [
+      .success(LLMCompletionResult(text: "## Weekly 1:1: SOC 2 & Handoff"))
+    ])
+    let deps = SummarizePipeline.Dependencies(
+      clock: ManualClock(end.advanced(by: 60)), llmBackend: backend,
+      log: { _ in }, writeStderr: { _ in })
+    let code = await SummarizePipeline.run(
+      inputs: SummarizePipeline.Inputs(
+        transcriptPaths: [transcript.path],
+        presets: [
+          SummarizePipeline.Preset(
+            name: "workshop", promptContent: "Fold in:",
+            notes: PathTemplate(
+              "{output_root}/daily-notes/{year}/{month}/{week}/{date} - {title}.md"),
+            out: PathTemplate("{notes}"),
+            frontmatter: false)
+        ],
+        out: nil, outputRoot: root.path, backupDirectory: root.appendingPathComponent("b").path,
+        sessions: sessions),
+      dependencies: deps)
+    return (code, backend)
+  }
+
+  private static func makeRoot(_ label: String) -> URL {
+    FileManager.default.temporaryDirectory
+      .appendingPathComponent("SummarizeBackToBack-\(label)-\(UUID().uuidString)")
+  }
+
+  @Test("another session's published note is neither read nor overwritten")
+  func claimedNoteIsLeftAlone() async throws {
+    let root = Self.makeRoot("claimed")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transcript = try Self.writeTranscript(at: root.appendingPathComponent("Transcripts"))
+    // No frontmatter link, so only the claim can exclude it.
+    let note = try Self.writeNote(
+      root, name: "2026-09-21 - Augustin Applegate.md", content: "## Augustin Applegate",
+      modified: Self.augustinPublished)
+    var augustin = Session(
+      id: Self.augustinSession, title: "Augustin Applegate", state: .ended,
+      started: Self.start.advanced(by: -1890))
+    augustin.publishedNotes = [note.path]
+
+    let (code, backend) = try await Self.run(
+      root, transcript: transcript, sessions: [Self.mattSessionRecord(), augustin])
+
+    #expect(code == 0)
+    #expect(try String(contentsOf: note, encoding: .utf8) == "## Augustin Applegate")
+    let prompt = try #require(await backend.receivedPrompts.first)
+    #expect(!prompt.dynamicSuffix.contains("Augustin"))
+  }
+
+  @Test("a note linking another transcript is skipped even with no session records")
+  func publishedNoteIsSkippedWithoutClaims() async throws {
+    let root = Self.makeRoot("linked")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transcript = try Self.writeTranscript(at: root.appendingPathComponent("Transcripts"))
+    let note = try Self.writeNote(
+      root, name: "2026-09-21 - Augustin Applegate.md", content: Self.augustinNote,
+      modified: Self.augustinPublished)
+
+    let (code, backend) = try await Self.run(root, transcript: transcript, sessions: [])
+
+    #expect(code == 0)
+    #expect(try String(contentsOf: note, encoding: .utf8) == Self.augustinNote)
+    let prompt = try #require(await backend.receivedPrompts.first)
+    #expect(!prompt.dynamicSuffix.contains("Augustin"))
+  }
+
+  @Test("a note matched on edit time alone is read but the summary goes to the template path")
+  func weakMatchIsNotOverwritten() async throws {
+    let root = Self.makeRoot("weak")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transcript = try Self.writeTranscript(at: root.appendingPathComponent("Transcripts"))
+    let scratch = try Self.writeNote(
+      root, name: "2026-09-21 scratch.md", content: "soc2 auditor shortlist",
+      modified: Self.start.advanced(by: 90))
+
+    let (code, backend) = try await Self.run(
+      root, transcript: transcript, sessions: [Self.mattSessionRecord()])
+
+    #expect(code == 0)
+    let prompt = try #require(await backend.receivedPrompts.first)
+    #expect(prompt.dynamicSuffix.contains("soc2 auditor shortlist"))
+    #expect(try String(contentsOf: scratch, encoding: .utf8) == "soc2 auditor shortlist")
+    let templatePath = root.appendingPathComponent(
+      "daily-notes/2026/09/39/2026-09-21 - Matt _ Tom weekly 1_1.md")
+    #expect(
+      try String(contentsOf: templatePath, encoding: .utf8)
+        .contains("## Weekly 1:1: SOC 2 & Handoff"))
+  }
+}

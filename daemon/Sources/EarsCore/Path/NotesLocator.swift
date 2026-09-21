@@ -1,4 +1,5 @@
 import Foundation
+import Yams
 
 /// Finds the note a user was already jotting into during a call, when the
 /// path a `[[summarize.preset]]`'s `notes` template constructs isn't where
@@ -22,8 +23,18 @@ import Foundation
 ///   in a directory component;
 /// - its name mentions **someone who was on the call**, matched loosely
 ///   enough that "Matt" finds "Matthew";
-/// - it was **edited while the call was happening**, which is close to
-///   decisive on its own — few files are touched during any given meeting.
+/// - it was **edited while the call was happening**, measured against the
+///   call's recorded intervals and nothing else. A grace period after the
+///   call used to stretch this window, and summaries are written in exactly
+///   that period: one call's published note read as edited during the next.
+///
+/// Two kinds of file are never candidates, because ears wrote them and a
+/// change time on them says nothing about a person taking notes:
+///
+/// - a note another session **claimed** — one its summarize run published;
+/// - a note whose frontmatter **links a different transcript**, which is what
+///   every published summary carries, claimed or not (a manual rerun records
+///   no claim).
 ///
 /// Nothing is scored on being *near* the constructed path beyond sharing its
 /// directory subtree, and a candidate with no positive signal is not
@@ -38,7 +49,11 @@ public enum NotesLocator {
     case exact(String)
     /// A different file scored well enough to be this call's notes.
     /// ``reason`` explains why, for the warning that accompanies using it.
-    case matched(String, reason: String)
+    /// `confident` is `true` when the filename names someone on the call. A
+    /// match on edit time alone is not confident: the caller reads it as
+    /// notes but does not write over it, so a wrong match costs an extra
+    /// file rather than someone else's note.
+    case matched(String, reason: String, confident: Bool)
     /// Nothing plausible. The caller proceeds with no notes, as before.
     case notFound
   }
@@ -57,31 +72,65 @@ public enum NotesLocator {
     /// person, so matching on your own name would only ever fire on notes
     /// about something else.
     public var names: [String]
-    /// The call itself. A note modified inside this window was almost
-    /// certainly being written during it.
-    public var start: Instant?
-    public var end: Instant?
+    /// When the call was recorded: the daemon's session intervals, which
+    /// leave out paused stretches. A note modified inside one was almost
+    /// certainly being written during the call. Empty disables the signal.
+    public var windows: [Window]
+    /// Filename stems of the transcripts this run summarizes. A candidate
+    /// whose frontmatter links one of these is this call's own published
+    /// note (a rerun) and stays eligible; one linking anything else is not.
+    public var transcripts: Set<String>
+    /// Absolute paths of notes other sessions published. Never candidates.
+    public var claimed: Set<String>
 
     public init(
-      expandedPath: String, date: String, names: [String] = [], start: Instant? = nil,
-      end: Instant? = nil
+      expandedPath: String, date: String, names: [String] = [], windows: [Window] = [],
+      transcripts: Set<String> = [], claimed: Set<String> = []
     ) {
       self.expandedPath = expandedPath
       self.date = date
       self.names = names
+      self.windows = windows
+      self.transcripts = transcripts
+      self.claimed = claimed
+    }
+
+    /// One window from `start` to `end`, for a call with no pause.
+    public init(
+      expandedPath: String, date: String, names: [String] = [], start: Instant, end: Instant,
+      transcripts: Set<String> = [], claimed: Set<String> = []
+    ) {
+      self.init(
+        expandedPath: expandedPath, date: date, names: names,
+        windows: [Window(start: start, end: end)], transcripts: transcripts, claimed: claimed)
+    }
+  }
+
+  /// A stretch of the call, both ends inclusive.
+  public struct Window: Sendable, Hashable {
+    public var start: Instant
+    public var end: Instant
+
+    public init(start: Instant, end: Instant) {
       self.start = start
       self.end = end
     }
+
+    func contains(_ instant: Instant) -> Bool { instant >= start && instant <= end }
   }
 
   /// One file the search is considering.
   public struct Candidate: Sendable, Hashable {
     public var path: String
     public var modified: Instant?
+    /// The filename stem of the transcript the file's frontmatter
+    /// `transcript:` links, when it has one — the mark of a published note.
+    public var linkedTranscript: String?
 
-    public init(path: String, modified: Instant? = nil) {
+    public init(path: String, modified: Instant? = nil, linkedTranscript: String? = nil) {
       self.path = path
       self.modified = modified
+      self.linkedTranscript = linkedTranscript
     }
   }
 
@@ -90,11 +139,6 @@ public enum NotesLocator {
   /// a `2026-08-12/` folder the template doesn't know about — without turning
   /// a per-week directory into a scan of the whole vault.
   public static let searchDepth = 2
-
-  /// How long after a call ends a note can still be saved and count as having
-  /// been written during it. Jottings are typically saved on the way out of
-  /// the meeting, sometimes a few minutes after.
-  public static let editGraceSeconds: Double = 15 * 60
 
   /// Weight of "this filename names someone who was on the call", per name
   /// token matched. Above ``editWeight`` because a name is *about* the call's
@@ -114,7 +158,9 @@ public enum NotesLocator {
     let root = URL(fileURLWithPath: context.expandedPath).deletingLastPathComponent()
     let candidates = markdownFiles(under: root, fileManager: fileManager)
     guard let best = best(among: candidates, context: context) else { return .notFound }
-    return .matched(best.path, reason: reason(for: best, context: context))
+    return .matched(
+      best.path, reason: reason(for: best, context: context),
+      confident: nameScore(best, context: context) > 0)
   }
 
   /// The highest-scoring candidate, or `nil` when none carries a positive
@@ -140,6 +186,7 @@ public enum NotesLocator {
     // Filed under the right day is a precondition, not a score: a note from
     // another day is not this call's notes however well it scores otherwise.
     guard candidate.path.contains(context.date) else { return 0 }
+    guard isEligible(candidate, context: context) else { return 0 }
     return nameScore(candidate, context: context) + editScore(candidate, context: context)
   }
 
@@ -156,10 +203,25 @@ public enum NotesLocator {
     return matched * nameTokenWeight
   }
 
+  /// `false` for a note ears published for a different call: claimed by
+  /// another session, or linking a transcript this run is not summarizing.
+  private static func isEligible(_ candidate: Candidate, context: Context) -> Bool {
+    if context.claimed.map(resolved).contains(resolved(candidate.path)) { return false }
+    if let linked = candidate.linkedTranscript, !context.transcripts.contains(linked) {
+      return false
+    }
+    return true
+  }
+
+  /// `path` with symlinks resolved, so `/var/…` and `/private/var/…` compare
+  /// equal.
+  private static func resolved(_ path: String) -> String {
+    URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+  }
+
   private static func editScore(_ candidate: Candidate, context: Context) -> Int {
-    guard let modified = candidate.modified, let start = context.start else { return 0 }
-    let end = (context.end ?? start).advanced(by: editGraceSeconds)
-    return modified >= start && modified <= end ? editWeight : 0
+    guard let modified = candidate.modified else { return 0 }
+    return context.windows.contains { $0.contains(modified) } ? editWeight : 0
   }
 
   /// Human-readable justification for a fuzzy match, so the warning that
@@ -230,9 +292,45 @@ public enum NotesLocator {
             path: entry.path,
             modified: values?.contentModificationDate.map {
               Instant(secondsSinceEpoch: $0.timeIntervalSince1970)
-            }))
+            },
+            linkedTranscript: linkedTranscript(in: entry)))
       }
     }
     return found
+  }
+
+  /// The filename stem of the transcript `url`'s frontmatter links through
+  /// `transcript:`, or `nil` when it has no frontmatter or no such key.
+  ///
+  /// Compared by stem, not path: Obsidian may rewrite a link to its
+  /// shortest unique form (`[[2026-09-21 - Ana]]`), and the stem is what
+  /// survives that.
+  static func linkedTranscript(in url: URL) -> String? {
+    guard let markdown = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+    return linkedTranscript(inMarkdown: markdown)
+  }
+
+  static func linkedTranscript(inMarkdown markdown: String) -> String? {
+    guard markdown.hasPrefix("---\n") else { return nil }
+    let body = markdown.dropFirst(4)
+    guard let close = body.range(of: "\n---") else { return nil }
+    guard
+      let mapping = try? Yams.load(yaml: String(body[..<close.lowerBound])) as? [String: Any],
+      let link = mapping["transcript"] as? String
+    else { return nil }
+    return transcriptStem(link)
+  }
+
+  /// `[[Transcripts/2026/09/21/2026-09-21 - Ana.md|Ana]]` →
+  /// `2026-09-21 - Ana`. Also accepts a bare path.
+  public static func transcriptStem(_ link: String) -> String? {
+    var target = link.trimmingCharacters(in: .whitespaces)
+    if target.hasPrefix("[["), target.hasSuffix("]]") {
+      target = String(target.dropFirst(2).dropLast(2))
+    }
+    if let pipe = target.firstIndex(of: "|") { target = String(target[..<pipe]) }
+    if let hash = target.firstIndex(of: "#") { target = String(target[..<hash]) }
+    let stem = stem(of: target)
+    return stem.isEmpty ? nil : stem
   }
 }

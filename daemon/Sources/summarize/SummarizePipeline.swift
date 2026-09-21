@@ -109,6 +109,11 @@ enum SummarizePipeline {
     /// the single site that has a real user to protect is the safer default
     /// in the direction that matters.
     var backupDirectory: String = ""
+    /// The daemon's session records. The locator reads the call's intervals
+    /// from this run's own session, and every other session's published
+    /// notes as notes it must not match. Empty (a store-less manual run)
+    /// falls back to the transcript's range and no claims.
+    var sessions: [Session] = []
   }
 
   static func run(inputs: Inputs, dependencies: Dependencies) async -> Int32 {
@@ -172,16 +177,28 @@ enum SummarizePipeline {
       // template-derived path is searched for, because only a template can be
       // wrong about where the user actually filed the note.
       var locatorReason: String? = nil
+      var writeBackPath: String? = nil
       let notesPath: String?
       if let explicit = inputs.notes {
         notesPath = explicit
       } else if let template = preset.notes {
-        switch NotesLocator.locate(locatorContext(template.expand(context), baseFrontmatter)) {
+        let located = NotesLocator.locate(
+          locatorContext(
+            template.expand(context), baseFrontmatter, transcriptPaths: inputs.transcriptPaths,
+            sessions: inputs.sessions))
+        switch located {
         case .exact(let path):
           notesPath = path
-        case .matched(let path, let reason):
+        case .matched(let path, let reason, let confident):
           notesPath = path
           locatorReason = reason
+          // A match on edit time alone supplies the notes but is not written
+          // over: `{notes}` stays the template's path, so a wrong match adds
+          // a file instead of replacing someone else's note.
+          if !confident {
+            writeBackPath = template.expand(context)
+            locatorReason = reason + "; no participant named, so it is read but not overwritten"
+          }
         case .notFound:
           // The template's path, still — it is what the miss is reported
           // against, and what `out = "{notes}"` would have written to.
@@ -191,7 +208,7 @@ enum SummarizePipeline {
         notesPath = nil
       }
       var notesContext = context
-      notesContext.notes = notesPath
+      notesContext.notes = writeBackPath ?? notesPath
       let notesContent = notesPath.flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }
       return PresetPlan(
         preset: preset,
@@ -564,19 +581,35 @@ enum SummarizePipeline {
   /// The local participant is filtered out of the name list: `attendees`
   /// marks them `(me)` (see ``TranscriptFrontmatter/attendees``), and a note
   /// about a call is named after the *other* person.
+  ///
+  /// The edit windows are the daemon's recorded intervals for this session,
+  /// never the time this run happens: a note written after the call — by
+  /// this pipeline for another call, say — says nothing about this one.
   private static func locatorContext(
-    _ expandedPath: String, _ frontmatter: TranscriptFrontmatter
+    _ expandedPath: String, _ frontmatter: TranscriptFrontmatter, transcriptPaths: [String],
+    sessions: [Session]
   ) -> NotesLocator.Context {
     let start = frontmatter.started ?? frontmatter.range.start
     let names = frontmatter.attendees
       .filter { !$0.hasSuffix("(me)") }
       .map { $0.trimmingCharacters(in: .whitespaces) }
+    let own = sessions.first { $0.id == frontmatter.session }
+    var windows =
+      own?.intervals.map { interval in
+        NotesLocator.Window(
+          start: interval.start, end: interval.end ?? own?.ended ?? frontmatter.range.end)
+      } ?? []
+    if windows.isEmpty {
+      windows = [NotesLocator.Window(start: start, end: frontmatter.range.end)]
+    }
+    let claimed = sessions.filter { $0.id != frontmatter.session }.flatMap(\.publishedNotes)
     return NotesLocator.Context(
       expandedPath: expandedPath,
       date: UTCCalendar.isoDate(start),
       names: names,
-      start: start,
-      end: frontmatter.range.end)
+      windows: windows,
+      transcripts: Set(transcriptPaths.compactMap(NotesLocator.transcriptStem)),
+      claimed: Set(claimed))
   }
 
   /// The LLM input. With a companion notes file both halves are labelled, so

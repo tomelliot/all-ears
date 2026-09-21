@@ -202,7 +202,8 @@ enum SummarizeRuntime {
         notes: inputs.notes, outputRoot: outputRoot, weekNumbering: weekNumbering,
         // Opted into here rather than defaulted in `Inputs`: this is the one
         // caller with a real user's notes to lose.
-        backupDirectory: NoteBackup.defaultDirectory),
+        backupDirectory: NoteBackup.defaultDirectory,
+        sessions: SessionStore.readAll(dataRoot: dataRoot)),
       dependencies: dependencies
     )
 

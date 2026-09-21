@@ -65,6 +65,12 @@ public struct Session: Sendable, Hashable {
   /// that succeeded with a `warning:`. Replaced wholesale by each chain run.
   /// Kept apart from ``warnings``, which feed the transcript's frontmatter.
   public var pipelineIssues: [PipelineIssue]
+  /// Absolute paths of the notes the last on-end chain's `summarize` wrote.
+  /// Replaced wholesale by each chain run. `summarize` reads every other
+  /// session's list so it never takes a note another call already produced
+  /// as this call's jotted notes. Persisted in `session.toml` only, never on
+  /// the wire, like ``reconcilerVersion``.
+  public var publishedNotes: [String]
   /// The last state revision that touched this session. Boot-scoped (see
   /// `hello`'s `boot_id`), so never persisted to `session.toml`.
   public var rev: Int
@@ -84,6 +90,7 @@ public struct Session: Sendable, Hashable {
     trigger: TriggerKind = .manual,
     transcriptCompleted: Instant? = nil,
     pipelineIssues: [PipelineIssue] = [],
+    publishedNotes: [String] = [],
     reconcilerVersion: Int = 0,
     rev: Int = 0
   ) {
@@ -101,6 +108,7 @@ public struct Session: Sendable, Hashable {
     self.trigger = trigger
     self.transcriptCompleted = transcriptCompleted
     self.pipelineIssues = pipelineIssues
+    self.publishedNotes = publishedNotes
     self.reconcilerVersion = reconcilerVersion
     self.rev = rev
   }
@@ -310,8 +318,9 @@ extension Session: Codable {
     transcriptCompleted = try container.decodeISO8601InstantIfPresent(forKey: .transcriptCompleted)
     pipelineIssues =
       try container.decodeIfPresent([PipelineIssue].self, forKey: .pipelineIssues) ?? []
-    // TOML-only (see the property's doc comment): the wire shape neither
-    // carries nor needs it, so decoding always starts it at 0.
+    // TOML-only (see the properties' doc comments): the wire shape neither
+    // carries nor needs them, so decoding always starts them empty.
+    publishedNotes = []
     reconcilerVersion = 0
     rev = try container.decodeIfPresent(Int.self, forKey: .rev) ?? 0
   }

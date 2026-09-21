@@ -76,9 +76,14 @@ So when the template's path isn't there, `NotesLocator` searches its directory a
 
 - **filed under the right day** — in the filename or in a directory component. A precondition, not a score: a note from another day is not this call's notes however well it scores otherwise.
 - **names someone who was on the call** — matched against the transcript's `attendees:` (excluding the local participant, since a note is named after the other person), token by token, so "Matt" finds "Matthew".
-- **edited while the call was running** — close to decisive on its own; few files are touched during any given meeting.
+- **edited while the call was running** — measured against the daemon's recorded intervals for the session (paused stretches excluded), with no grace period after the end. A store-less manual run falls back to the transcript's `range`. A grace period used to stretch the window, and summaries are written in exactly that period: on 2026-09-21 one call's published note read as edited during the next call, and the next call's summary overwrote it.
 
-A candidate with no positive signal is not returned, and a tie between the top two returns nothing: an unmatched note leaves the run where it was, while a wrongly matched one overwrites a note about something else. A match found this way is reported, and the note says so.
+Two kinds of file are never candidates, because ears wrote them and their change time says nothing about a person taking notes:
+
+- a note another session **claimed**: its `published_notes` in `session.toml`, recorded by earsd after summarize succeeds;
+- a note whose frontmatter `transcript:` links a transcript this run is not summarizing, compared by filename stem so an Obsidian short link still matches. This covers manual runs, which record no claim.
+
+A candidate with no positive signal is not returned, and a tie between the top two returns nothing: an unmatched note leaves the run where it was, while a wrongly matched one overwrites a note about something else. A match that names a participant is used as notes and is the `{notes}` destination. A match on edit time alone is used as notes only: `{notes}` stays the template's path, so a wrong match adds a file instead of replacing one. A match found this way is reported, and the note says so.
 
 ### Overwrite safety
 

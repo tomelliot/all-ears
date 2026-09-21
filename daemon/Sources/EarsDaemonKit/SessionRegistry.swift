@@ -457,6 +457,19 @@ public actor SessionRegistry {
     sessions[session.id] = session
   }
 
+  /// Replaces the notes this session's latest successful summarize wrote.
+  /// A no-op for an unknown session.
+  public func recordPublishedNotes(id: String, notes: [String]) {
+    guard var session = knownSession(id), session.publishedNotes != notes else { return }
+    session.publishedNotes = notes
+    do {
+      try persist(session)
+    } catch {
+      log("session \(id): persisting published notes failed: \(error)")
+    }
+    sessions[session.id] = session
+  }
+
   /// `session.pause`: closes the open interval. No-op success if already
   /// paused; `session_ended` if the session is over.
   public func pause(id: String) async throws -> Session {

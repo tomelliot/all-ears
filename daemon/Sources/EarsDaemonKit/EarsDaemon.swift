@@ -455,6 +455,9 @@ public actor EarsDaemon {
             context: "session-end",
             recordIssues: { [weak self] issues in
               await self?.recordSessionPipelineIssues(session.id, issues)
+            },
+            recordNotes: { [weak self] notes in
+              await self?.recordSessionPublishedNotes(session.id, notes)
             })
           if transcribed {
             await self?.markSessionTranscriptCompleted(session.id)
@@ -1168,6 +1171,10 @@ public actor EarsDaemon {
   /// `ears session show` can say which stage failed and why.
   private func recordSessionPipelineIssues(_ id: String, _ issues: [PipelineIssue]) async {
     await sessionRegistry?.recordPipelineIssues(id: id, issues: issues)
+  }
+
+  private func recordSessionPublishedNotes(_ id: String, _ notes: [String]) async {
+    await sessionRegistry?.recordPublishedNotes(id: id, notes: notes)
   }
 
   /// Every source's current status, keyed by id — a test-only seam so an

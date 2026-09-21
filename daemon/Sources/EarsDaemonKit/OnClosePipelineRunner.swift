@@ -135,6 +135,10 @@ public struct OnClosePipelineRunner: Sendable {
   /// reported, once, after the chain stops. A clean run hands it an empty
   /// list, so a rerun clears what an earlier run recorded.
   ///
+  /// `recordNotes` receives the paths summarize wrote, once, and only when
+  /// summarize succeeded: a failed rerun must not drop the claim an earlier
+  /// run's note still holds, because the note is still on disk.
+  ///
   /// - Returns: `true` iff `transcribe --session` exited 0 — the signal the
   ///   caller uses to stamp the session's transcript-completion marker (which
   ///   in turn starts the retention clock). LLM-stage failures are logged but
@@ -145,7 +149,8 @@ public struct OnClosePipelineRunner: Sendable {
     sessionID: String, stages: [OnEndStage],
     emptiness: TranscriptEmptinessPolicy = .defaults,
     context: String,
-    recordIssues: @Sendable ([PipelineIssue]) async -> Void = { _ in }
+    recordIssues: @Sendable ([PipelineIssue]) async -> Void = { _ in },
+    recordNotes: @Sendable ([String]) async -> Void = { _ in }
   ) async -> Bool {
     // Config validation (`EarsdConfigSchema`) rejects LLM stages without
     // transcribe; an empty list means the whole chain is off. Defensive here
@@ -153,16 +158,18 @@ public struct OnClosePipelineRunner: Sendable {
     guard stages.contains(.transcribe) else { return false }
 
     var issues: [PipelineIssue] = []
+    var notes: [String]? = nil
     let transcribed = await runChain(
       sessionID: sessionID, stages: stages, emptiness: emptiness, context: context,
-      issues: &issues)
+      issues: &issues, notes: &notes)
     await recordIssues(issues)
+    if let notes { await recordNotes(notes) }
     return transcribed
   }
 
   private func runChain(
     sessionID: String, stages: [OnEndStage], emptiness: TranscriptEmptinessPolicy,
-    context: String, issues: inout [PipelineIssue]
+    context: String, issues: inout [PipelineIssue], notes: inout [String]?
   ) async -> Bool {
     guard
       let transcriptPath = await runPathStage(
@@ -214,7 +221,7 @@ public struct OnClosePipelineRunner: Sendable {
         .summarize, arguments: [nextInput, "--select-preset", "--json"], sessionID: sessionID,
         context: context, issues: &issues)
       {
-        logSummarizeResults(
+        notes = logSummarizeResults(
           stdout: outcome.stdout, sessionID: sessionID, context: context, issues: &issues)
       }
     }
@@ -301,16 +308,20 @@ public struct OnClosePipelineRunner: Sendable {
   /// `outputs` — e.g. `summarize wrote 3/3 presets`. Exit 0 already carried
   /// the success signal, so an undecodable envelope here is logged loudly as
   /// a contract violation but changes nothing else.
+  ///
+  /// - Returns: the paths the envelope says were written, or `nil` when the
+  ///   envelope is unusable and the written paths are unknown.
   private func logSummarizeResults(
     stdout: String, sessionID: String, context: String, issues: inout [PipelineIssue]
-  ) {
+  ) -> [String]? {
     switch StageResultEnvelope.decodeSuccessDocument(
       stdout: stdout, tool: OnEndStage.summarize.rawValue)
     {
     case .success(let envelope):
-      guard let presets = envelope.presetOutputs, !presets.isEmpty else { return }
+      guard let presets = envelope.presetOutputs, !presets.isEmpty else { return [] }
       log(
         "\(context) on_end: \(Self.presetSummary(presets)) for session '\(sessionID)'")
+      return presets.filter(\.ok).compactMap(\.path)
     case .failure(let violation):
       log(
         "\(context) on_end: summarize exited 0 but its result envelope is unusable for "
@@ -318,6 +329,7 @@ public struct OnClosePipelineRunner: Sendable {
       issues.append(
         PipelineIssue(
           stage: OnEndStage.summarize.rawValue, kind: .failed, message: violation.message))
+      return nil
     }
   }
 

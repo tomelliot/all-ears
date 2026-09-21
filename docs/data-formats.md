@@ -157,6 +157,10 @@ kind = "failed"                         # failed | warning
 message = "LLM call failed for preset 'meeting': LLM backend call timed out"
 exit_class = "retryable-upstream"       # "" for a warning
 
+published_notes = [                     # what the last successful summarize wrote;
+  "/vault/daily-notes/2026-07-19 - Jane Doe.md",  # never matched as another call's notes
+]                                       #   absent = none; session.toml only, not on the wire
+
 [[attendee]]                            # roster, upserted by whoever knows it
 id = "spaces/x/devices/y"               #   (the extension's DOM layer today)
 display_name = "Jane Doe"

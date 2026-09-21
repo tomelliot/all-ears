@@ -72,13 +72,105 @@ struct NotesLocatorTests {
 
     let resolution = NotesLocator.locate(
       Self.context(root, title: "2026-08-12 - meet wUE9lE2sg5YB"))
-    guard case .matched(let path, let reason) = resolution else {
+    guard case .matched(let path, let reason, let confident) = resolution else {
       Issue.record("expected a match, got \(resolution)")
       return
     }
     #expect(path.hasSuffix("2026-08-12/2026-08-12 - Matt Barras.md"))
     #expect(reason.contains("names a participant"))
     #expect(reason.contains("edited during the call"))
+    #expect(confident)
+  }
+
+  @Test("a match on edit time alone is not confident")
+  func editOnlyMatchIsNotConfident() throws {
+    let root = try Self.makeVault()
+    defer { try? FileManager.default.removeItem(at: root) }
+    // Nobody on this call is named by any file, so only `Untitled.md` and the
+    // Matt Barras note carry a signal — and the Matt Barras note is claimed.
+    let claimed = root.appendingPathComponent(
+      "daily-notes/2026/08/33/2026-08-12/2026-08-12 - Matt Barras.md"
+    ).path
+    let context = NotesLocator.Context(
+      expandedPath: root.appendingPathComponent("daily-notes/2026/08/33/x.md").path,
+      date: "2026-08-12", names: ["Priya Raman"], start: Self.start, end: Self.end,
+      claimed: [claimed])
+
+    guard case .matched(let path, _, let confident) = NotesLocator.locate(context) else {
+      Issue.record("expected a match")
+      return
+    }
+    #expect(path.hasSuffix("Untitled.md"))
+    #expect(!confident)
+  }
+
+  @Test("a note another session published is never a candidate")
+  func claimedNoteIsSkipped() {
+    let candidate = NotesLocator.Candidate(
+      path: "/v/2026-08-12 - Matthew Barras.md", modified: Self.start.advanced(by: 60))
+    let context = NotesLocator.Context(
+      expandedPath: "/v/x.md", date: "2026-08-12", names: ["Matthew Barras"],
+      start: Self.start, end: Self.end, claimed: ["/v/2026-08-12 - Matthew Barras.md"])
+
+    #expect(NotesLocator.score(candidate, context: context) == 0)
+  }
+
+  @Test("a note linking another transcript is skipped; one linking this run's stays eligible")
+  func foreignTranscriptLinkIsSkipped() {
+    let context = NotesLocator.Context(
+      expandedPath: "/v/x.md", date: "2026-08-12", names: ["Matthew Barras"],
+      start: Self.start, end: Self.end, transcripts: ["2026-08-12 - Matthew Barras"])
+    let foreign = NotesLocator.Candidate(
+      path: "/v/2026-08-12 - Matthew Barras.md", modified: Self.start.advanced(by: 60),
+      linkedTranscript: "2026-08-12 - Alan Bradburne")
+    let own = NotesLocator.Candidate(
+      path: "/v/2026-08-12 - Matthew Barras.md", modified: Self.start.advanced(by: 60),
+      linkedTranscript: "2026-08-12 - Matthew Barras")
+
+    #expect(NotesLocator.score(foreign, context: context) == 0)
+    #expect(NotesLocator.score(own, context: context) > 0)
+  }
+
+  /// The 2026-09-21 failure: the previous call's summary was written two
+  /// minutes after that call ended, which the old 15-minute grace counted as
+  /// an edit during it.
+  @Test("an edit after the call, or in a pause, is not an edit during it")
+  func editWindowIsTheRecordedIntervals() {
+    let pauseStart = Self.start.advanced(by: 600)
+    let pauseEnd = Self.start.advanced(by: 1200)
+    let context = NotesLocator.Context(
+      expandedPath: "/v/x.md", date: "2026-08-12",
+      windows: [
+        NotesLocator.Window(start: Self.start, end: pauseStart),
+        NotesLocator.Window(start: pauseEnd, end: Self.end),
+      ])
+    func score(_ offset: Double, from base: Instant) -> Int {
+      NotesLocator.score(
+        NotesLocator.Candidate(path: "/v/2026-08-12 x.md", modified: base.advanced(by: offset)),
+        context: context)
+    }
+
+    #expect(score(60, from: Self.start) == NotesLocator.editWeight)
+    #expect(score(60, from: pauseStart) == 0)
+    #expect(score(60, from: pauseEnd) == NotesLocator.editWeight)
+    #expect(score(120, from: Self.end) == 0)
+  }
+
+  @Test("the linked transcript is read from frontmatter, in any link form")
+  func linkedTranscriptParsing() {
+    let published = """
+      ---
+      title: Augustin Applegate
+      transcript: "[[Transcripts/2026/09/21/2026-09-21 - Augustin Applegate.md]]"
+      ---
+
+      body
+      """
+    #expect(
+      NotesLocator.linkedTranscript(inMarkdown: published) == "2026-09-21 - Augustin Applegate")
+    #expect(NotesLocator.linkedTranscript(inMarkdown: "jottings\ntranscript: x") == nil)
+    #expect(NotesLocator.transcriptStem("[[2026-09-21 - Ana|Ana]]") == "2026-09-21 - Ana")
+    #expect(NotesLocator.transcriptStem("/t/2026-09-21 - Ana.md") == "2026-09-21 - Ana")
   }
 
   @Test("a note from another day is never this call's notes, however well it scores")

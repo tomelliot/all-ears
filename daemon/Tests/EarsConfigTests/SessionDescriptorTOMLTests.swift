@@ -71,6 +71,20 @@ struct SessionDescriptorTOMLTests {
     #expect(try SessionDescriptorTOML.decode(.table(table)).pipelineIssues.isEmpty)
   }
 
+  @Test("published notes round-trip, and a file without them decodes to none")
+  func publishedNotesRoundTrip() throws {
+    var session = Self.referenceSession()
+    session.publishedNotes = ["/vault/daily-notes/2026-09-21 - Augustin Applegate.md"]
+    #expect(try SessionDescriptorTOML.decode(SessionDescriptorTOML.encode(session)) == session)
+
+    guard case .table(var table) = SessionDescriptorTOML.encode(Self.referenceSession()) else {
+      Issue.record("session.toml did not encode to a table")
+      return
+    }
+    table["published_notes"] = nil
+    #expect(try SessionDescriptorTOML.decode(.table(table)).publishedNotes.isEmpty)
+  }
+
   @Test("attendee origin round-trips: platform, synthetic, and unknown-as-absent")
   func attendeeOriginRoundTrips() throws {
     let encoded = SessionDescriptorTOML.encode(Self.referenceSession())

@@ -60,6 +60,15 @@ struct OnClosePipelineRunnerTests {
     var calls: [[PipelineIssue]] { recorded.withLock { $0 } }
   }
 
+  /// Collects each list the runner hands `recordNotes`.
+  private final class NoteCollector: Sendable {
+    private let recorded = Mutex<[[String]]>([])
+
+    func record(_ notes: [String]) { recorded.withLock { $0.append(notes) } }
+
+    var calls: [[String]] { recorded.withLock { $0 } }
+  }
+
   /// A `transcribe --json` success whose stdout is the recorded v1 envelope
   /// naming `path` — the result contract as the real stage emits it.
   private static func transcribeOutcome(_ path: String) -> SpawnOutcome {
@@ -552,6 +561,34 @@ struct OnClosePipelineRunnerTests {
         ],
         [],
       ])
+  }
+
+  @Test("a successful summarize records the notes it wrote; a failed one records nothing")
+  func summarizeRecordsPublishedNotes() async throws {
+    let directory = try Self.makeTempDirectory("published-notes")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let transcript = try Self.makeFile("t.transcript.md", in: directory)
+    let note = try Self.makeFile("t.meeting.summary.md", in: directory)
+    let collector = NoteCollector()
+    let runner = ScriptedRunner([
+      Self.transcribeOutcome(transcript),
+      SpawnOutcome(
+        exitCode: 0,
+        stdout: StageEnvelopeFixtures.summarizeSelectedPresetSuccess(preset: "meeting", path: note)),
+      Self.transcribeOutcome(transcript),
+      SpawnOutcome(exitCode: 5, stderr: "error: LLM backend call timed out\n"),
+    ])
+    let pipeline = OnClosePipelineRunner(runProcess: runner.runner)
+
+    for _ in 0..<2 {
+      _ = await pipeline.runOnEndChain(
+        sessionID: "aa4a2068", stages: [.transcribe, .summarize], context: "session-end",
+        recordNotes: { collector.record($0) })
+    }
+
+    // The failed rerun leaves the first run's claim in place: the note is
+    // still on disk.
+    #expect(collector.calls == [[note]])
   }
 
   @Test("a failure without an envelope takes its last plain stderr line, or says there was none")
