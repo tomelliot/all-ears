@@ -164,4 +164,22 @@ struct TranscribeRunSummarySmokeTests {
     let errorField = try #require(summary["error"] as? String)
     #expect(errorField.contains("no such file"))
   }
+
+  @Test(
+    "a file path passed to --source is a usage error that points at --file, not a missing-range error"
+  )
+  func sourceFilePathPointsAtFileFlag() throws {
+    let result = try Self.runTranscribe(["--source", "Phil chambers 7 Oct at 14-01.m4a"])
+
+    #expect(result.exitCode == 64)
+    #expect(result.stderr.contains("to transcribe a file use --file <path>"))
+    #expect(!result.stderr.contains("no range specified"))
+  }
+
+  @Test("a dotted source id such as app:us.zoom.xos is not mistaken for a file")
+  func dottedSourceIDIsNotAFile() throws {
+    let result = try Self.runTranscribe(["--source", "app:us.zoom.xos"])
+
+    #expect(!result.stderr.contains("--file <path>"))
+  }
 }

@@ -209,6 +209,25 @@ struct Transcribe: AsyncParsableCommand {
     guard exitCode == 0 else { throw ExitCode(exitCode) }
   }
 
+  /// Extensions `--file` users plausibly pass. Matched by extension rather than
+  /// "has a dot", because source ids such as `app:us.zoom.xos` contain dots.
+  private static let audioFileExtensions: Set<String> = [
+    "m4a", "mp3", "wav", "aac", "flac", "ogg", "opus", "caf", "aif", "aiff", "mp4", "mov", "webm",
+  ]
+
+  /// Whether a `--source` value is a file path rather than a source id: an
+  /// existing regular file, or a name ending in an audio extension.
+  static func looksLikeAudioFile(_ value: String) -> Bool {
+    var isDirectory: ObjCBool = false
+    if FileManager.default.fileExists(atPath: value, isDirectory: &isDirectory),
+      !isDirectory.boolValue
+    {
+      return true
+    }
+    let pathExtension = (value as NSString).pathExtension.lowercased()
+    return audioFileExtensions.contains(pathExtension)
+  }
+
   /// Rejects mutually exclusive flag combinations before any run. Mirrors the
   /// per-mode guards the dispatch in ``run()`` relies on having already passed.
   private func validateArgumentCombinations() throws {
@@ -218,6 +237,14 @@ struct Transcribe: AsyncParsableCommand {
     // precise error rather than the generic combination one.
     if rereconcile, session == nil {
       throw ValidationError("--rereconcile requires --session")
+    }
+    // `--source` takes a capture-store source id, but a file path passed to it
+    // otherwise falls through to range resolution and fails with an unrelated
+    // "no range specified". Checked before the combination guards so the hint
+    // wins over a generic mixing error.
+    if let path = sources.first(where: Self.looksLikeAudioFile) {
+      throw ValidationError(
+        "--source takes a source id, not a file: '\(path)'; to transcribe a file use --file <path>")
     }
     if !files.isEmpty {
       // `--file` is a standalone-file batch: every range/session selector
