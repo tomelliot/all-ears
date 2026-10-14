@@ -1,5 +1,6 @@
 import type { MainMessage, Platform } from "./protocol";
 import type { AttributionEvent } from "./attribution-log";
+import type { SilentDiagnosis } from "./silent-diagnosis";
 import { seamUsesReceiverTracks, type SeamId } from "./capture-seams";
 import { perfDetailEnabled, perfEnabled } from "./perf-main";
 import {
@@ -316,6 +317,9 @@ export interface CaptureHooks {
   noteFirstFrame(seam: SeamId): void;
   /** The track unmuted — arms the call-level seam arbitration grace window. */
   noteUnmute(): void;
+  /** Read the receiver's stats for a silent track (read-only). Optional so
+   * fakes need not provide it. */
+  diagnoseSilent?(track: MediaStreamTrack): Promise<SilentDiagnosis>;
   /** Edge-triggered speaking change, for the adapter's identity correlation. */
   onTrackSpeaking(track: MediaStreamTrack, speaking: boolean): void;
 }
@@ -423,11 +427,33 @@ export class TrackCapture {
     if (report.level === "warn") {
       console.error(`[ears][capture] ${report.text}`);
       this.hooks.post({ kind: "status", text: report.text });
+      this.diagnoseSilent();
     } else {
       // Benign: the pipeline works, this participant is just quiet. Keep it low
       // so it never reads as a failure to a user scanning the console.
       console.debug(`[ears][capture] ${report.text}`);
     }
+  }
+
+  /** Record why the track is silent, into the session's attribution log. Best
+   * effort: a failure here must never reach the capture path. */
+  private diagnoseSilent(): void {
+    const diagnose = this.hooks.diagnoseSilent;
+    if (!diagnose) return;
+    Promise.resolve()
+      .then(() => diagnose(this.track))
+      .then((diagnosis) => {
+        console.error(`[ears][capture] ${this.participantId} silent: ${diagnosis.verdict}`, diagnosis);
+        this.hooks.post({ kind: "status", text: `${this.participantId} silent: ${diagnosis.verdict}` });
+        this.hooks.record({
+          type: "silent-diagnosis",
+          t: this.hooks.now(),
+          trackId: this.trackId,
+          participantId: this.participantId,
+          diagnosis,
+        });
+      })
+      .catch((err: unknown) => console.debug(`[ears][capture] silent diagnosis failed: ${String(err)}`));
   }
 
   private consume(frame: AudioDataLike): void {

@@ -1,5 +1,6 @@
 import { isCurrentEpoch } from "./epoch";
-import { liveTracks, setTrackSink, type TrackRecord, type TrackSink } from "./rtc-hook";
+import { livePeerConnections, liveTracks, setTrackSink, type TrackRecord, type TrackSink } from "./rtc-hook";
+import { diagnoseSilentTrack } from "./silent-diagnosis";
 import {
   trackProvenance,
   webAudioTracks,
@@ -238,6 +239,8 @@ export class CaptureOrchestrator {
       this.arbiter?.noteFrame(this.deps.now(), seam);
     },
     noteUnmute: () => this.arbiter?.noteUnmute(this.deps.now()),
+    diagnoseSilent: (track) =>
+      diagnoseSilentTrack(track, livePeerConnections(), document.querySelectorAll<HTMLMediaElement>("audio,video")),
     onTrackSpeaking: (track, speaking) => this.cfg?.adapter?.onTrackSpeaking?.(track, speaking),
   };
 
