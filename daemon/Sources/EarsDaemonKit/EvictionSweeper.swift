@@ -29,6 +29,9 @@ public actor EvictionSweeper {
   private let evictAfterTranscriptSeconds: Double
   private let maxAudioAgeSeconds: Double
   private let log: @Sendable (String) -> Void
+  /// Keeps an unchanged `session.toml` from being parsed again every pass —
+  /// see ``SessionStore/Cache`` for the leak this avoids.
+  private let descriptorCache: SessionStore.Cache
   private var runTask: Task<Void, Never>?
 
   public init(
@@ -37,6 +40,7 @@ public actor EvictionSweeper {
     intervalSeconds: Double,
     evictAfterTranscriptSeconds: Double,
     maxAudioAgeSeconds: Double,
+    descriptorCache: SessionStore.Cache = SessionStore.Cache(),
     log: @escaping @Sendable (String) -> Void
   ) {
     self.dataRoot = dataRoot
@@ -44,6 +48,7 @@ public actor EvictionSweeper {
     self.intervalSeconds = intervalSeconds
     self.evictAfterTranscriptSeconds = evictAfterTranscriptSeconds
     self.maxAudioAgeSeconds = maxAudioAgeSeconds
+    self.descriptorCache = descriptorCache
     self.log = log
   }
 
@@ -76,7 +81,7 @@ public actor EvictionSweeper {
   /// single deterministic pass without the timer.
   func sweepOnce() async {
     let now = clock.now()
-    for session in SessionStore.readAll(dataRoot: dataRoot) {
+    for session in SessionStore.readAll(dataRoot: dataRoot, cache: descriptorCache) {
       guard session.state == .ended, let ended = session.ended else { continue }
       let deadline =
         session.transcriptCompleted.map { $0.advanced(by: evictAfterTranscriptSeconds) }

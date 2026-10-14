@@ -467,6 +467,9 @@ public actor EarsDaemon {
     } else {
       onSessionEnded = nil
     }
+    // One descriptor cache for every repeated `session.toml` read in this
+    // process: the registry's writes invalidate what the sweeper reads.
+    let descriptorCache = SessionStore.Cache()
     let sessions = SessionRegistry(
       dataRoot: configuration.dataRoot,
       clock: clock,
@@ -484,6 +487,7 @@ public actor EarsDaemon {
       stopCapture: { [weak self] sessionID, sources in
         await self?.stopSessionCapture(sessionID: sessionID, sources: sources)
       },
+      descriptorCache: descriptorCache,
       log: log)
     // `loadFromDisk()` is deferred to after `self.controlServer` is assigned
     // below: a session still active on disk resumes capture through
@@ -561,6 +565,7 @@ public actor EarsDaemon {
       intervalSeconds: configuration.evictionSweepIntervalSeconds,
       evictAfterTranscriptSeconds: configuration.evictAfterTranscriptSeconds,
       maxAudioAgeSeconds: configuration.maxAudioAgeSeconds,
+      descriptorCache: descriptorCache,
       log: log)
     await sweeper.start()
     evictionSweeper = sweeper

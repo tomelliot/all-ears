@@ -1,6 +1,7 @@
 import EarsConfig
 import EarsCore
 import Foundation
+import Synchronization
 
 /// Reads and writes a session's `session.toml` (schema 3), per the
 /// `sessions/<session-id>/session.toml` layout — thin file I/O only: the
@@ -9,12 +10,14 @@ import Foundation
 /// every mutation so a crash never leaves a torn descriptor.
 public enum SessionStore {
   /// Writes `session` to `<data-root>/sessions/<session-id>/session.toml`,
-  /// creating the session directory if it doesn't exist yet.
-  public static func write(_ session: Session, dataRoot: URL) throws {
+  /// creating the session directory if it doesn't exist yet. Drops the
+  /// session from `cache`, so the writer's own next read is always fresh.
+  public static func write(_ session: Session, dataRoot: URL, cache: Cache? = nil) throws {
     let url = DataStoreLayout.sessionTomlFile(dataRoot: dataRoot, sessionID: session.id)
     try FileManager.default.createDirectory(
       at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
     let text = printableConfig(SessionDescriptorTOML.encode(session))
+    defer { cache?.invalidate(sessionID: session.id) }
     try text.write(to: url, atomically: true, encoding: .utf8)
   }
 
@@ -23,11 +26,22 @@ public enum SessionStore {
   /// - Throws: ``DataStoreError/sessionNotFound(_:)`` if the file doesn't
   ///   exist; ``DescriptorTOMLError`` if it exists but doesn't parse into a
   ///   valid ``Session`` (an unknown schema included).
-  public static func read(sessionID: String, dataRoot: URL) throws -> Session {
+  ///
+  /// With a `cache`, an unchanged file returns its earlier result (the
+  /// decoded session or the parse error) without parsing it again.
+  public static func read(
+    sessionID: String, dataRoot: URL, cache: Cache? = nil
+  ) throws -> Session {
     let url = DataStoreLayout.sessionTomlFile(dataRoot: dataRoot, sessionID: sessionID)
     guard FileManager.default.fileExists(atPath: url.path) else {
+      cache?.invalidate(sessionID: sessionID)
       throw DataStoreError.sessionNotFound(sessionID)
     }
+    guard let cache else { return try parse(url) }
+    return try cache.session(sessionID: sessionID, url: url, parse: parse)
+  }
+
+  private static func parse(_ url: URL) throws -> Session {
     let value = try readConfigFileLayer(at: url.path)
     return try SessionDescriptorTOML.decode(value)
   }
@@ -37,26 +51,114 @@ public enum SessionStore {
   /// `ears session list --all` reads daemon-free. A missing `sessions/`
   /// directory is an empty list, and an unparseable descriptor is skipped
   /// and reported via `onSkip` rather than failing the whole scan.
+  ///
+  /// `cache` is for the long-running daemon's repeated scans (see ``Cache``);
+  /// sessions no longer on disk drop out of it.
   public static func readAll(
-    dataRoot: URL, onSkip: (String, Error) -> Void = { _, _ in }
+    dataRoot: URL, cache: Cache? = nil, onSkip: (String, Error) -> Void = { _, _ in }
   ) -> [Session] {
     let directory = DataStoreLayout.sessionsDirectory(dataRoot: dataRoot)
     guard
       let entries = try? FileManager.default.contentsOfDirectory(
         at: directory, includingPropertiesForKeys: nil)
-    else { return [] }
+    else {
+      cache?.retain(sessionIDs: [])
+      return []
+    }
     var sessions: [Session] = []
     for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
       let sessionID = entry.lastPathComponent
       do {
-        sessions.append(try read(sessionID: sessionID, dataRoot: dataRoot))
+        sessions.append(try read(sessionID: sessionID, dataRoot: dataRoot, cache: cache))
       } catch DataStoreError.sessionNotFound {
         continue  // a stray non-session entry under sessions/ — not an error
       } catch {
         onSkip(sessionID, error)
       }
     }
+    cache?.retain(sessionIDs: Set(entries.map(\.lastPathComponent)))
     return sessions
+  }
+
+  /// Decoded `session.toml` results keyed by session id, for a process that
+  /// reads the same descriptors over and over (`earsd`'s retention sweep).
+  ///
+  /// Each parse through TOMLKit 0.6.0 leaks the whole parsed document — its
+  /// `TOMLTable` never frees the C++ table — so a once-a-minute rescan of
+  /// every session grows the daemon by gigabytes a day. The cache parses a
+  /// file again only when its modification date, size, or file number
+  /// changes. The file number catches an atomic rewrite (a new inode) that a
+  /// coarse modification date and an equal size would miss. The short-lived
+  /// CLIs pass no cache: they exit, so their leak is bounded.
+  public final class Cache: Sendable {
+    private struct Stamp: Hashable {
+      var modified: Date?
+      var size: Int?
+      var fileNumber: Int?
+    }
+
+    private struct Entry {
+      var stamp: Stamp
+      var result: Result<Session, any Error>
+    }
+
+    private struct State {
+      var entries: [String: Entry] = [:]
+      var parseCount = 0
+    }
+
+    private let state = Mutex(State())
+
+    public init() {}
+
+    /// How many times this cache has parsed a file — the seam tests assert
+    /// "not parsed again" through.
+    public var parseCount: Int { state.withLock { $0.parseCount } }
+
+    /// Forgets `sessionID`, so its next read parses the file.
+    public func invalidate(sessionID: String) {
+      _ = state.withLock { $0.entries.removeValue(forKey: sessionID) }
+    }
+
+    /// Forgets every session not in `sessionIDs`.
+    func retain(sessionIDs: Set<String>) {
+      state.withLock { state in
+        state.entries = state.entries.filter { sessionIDs.contains($0.key) }
+      }
+    }
+
+    func session(
+      sessionID: String, url: URL, parse: (URL) throws -> Session
+    ) throws -> Session {
+      let stamp = Self.stamp(of: url)
+      if let stamp,
+        let entry = state.withLock({ $0.entries[sessionID] }),
+        entry.stamp == stamp
+      {
+        return try entry.result.get()
+      }
+      // Parsed outside the lock: concurrent readers of other sessions never
+      // wait on this file's I/O.
+      let result = Result { try parse(url) }
+      state.withLock { state in
+        state.parseCount += 1
+        if let stamp {
+          state.entries[sessionID] = Entry(stamp: stamp, result: result)
+        } else {
+          state.entries.removeValue(forKey: sessionID)
+        }
+      }
+      return try result.get()
+    }
+
+    private static func stamp(of url: URL) -> Stamp? {
+      guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+      else { return nil }
+      return Stamp(
+        modified: attributes[.modificationDate] as? Date,
+        size: (attributes[.size] as? NSNumber)?.intValue,
+        fileNumber: (attributes[.systemFileNumber] as? NSNumber)?.intValue)
+    }
   }
 }
 

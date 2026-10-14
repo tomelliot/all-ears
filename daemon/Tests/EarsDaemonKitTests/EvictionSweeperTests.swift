@@ -151,4 +151,37 @@ struct EvictionSweeperTests {
       FileManager.default.fileExists(
         atPath: DataStoreLayout.sessionTomlFile(dataRoot: dataRoot, sessionID: "m4").path))
   }
+
+  @Test("repeated passes parse an unchanged session.toml once, and see a write at once")
+  func sweepReusesUnchangedDescriptors() async throws {
+    let dataRoot = try makeDataRoot()
+    let ended = base.advanced(by: 600)
+    try seedSession(
+      id: "m5", state: .ended, ended: ended, transcriptCompleted: nil, dataRoot: dataRoot)
+
+    let cache = SessionStore.Cache()
+    let clock = ManualClock(ended.advanced(by: 500))
+    let sweeper = EvictionSweeper(
+      dataRoot: dataRoot,
+      clock: clock,
+      intervalSeconds: 60,
+      evictAfterTranscriptSeconds: 100,
+      maxAudioAgeSeconds: 1_000,
+      descriptorCache: cache,
+      log: { _ in })
+
+    // Before any deadline: three passes, one parse (the leak this guards).
+    for _ in 0..<3 { await sweeper.sweepOnce() }
+    #expect(audioExists(id: "m5", dataRoot: dataRoot))
+    #expect(cache.parseCount == 1)
+
+    // The daemon stamps transcript completion through the shared cache: the
+    // next pass reads the new descriptor and evicts on the transcript deadline.
+    var session = try SessionStore.read(sessionID: "m5", dataRoot: dataRoot)
+    session.transcriptCompleted = ended
+    try SessionStore.write(session, dataRoot: dataRoot, cache: cache)
+    await sweeper.sweepOnce()
+    #expect(!audioExists(id: "m5", dataRoot: dataRoot))
+    #expect(cache.parseCount == 2)
+  }
 }

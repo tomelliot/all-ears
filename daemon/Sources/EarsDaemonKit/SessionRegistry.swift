@@ -111,6 +111,9 @@ public actor SessionRegistry {
   /// by the same ref-count. Called on `session.end` (before the ended hook, so
   /// each source's final chunk is flushed to disk before transcription runs).
   private let stopCapture: @Sendable (String, [SourceID]) async -> Void
+  /// Shared with the retention sweeper: every write here drops the session
+  /// from it, so the sweeper's next pass reads the new descriptor.
+  private let descriptorCache: SessionStore.Cache?
 
   /// Live (active/paused) and recently-ended sessions, keyed by id. Ended
   /// sessions from *before* this boot stay on disk only.
@@ -150,6 +153,7 @@ public actor SessionRegistry {
     knownSourceIDs: @escaping @Sendable () async -> Set<SourceID> = { [] },
     startCapture: @escaping @Sendable (String, [SourceID]) async -> Void = { _, _ in },
     stopCapture: @escaping @Sendable (String, [SourceID]) async -> Void = { _, _ in },
+    descriptorCache: SessionStore.Cache? = nil,
     log: @escaping @Sendable (String) -> Void = { _ in }
   ) {
     self.dataRoot = dataRoot
@@ -164,6 +168,7 @@ public actor SessionRegistry {
     self.knownSourceIDs = knownSourceIDs
     self.startCapture = startCapture
     self.stopCapture = stopCapture
+    self.descriptorCache = descriptorCache
     self.log = log
   }
 
@@ -192,6 +197,7 @@ public actor SessionRegistry {
     var corrupt: [(id: String, error: Error)] = []
     let live = SessionStore.readAll(
       dataRoot: dataRoot,
+      cache: descriptorCache,
       onSkip: { id, error in corrupt.append((id, error)) }
     ).filter { $0.state != .ended }
 
@@ -813,7 +819,7 @@ public actor SessionRegistry {
 
   private func knownSession(_ id: String) -> Session? {
     if let session = sessions[id] { return session }
-    return try? SessionStore.read(sessionID: id, dataRoot: dataRoot)
+    return try? SessionStore.read(sessionID: id, dataRoot: dataRoot, cache: descriptorCache)
   }
 
   /// A session a lifecycle verb may still mutate.
@@ -866,7 +872,7 @@ public actor SessionRegistry {
   }
 
   private func persist(_ session: Session) throws {
-    try SessionStore.write(session, dataRoot: dataRoot)
+    try SessionStore.write(session, dataRoot: dataRoot, cache: descriptorCache)
   }
 
   /// Binding hints recovered from the session's attribution flight-recorder
