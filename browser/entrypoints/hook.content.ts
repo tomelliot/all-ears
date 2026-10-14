@@ -18,6 +18,7 @@ import { createBatcher, installConsoleTap } from "../lib/debug-log";
 import { perfTag, setPerfState } from "../lib/perf-main";
 import { parseZoomMeetingId } from "../lib/identity/zoom";
 import { TeamsMeetingIdWatcher, type TeamsIdSources } from "../lib/identity/teams-meeting-id";
+import { TeamsMeetingTitleWatcher } from "../lib/identity/teams-meeting-title";
 // Side-effect imports: each adapter registers itself with selectAdapter.
 import "../lib/identity/meet";
 import "../lib/identity/zoom";
@@ -458,10 +459,29 @@ function startTeamsMeetingWatch(onMeetingId?: (id: string) => void): () => void 
   // Resolving *is* declaring here: the poll below only runs once a connection
   // is live, so the id landing is already the last missing condition.
   let declared: string | null = null;
+  let declaredAt = 0;
+  let title: string | null = null;
+
+  // Same early/late split as Meet: a name known at declare rides on
+  // `meeting-started`, a later one goes out as `meeting-renamed`.
+  const titleWatcher = new TeamsMeetingTitleWatcher((resolved) => {
+    console.debug(`[ears][hook] Teams meeting name resolved: ${resolved}`);
+    title = resolved;
+    if (declared) {
+      postToIsolated({ kind: "meeting-renamed", platform: "teams", externalMeetingId: declared, title: resolved });
+    }
+  });
+
   const watcher = new TeamsMeetingIdWatcher((threadId) => {
     declared = threadId;
+    declaredAt = Date.now();
     onMeetingId?.(threadId);
-    postToIsolated({ kind: "meeting-started", platform: "teams", externalMeetingId: threadId });
+    postToIsolated({
+      kind: "meeting-started",
+      platform: "teams",
+      externalMeetingId: threadId,
+      ...(title ? { title } : {}),
+    });
     console.debug(`[ears][hook] Teams meeting declared: ${threadId}`);
   });
 
@@ -477,8 +497,10 @@ function startTeamsMeetingWatch(onMeetingId?: (id: string) => void): () => void 
     // The URL changes as Teams routes between pre-join and the call, so it is
     // re-read each tick rather than captured once.
     sources.url = location.href;
+    // The name is scanned first so a title already up at join declares with it.
+    titleWatcher.poll(document);
     watcher.poll(sources);
-    if (declared) return true;
+    if (declared) return titleWatcher.title !== null || Date.now() - declaredAt > MEETING_TITLE_WATCH_MS;
     if (!warned && Date.now() - inCallSince > MEETING_ID_SOFT_FAIL_MS) {
       warned = true;
       console.warn(
