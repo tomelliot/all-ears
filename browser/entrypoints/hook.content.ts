@@ -26,6 +26,7 @@ import { isControlEnvelope, isMainEnvelope, postToIsolated, type Platform } from
 import { createBatcher, installConsoleTap } from "../lib/debug-log";
 import { perfTag, setPerfState } from "../lib/perf-main";
 import { parseZoomMeetingId } from "../lib/identity/zoom";
+import { ZoomMeetingTitleWatcher, ZoomRosterWatcher } from "../lib/identity/zoom-dom";
 import { TeamsMeetingIdWatcher, type TeamsIdSources } from "../lib/identity/teams-meeting-id";
 import { TeamsMeetingTitleWatcher } from "../lib/identity/teams-meeting-title";
 // Side-effect imports: each adapter registers itself with selectAdapter.
@@ -546,37 +547,91 @@ function startMeetingWatch(platform: Platform, onMeetingId?: (id: string) => voi
  * keeps that honest: only the frame that really holds the connection declares,
  * and if more than one ever does, `meetingStarted` is idempotent on the
  * external id and folds the extra ports into the one session.
+ *
+ * Names come from the page DOM (zoom-dom.ts), since no Zoom track carries an
+ * identity. The topic is watched like Teams' tab title: on `meeting-started`
+ * when known at declare, else `meeting-renamed` within a minute. The roster is
+ * scanned for the whole call, so late joiners land too; its entries go out as
+ * `participant-roster`, the same path Meet's names take. The scan reads the
+ * declaring frame and any same-origin frame around it, because the tiles need
+ * not live in the frame that holds the connection.
  */
 function startZoomMeetingWatch(onMeetingId?: (id: string) => void): () => void {
   const meetingId = parseZoomMeetingId(location.pathname);
   if (!meetingId) return () => {};
 
   let declared = false;
+  let declaredAt = 0;
+  let title: string | null = null;
+
+  const titleWatcher = new ZoomMeetingTitleWatcher((resolved, via) => {
+    // The topic can carry names; log where it came from, not what it says.
+    console.debug(`[ears][zoom] meeting topic resolved via ${via} (${resolved.length} chars)`);
+    title = resolved;
+    if (declared) {
+      postToIsolated({ kind: "meeting-renamed", platform: "zoom", externalMeetingId: meetingId, title: resolved });
+    }
+  });
+  const rosterWatcher = new ZoomRosterWatcher(
+    (entries) => postToIsolated({ kind: "participant-roster", platform: "zoom", entries }),
+    (line) => console.debug(`[ears][zoom] ${line}`),
+  );
+
   const declare = (): boolean => {
     if (declared) return true;
     if (livePeerConnections().size === 0) return false;
     declared = true;
+    declaredAt = Date.now();
     onMeetingId?.(meetingId);
-    postToIsolated({ kind: "meeting-started", platform: "zoom", externalMeetingId: meetingId });
+    postToIsolated({
+      kind: "meeting-started",
+      platform: "zoom",
+      externalMeetingId: meetingId,
+      ...(title ? { title } : {}),
+    });
     console.debug(`[ears][hook] Zoom meeting declared: ${meetingId}`);
     return true;
   };
 
-  let interval: ReturnType<typeof setInterval> | null = null;
-  // Already connected (re-injection mid-call) declares immediately; otherwise
-  // poll until the connection comes up.
-  if (!declare()) {
-    interval = setInterval(() => {
-      if (declare() && interval !== null) clearInterval(interval);
-    }, MEETING_ID_POLL_MS);
-  }
+  const tick = (): void => {
+    const docs = zoomDocuments();
+    if (!declared) rosterWatcher.observePreJoin(document);
+    // The topic is scanned first so one already up at join declares with it.
+    if (!titleWatcher.title && (!declared || Date.now() - declaredAt < MEETING_TITLE_WATCH_MS)) {
+      titleWatcher.poll(docs);
+    }
+    if (declare()) rosterWatcher.poll(docs);
+  };
+
+  // Runs for the whole call: before the connection it waits to declare, after
+  // it keeps the roster current. Already connected (re-injection mid-call)
+  // declares on the first tick.
+  tick();
+  const interval = setInterval(tick, MEETING_ID_POLL_MS);
 
   return () => {
-    if (interval !== null) clearInterval(interval);
+    clearInterval(interval);
     if (declared) {
       postToIsolated({ kind: "meeting-ended", platform: "zoom", externalMeetingId: meetingId });
     }
   };
+}
+
+/** This frame's document plus its parent's and its iframes', where the browser
+ * lets this frame read them (same origin). Cross-origin frames are skipped. */
+function zoomDocuments(): Document[] {
+  const docs = new Set<Document>([document]);
+  const add = (get: () => Document | null | undefined): void => {
+    try {
+      const doc = get();
+      if (doc) docs.add(doc);
+    } catch {
+      // cross-origin: not readable, and not needed
+    }
+  };
+  if (window.parent !== window) add(() => window.parent.document);
+  for (const frame of document.querySelectorAll("iframe")) add(() => frame.contentDocument);
+  return [...docs];
 }
 
 const DAILY_CHECK_MS = 2000;

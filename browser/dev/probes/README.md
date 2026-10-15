@@ -8,6 +8,7 @@ Every probe here obeys the same three rules. It polls and diffs rather than atta
 |---|---|
 | `meet-identity-probe.js` | Which streams belong in the transcript, and which tile is the local user (journal #142, #158) |
 | `teams-identity-probe.js` | Where Teams keeps participant identity, and whether a speaking signal exists in the DOM at all |
+| `zoom-names-probe.js` | Whether the selectors in `identity/zoom-dom.ts` match the live web client, and which classes hold the names if not |
 
 ## Teams: finding the speaker-name signal
 
@@ -51,3 +52,7 @@ node browser/dev/probes/teams-identity-probe.smoke.mjs      # add VERBOSE=1 to s
 ```
 
 Drives the probe against a synthetic Teams-shaped DOM: asserts the census finds the row key, that a speaking-class toggle reaches the change log, and — the part worth having a test for — that no display name, MRI, or meeting URL survives into the output.
+
+## Zoom: checking the name selectors
+
+`identity/zoom-dom.ts` reads participant names and the meeting topic from class names that have not been confirmed on a live build. In a call, open DevTools on the Zoom tab, paste `zoom-names-probe.js`, and read the JSON it logs. Each selector lists one hash per match, plus the role suffix Zoom put on it (`host`, `host, me`), never the name. A selector with no matches and a `classes` census that shows the real name holder means the selector needs changing. Nothing is clicked; open the Participants panel by hand only to check `participantName` and the `(me)` marker.
