@@ -42,6 +42,12 @@ public actor ControlServer {
   /// and `subscribe` snapshots read its revision. `nil` drops publishes and
   /// snapshots at rev 0.
   private let bus: EventBus?
+  /// `session.retry`'s handler; `nil` fails the call clearly.
+  private let retrySession: RetryHandler?
+
+  /// Reruns an ended session's on-end chain and returns the session once it
+  /// stops.
+  public typealias RetryHandler = @Sendable (SessionRetryParams) async throws -> Session
 
   public init(
     captureActors: [SourceID: CaptureActor],
@@ -49,7 +55,8 @@ public actor ControlServer {
     startInstant: Instant,
     clock: any NowProviding = SystemClock(),
     bus: EventBus? = nil,
-    sessions: SessionRegistry? = nil
+    sessions: SessionRegistry? = nil,
+    retrySession: RetryHandler? = nil
   ) {
     self.captureActors = captureActors
     self.sessions = sessions
@@ -57,6 +64,7 @@ public actor ControlServer {
     self.startInstant = startInstant
     self.clock = clock
     self.bus = bus
+    self.retrySession = retrySession
   }
 
   /// The `@Sendable` closure to hand both transports as their handler.
@@ -105,6 +113,15 @@ public actor ControlServer {
       return await withSessions { try await $0.upsertAttendee(params) }
     case .sessionGet(let session):
       return await withSessions { try await $0.get(id: session) }
+    case .sessionRetry(let params):
+      guard let retrySession else {
+        return .failure(.internalError, "this daemon cannot retry sessions")
+      }
+      do {
+        return ControlReply(result: try await retrySession(params))
+      } catch {
+        return ControlReply(error: wireError(for: error))
+      }
     case .sessionList:
       guard let sessions else {
         return .failure(.internalError, "this daemon has no session registry")
@@ -275,6 +292,43 @@ public actor ControlServer {
         return WireError(code: .conflict, message: message)
       }
     }
+    if let error = error as? SessionRetryError {
+      if case .busy = error { return WireError(code: .conflict, message: error.description) }
+      return WireError(code: .invalidRequest, message: error.description)
+    }
     return WireError(code: .internalError, message: "\(error)")
+  }
+}
+
+/// Why `session.retry` refused to run. `busy` maps to `conflict` on the
+/// wire; the rest to `invalid_request`.
+public enum SessionRetryError: Error, Sendable, Hashable, CustomStringConvertible {
+  case noRegistry
+  case notEnded(String)
+  case chainDisabled
+  case unknownStage(String)
+  case stageNotConfigured(OnEndStage)
+  case missingInput(OnEndStage)
+  case busy(String)
+
+  public var description: String {
+    switch self {
+    case .noRegistry:
+      return "this daemon has no session registry"
+    case .notEnded(let id):
+      return "session \(id) has not ended; its pipeline runs when it does"
+    case .chainDisabled:
+      return "[earsd.sessions] on_end_stages is empty, so there is no chain to retry"
+    case .unknownStage(let name):
+      return
+        "unknown stage '\(name)' (valid: "
+        + "\(OnEndStage.allCases.map(\.rawValue).joined(separator: ", ")))"
+    case .stageNotConfigured(let stage):
+      return "\(stage.rawValue) is not in [earsd.sessions] on_end_stages"
+    case .missingInput(let stage):
+      return "retrying from \(stage.rawValue) needs the input file it reads"
+    case .busy(let id):
+      return "session \(id) already has a pipeline run in progress"
+    }
   }
 }

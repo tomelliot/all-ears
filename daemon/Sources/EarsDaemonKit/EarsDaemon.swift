@@ -226,6 +226,10 @@ public actor EarsDaemon {
   private var controlWebSocketServer: ControlWebSocketServer?
   private var controlWebSocketRunTask: Task<Void, Never>?
   private var sessionRegistry: SessionRegistry?
+  /// Sessions with an on-end chain running — the automatic one at session
+  /// end, or a `session.retry`. A second chain on the same session would race
+  /// the first over the same output files, so `session.retry` refuses it.
+  private var chainsInFlight: Set<String> = []
   /// Fresh per daemon start, advertised in every `hello` result — what tells
   /// a reconnecting client the revision counters reset.
   private let bootID = UUID().uuidString.lowercased()
@@ -439,29 +443,14 @@ public actor EarsDaemon {
     // `summarize` over its output — see `OnClosePipelineRunner`).
     let onSessionEnded: SessionRegistry.EndedHook?
     if !configuration.onEndStages.isEmpty {
-      let pipeline = OnClosePipelineRunner(log: log)
-      let stages = configuration.onEndStages
-      let emptiness = configuration.onEndEmptinessPolicy
       onSessionEnded = { [weak self] session in
         guard session.trigger == .browserExtension else { return }
         // Spawned in its own task so `session.end` never blocks behind a full
-        // transcription-and-LLM run. On transcribe success — and only
-        // transcribe: the LLM stages are derived artifacts and never gate
-        // retention — stamp the transcript-completion marker, which starts
-        // this session's retention clock.
+        // transcription-and-LLM run.
         Task { [weak self] in
-          let transcribed = await pipeline.runOnEndChain(
-            sessionID: session.id, stages: stages, emptiness: emptiness,
-            context: "session-end",
-            recordIssues: { [weak self] issues in
-              await self?.recordSessionPipelineIssues(session.id, issues)
-            },
-            recordNotes: { [weak self] notes in
-              await self?.recordSessionPublishedNotes(session.id, notes)
-            })
-          if transcribed {
-            await self?.markSessionTranscriptCompleted(session.id)
-          }
+          _ = await self?.runOnEndChain(
+            sessionID: session.id, entry: .transcribe, keepingIssues: [],
+            context: "session-end")
         }
       }
     } else {
@@ -503,7 +492,11 @@ public actor EarsDaemon {
       // `segment.publish`/`job.publish` → the live feed, and `subscribe`
       // snapshots read the bus's revision.
       bus: eventBus,
-      sessions: sessions)
+      sessions: sessions,
+      retrySession: { [weak self] params in
+        guard let self else { throw SessionRetryError.noRegistry }
+        return try await self.retrySession(params)
+      })
 
     let socketDirectory = URL(fileURLWithPath: configuration.socketPath).deletingLastPathComponent()
     try FileManager.default.createDirectory(
@@ -1168,6 +1161,81 @@ public actor EarsDaemon {
   /// Stamps a session's transcript-completion marker through the registry —
   /// invoked by the session-end auto-transcribe hook after a successful run, so
   /// the retention sweeper can start that session's eviction clock.
+  /// Runs the configured on-end chain for one session and records what it
+  /// reported. Returns `false` without running anything when a chain is
+  /// already running for that session.
+  ///
+  /// `keepingIssues` are earlier stages' issues a resumed chain did not
+  /// rerun; they stay on the session ahead of the new ones.
+  private func runOnEndChain(
+    sessionID: String, entry: ChainEntry, keepingIssues: [PipelineIssue], context: String
+  ) async -> Bool {
+    guard chainsInFlight.insert(sessionID).inserted else { return false }
+    defer { chainsInFlight.remove(sessionID) }
+    let pipeline = OnClosePipelineRunner(log: log)
+    // On transcribe success — and only transcribe: the LLM stages are derived
+    // artifacts and never gate retention — stamp the transcript-completion
+    // marker, which starts this session's retention clock.
+    let transcribed = await pipeline.runOnEndChain(
+      sessionID: sessionID, stages: configuration.onEndStages, entry: entry,
+      emptiness: configuration.onEndEmptinessPolicy, context: context,
+      recordIssues: { [weak self] issues in
+        await self?.recordSessionPipelineIssues(sessionID, keepingIssues + issues)
+      },
+      recordNotes: { [weak self] notes in
+        await self?.recordSessionPublishedNotes(sessionID, notes)
+      })
+    if transcribed {
+      await markSessionTranscriptCompleted(sessionID)
+    }
+    return true
+  }
+
+  /// `session.retry`: reruns an ended session's on-end chain from
+  /// `params.from` and returns the session once the chain stops. Resuming at
+  /// `cleanup` reads the session's own transcript unless `params.input`
+  /// names another; resuming at `summarize` needs `params.input`, because
+  /// the cleaned transcript's published path is the client's config to
+  /// resolve.
+  func retrySession(_ params: SessionRetryParams) async throws -> Session {
+    guard let sessionRegistry else { throw SessionRetryError.noRegistry }
+    let session = try await sessionRegistry.get(id: params.session)
+    guard session.state == .ended else { throw SessionRetryError.notEnded(session.id) }
+    let stages = configuration.onEndStages
+    guard !stages.isEmpty else { throw SessionRetryError.chainDisabled }
+    guard let from = OnEndStage(rawValue: params.from) else {
+      throw SessionRetryError.unknownStage(params.from)
+    }
+    guard stages.contains(from) else { throw SessionRetryError.stageNotConfigured(from) }
+
+    let entry: ChainEntry
+    switch from {
+    case .transcribe:
+      entry = .transcribe
+    case .cleanup:
+      entry = .resume(
+        .cleanup,
+        input: params.input
+          ?? DataStoreLayout.sessionTranscriptFile(
+            dataRoot: configuration.dataRoot, sessionID: session.id
+          ).path)
+    case .summarize:
+      guard let input = params.input else { throw SessionRetryError.missingInput(from) }
+      entry = .resume(.summarize, input: input)
+    }
+
+    let order = OnEndStage.allCases
+    let keeping = session.pipelineIssues.filter { issue in
+      guard let stage = OnEndStage(rawValue: issue.stage) else { return false }
+      return order.firstIndex(of: stage)! < order.firstIndex(of: from)!
+    }
+    guard
+      await runOnEndChain(
+        sessionID: session.id, entry: entry, keepingIssues: keeping, context: "session-retry")
+    else { throw SessionRetryError.busy(session.id) }
+    return try await sessionRegistry.get(id: session.id)
+  }
+
   private func markSessionTranscriptCompleted(_ id: String) async {
     await sessionRegistry?.markTranscriptCompleted(id: id, at: clock.now())
   }

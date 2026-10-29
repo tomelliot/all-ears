@@ -125,6 +125,8 @@ extension ControlRequestFrame: Codable {
       return .sessionList
     case .sessionGet:
       return .sessionGet(session: try container.decode(SessionRef.self, forKey: .params).session)
+    case .sessionRetry:
+      return .sessionRetry(try container.decode(SessionRetryParams.self, forKey: .params))
     case .segmentPublish:
       return .segmentPublish(try container.decode(SegmentPublishParams.self, forKey: .params))
     case .jobPublish:
@@ -182,6 +184,8 @@ extension ControlRequestFrame: Codable {
       .sessionGet(let session):
       try container.encode(SessionRef(session: session), forKey: .params)
     case .sessionRename(let params):
+      try container.encode(params, forKey: .params)
+    case .sessionRetry(let params):
       try container.encode(params, forKey: .params)
     case .sessionAttendee(let params):
       try container.encode(params, forKey: .params)

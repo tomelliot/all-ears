@@ -425,6 +425,71 @@ struct OnClosePipelineRunnerTests {
     #expect(failure.contains("stderr: error: no [llm] command resolved"))
   }
 
+  // MARK: - resumed chains (session.retry)
+
+  @Test("resuming at cleanup reuses the transcript on disk and runs on to summarize")
+  func resumeAtCleanupSkipsTranscribe() async throws {
+    let directory = try Self.makeTempDirectory("resume-cleanup")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let transcript = try Self.makeTranscript(EmptySessionTranscripts.substantive, in: directory)
+    let clean = try Self.makeFile("t.clean.md", in: directory)
+    let note = try Self.makeFile("t.summary.md", in: directory)
+    let runner = ScriptedRunner([
+      Self.cleanupOutcome(clean),
+      SpawnOutcome(
+        exitCode: 0,
+        stdout: StageEnvelopeFixtures.summarizeSelectedPresetSuccess(
+          preset: "meeting", path: note)),
+    ])
+    let notes = NoteCollector()
+    let pipeline = OnClosePipelineRunner(runProcess: runner.runner)
+
+    let transcribed = await pipeline.runOnEndChain(
+      sessionID: "b7acc61f", stages: OnEndStage.allCases,
+      entry: .resume(.cleanup, input: transcript), context: "session-retry",
+      recordNotes: { notes.record($0) })
+
+    // transcribe did not run, so the retention marker is not re-stamped.
+    #expect(!transcribed)
+    #expect(runner.calls.map(\.name) == ["cleanup", "summarize"])
+    #expect(runner.calls[0].arguments == [transcript, "--json"])
+    #expect(runner.calls[1].arguments == [clean, "--select-preset", "--json"])
+    #expect(notes.calls == [[note]])
+  }
+
+  @Test("resuming at summarize runs summarize alone, over the given input")
+  func resumeAtSummarize() async throws {
+    let directory = try Self.makeTempDirectory("resume-summarize")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clean = try Self.makeFile("t.clean.md", in: directory)
+    let runner = ScriptedRunner([SpawnOutcome(exitCode: 0)])
+    let pipeline = OnClosePipelineRunner(runProcess: runner.runner)
+
+    _ = await pipeline.runOnEndChain(
+      sessionID: "b7acc61f", stages: OnEndStage.allCases,
+      entry: .resume(.summarize, input: clean), context: "session-retry")
+
+    #expect(runner.calls.map(\.name) == ["summarize"])
+    #expect(runner.calls[0].arguments == [clean, "--select-preset", "--json"])
+  }
+
+  @Test("resuming from an input that is not on disk spawns nothing and records the failure")
+  func resumeWithMissingInput() async throws {
+    let runner = ScriptedRunner([])
+    let issues = IssueCollector()
+    let pipeline = OnClosePipelineRunner(runProcess: runner.runner)
+
+    _ = await pipeline.runOnEndChain(
+      sessionID: "b7acc61f", stages: OnEndStage.allCases,
+      entry: .resume(.cleanup, input: "/nonexistent/transcript.md"), context: "session-retry",
+      recordIssues: { issues.record($0) })
+
+    #expect(runner.calls.isEmpty)
+    let issue = try #require(issues.calls.first?.first)
+    #expect(issue.stage == "cleanup")
+    #expect(issue.kind == .failed)
+  }
+
   @Test("a failure log line names the exit class, so retry-worthiness is readable from the log")
   func failureLogCarriesExitClassLabel() async throws {
     let directory = try Self.makeTempDirectory("exit-class")

@@ -76,6 +76,15 @@ public enum OnEndStage: String, Sendable, Hashable, CaseIterable {
   }
 }
 
+/// Where an on-end chain run starts.
+public enum ChainEntry: Sendable, Equatable {
+  /// The whole chain, from `transcribe --session`.
+  case transcribe
+  /// A later stage, fed `input`: the transcript for `.cleanup`, the cleaned
+  /// transcript for `.summarize`.
+  case resume(OnEndStage, input: String)
+}
+
 /// Runs the on-end stage chain against an ended session — the stage-spawner
 /// behind the session-end hook (see ``EarsDaemon``):
 ///
@@ -139,14 +148,22 @@ public struct OnClosePipelineRunner: Sendable {
   /// summarize succeeded: a failed rerun must not drop the claim an earlier
   /// run's note still holds, because the note is still on disk.
   ///
+  /// `entry` is where the chain starts. A retry (`ears session retry`)
+  /// resumes at the stage that failed, fed the artifact the earlier run left
+  /// on disk, so a cleanup timeout does not cost a second transcription.
+  /// `issues` then holds only what the resumed stages reported; the caller
+  /// keeps the earlier stages' issues.
+  ///
   /// - Returns: `true` iff `transcribe --session` exited 0 — the signal the
   ///   caller uses to stamp the session's transcript-completion marker (which
   ///   in turn starts the retention clock). LLM-stage failures are logged but
   ///   never affect the return value: derived artifacts must not hold the
-  ///   retention clock hostage, and neither does an empty-transcript skip.
+  ///   retention clock hostage, and neither does an empty-transcript skip. A
+  ///   resumed chain never runs transcribe, so it returns `false`.
   @discardableResult
   public func runOnEndChain(
     sessionID: String, stages: [OnEndStage],
+    entry: ChainEntry = .transcribe,
     emptiness: TranscriptEmptinessPolicy = .defaults,
     context: String,
     recordIssues: @Sendable ([PipelineIssue]) async -> Void = { _ in },
@@ -160,23 +177,63 @@ public struct OnClosePipelineRunner: Sendable {
     var issues: [PipelineIssue] = []
     var notes: [String]? = nil
     let transcribed = await runChain(
-      sessionID: sessionID, stages: stages, emptiness: emptiness, context: context,
-      issues: &issues, notes: &notes)
+      sessionID: sessionID, stages: stages, entry: entry, emptiness: emptiness,
+      context: context, issues: &issues, notes: &notes)
     await recordIssues(issues)
     if let notes { await recordNotes(notes) }
     return transcribed
   }
 
   private func runChain(
-    sessionID: String, stages: [OnEndStage], emptiness: TranscriptEmptinessPolicy,
+    sessionID: String, stages: [OnEndStage], entry: ChainEntry,
+    emptiness: TranscriptEmptinessPolicy,
     context: String, issues: inout [PipelineIssue], notes: inout [String]?
   ) async -> Bool {
+    switch entry {
+    case .transcribe:
+      break
+    case .resume(let stage, let input):
+      guard FileManager.default.fileExists(atPath: input) else {
+        log(
+          "\(context) on_end: cannot resume at \(stage.rawValue) for session '\(sessionID)': "
+            + "input '\(input)' does not exist")
+        issues.append(
+          PipelineIssue(
+            stage: stage.rawValue, kind: .failed, message: "input '\(input)' does not exist"))
+        return false
+      }
+      log("\(context) on_end: resuming at \(stage.rawValue) for session '\(sessionID)'")
+      if stage == .summarize {
+        await runSummarize(
+          input: input, sessionID: sessionID, context: context, issues: &issues, notes: &notes)
+        return false
+      }
+      // `.cleanup`: `input` is the transcript, and the chain runs on from
+      // the emptiness gate exactly as it does after a fresh transcribe.
+      await runAfterTranscribe(
+        transcriptPath: input, sessionID: sessionID, stages: stages, emptiness: emptiness,
+        context: context, issues: &issues, notes: &notes)
+      return false
+    }
+
     guard
       let transcriptPath = await runPathStage(
         .transcribe, arguments: ["--session", sessionID, "--json"], sessionID: sessionID,
         context: context, issues: &issues)
     else { return false }
+    await runAfterTranscribe(
+      transcriptPath: transcriptPath, sessionID: sessionID, stages: stages, emptiness: emptiness,
+      context: context, issues: &issues, notes: &notes)
+    return true
+  }
 
+  /// The empty-transcript gate, then cleanup and summarize over
+  /// `transcriptPath`.
+  private func runAfterTranscribe(
+    transcriptPath: String, sessionID: String, stages: [OnEndStage],
+    emptiness: TranscriptEmptinessPolicy,
+    context: String, issues: inout [PipelineIssue], notes: inout [String]?
+  ) async {
     // The empty-transcript gate. transcribe has written
     // `sessions/<id>/transcript.md` and its frontmatter carries the two
     // measurements the decision needs, so nothing here re-derives what the
@@ -190,7 +247,7 @@ public struct OnClosePipelineRunner: Sendable {
       log(
         "\(context) on_end: skipping \(downstream.map(\.rawValue).joined(separator: ", ")) "
           + "for session '\(sessionID)': transcript is empty (\(verdict.summary))")
-      return true
+      return
     }
 
     var nextInput = transcriptPath
@@ -199,33 +256,40 @@ public struct OnClosePipelineRunner: Sendable {
         let cleanPath = await runPathStage(
           .cleanup, arguments: [transcriptPath, "--json"], sessionID: sessionID, context: context,
           issues: &issues)
-      else { return true }  // transcribe already succeeded; chain stops here
+      else { return }  // transcribe already succeeded; chain stops here
       nextInput = cleanPath
     }
 
     if stages.contains(.summarize) {
-      // `--select-preset`, not `--all-presets`: a conversation has one type,
-      // and summarizing a user-research call as a workshop as well cost a
-      // second LLM call to produce a note that then overwrote the right one
-      // (two presets writing to `out = "{notes}"` collide on one path, and
-      // config order decided which survived). summarize classifies the
-      // transcript against each preset's `when` description and runs the one
-      // that matches; `--all-presets` survives for reruns by hand.
-      //
-      // Summarize still has no single output path to thread — exit 0 is the
-      // success signal, exactly as before the envelope. The envelope's
-      // per-preset `outputs` feed the log: what was written on success here,
-      // and — via `spawn`'s error-envelope decode — partial success ("wrote
-      // 2/3 presets") on failure.
-      if let outcome = await spawn(
-        .summarize, arguments: [nextInput, "--select-preset", "--json"], sessionID: sessionID,
-        context: context, issues: &issues)
-      {
-        notes = logSummarizeResults(
-          stdout: outcome.stdout, sessionID: sessionID, context: context, issues: &issues)
-      }
+      await runSummarize(
+        input: nextInput, sessionID: sessionID, context: context, issues: &issues, notes: &notes)
     }
-    return true
+  }
+
+  private func runSummarize(
+    input: String, sessionID: String, context: String,
+    issues: inout [PipelineIssue], notes: inout [String]?
+  ) async {
+    // `--select-preset`, not `--all-presets`: a conversation has one type,
+    // and summarizing a user-research call as a workshop as well cost a
+    // second LLM call to produce a note that then overwrote the right one
+    // (two presets writing to `out = "{notes}"` collide on one path, and
+    // config order decided which survived). summarize classifies the
+    // transcript against each preset's `when` description and runs the one
+    // that matches; `--all-presets` survives for reruns by hand.
+    //
+    // Summarize still has no single output path to thread — exit 0 is the
+    // success signal, exactly as before the envelope. The envelope's
+    // per-preset `outputs` feed the log: what was written on success here,
+    // and — via `spawn`'s error-envelope decode — partial success ("wrote
+    // 2/3 presets") on failure.
+    if let outcome = await spawn(
+      .summarize, arguments: [input, "--select-preset", "--json"], sessionID: sessionID,
+      context: context, issues: &issues)
+    {
+      notes = logSummarizeResults(
+        stdout: outcome.stdout, sessionID: sessionID, context: context, issues: &issues)
+    }
   }
 
   /// Judges the just-written transcript against the emptiness thresholds, or

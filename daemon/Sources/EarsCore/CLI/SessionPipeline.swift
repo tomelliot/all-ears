@@ -148,6 +148,23 @@ public enum SessionPipeline {
     return base
   }
 
+  /// Where `ears session retry` resumes: the first of transcribe, cleanup
+  /// and summarize that did not finish, read off ``stages(session:artifacts:now:emptiness:)``.
+  public static func retryStart(_ stages: [PipelineStage]) -> RetryStart {
+    for name in ["transcribe", "cleanup", "summarize"] {
+      guard let stage = stages.first(where: { $0.name == name }) else {
+        return .live  // a live session's view stops at capture
+      }
+      switch stage.state {
+      case .done: continue
+      case .skipped: return .emptyTranscript
+      case .waiting: return .live
+      case .failed, .missing, .running: return .from(name)
+      }
+    }
+    return .nothingToRetry
+  }
+
   // MARK: - Stage helpers
 
   private static func isRecent(session: Session, now: Instant) -> Bool {
@@ -338,6 +355,18 @@ public struct SessionArtifacts: Sendable, Equatable {
   public var noteLink: String?
 
   public init() {}
+}
+
+/// ``SessionPipeline/retryStart(_:)``'s answer.
+public enum RetryStart: Sendable, Equatable {
+  /// Rerun from this stage (`transcribe`, `cleanup` or `summarize`).
+  case from(String)
+  /// Every stage finished.
+  case nothingToRetry
+  /// The daemon's emptiness gate stopped the chain on purpose.
+  case emptyTranscript
+  /// The session has not ended, so its chain has not run.
+  case live
 }
 
 /// One row of the `ears session show` pipeline view.

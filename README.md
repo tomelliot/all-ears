@@ -134,6 +134,8 @@ Matt Silva — ended 17:32, 31m
 A session that published with attribution warnings is flagged (`⚠`);
 `--warnings` prints them verbatim.
 
+**A stage failed?** `ears session retry <ref>` reruns the pipeline from the first stage that did not finish and prints the result. A cleanup that timed out reruns cleanup and summarize over the transcript already on disk, without transcribing again. `--from <stage>` picks the stage.
+
 **Meeting notes, hands-free.** The [browser extension](browser/) isolates each remote participant's audio in Google Meet, Zoom, and Teams tabs and streams it to the daemon as its own source — each captured track shows up as `browser:<platform>:<track>` alongside your other sources (the id is an opaque handle; who's speaking on it comes from the roster). It declares the call to the daemon as a session, and when the call ends the daemon transcribes the session automatically; `ears sessions` shows it with its pipeline outcome, `cleanup`/`summarize` run on the result.
 
 ## Your model, your prompts

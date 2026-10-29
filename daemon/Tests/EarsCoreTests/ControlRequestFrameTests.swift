@@ -108,6 +108,27 @@ struct ControlRequestFrameTests {
           call: .sessionRename(SessionRenameParams(session: "m1", title: "New", ifRev: 41))))
   }
 
+  @Test("decodes session.retry with and without an input path")
+  func sessionRetry() throws {
+    let json = """
+      {"id":8,"method":"session.retry","params":{"session":"m1","from":"cleanup","input":"/t.md"}}
+      """
+    #expect(
+      try decode(json)
+        == .call(
+          id: .int(8),
+          call: .sessionRetry(SessionRetryParams(session: "m1", from: "cleanup", input: "/t.md"))))
+    let withoutInput = """
+      {"id":9,"method":"session.retry","params":{"session":"m1","from":"transcribe"}}
+      """
+    #expect(
+      try decode(withoutInput)
+        == .call(
+          id: .int(9),
+          call: .sessionRetry(SessionRetryParams(session: "m1", from: "transcribe"))))
+    #expect(ControlMethod.sessionRetry.capability == .admin)
+  }
+
   @Test("decodes a session.attendee upsert with ISO-8601 join/leave instants")
   func sessionAttendee() throws {
     let json = """

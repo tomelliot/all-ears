@@ -15,6 +15,7 @@ public enum ControlCall: Sendable, Hashable {
   case sessionAttendee(SessionAttendeeParams)
   case sessionList
   case sessionGet(session: String)
+  case sessionRetry(SessionRetryParams)
 
   case segmentPublish(SegmentPublishParams)
   case jobPublish(JobPublishParams)
@@ -40,6 +41,7 @@ public enum ControlCall: Sendable, Hashable {
     case .sessionAttendee: .sessionAttendee
     case .sessionList: .sessionList
     case .sessionGet: .sessionGet
+    case .sessionRetry: .sessionRetry
     case .segmentPublish: .segmentPublish
     case .jobPublish: .jobPublish
     case .sourcesList: .sourcesList
@@ -161,6 +163,22 @@ public struct SessionRenameParams: Sendable, Hashable, Codable {
     case session
     case title
     case ifRev = "if_rev"
+  }
+}
+
+/// `session.retry` params: rerun an ended session's on-end chain from
+/// `from` (`transcribe`, `cleanup` or `summarize`). `input` is the artifact
+/// the resumed stage reads — the transcript for `cleanup`, the cleaned
+/// transcript for `summarize` — and is ignored for `transcribe`.
+public struct SessionRetryParams: Sendable, Hashable, Codable {
+  public var session: String
+  public var from: String
+  public var input: String?
+
+  public init(session: String, from: String, input: String? = nil) {
+    self.session = session
+    self.from = from
+    self.input = input
   }
 }
 
