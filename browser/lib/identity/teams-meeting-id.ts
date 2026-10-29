@@ -86,6 +86,30 @@ export function parseTeamsMeetingIdFromUrl(url: string | null | undefined): stri
 }
 
 /**
+ * Fallback for calls joined by numeric meeting ID (`teams.microsoft.com/meet/<digits>?p=…`).
+ * Those land on `light-meetings/launch?coords=<base64 JSON>` and the page never
+ * carries a `19:meeting_…@thread.v2` id; `coords.meetingCode` is the only stable
+ * key. Returns `meet:<digits>` so it cannot collide with a thread id.
+ */
+export function parseTeamsMeetingCodeFromUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  let coords: string | null;
+  try {
+    coords = new URL(url).searchParams.get("coords");
+  } catch {
+    return null;
+  }
+  if (!coords) return null;
+  try {
+    const parsed = JSON.parse(atob(coords)) as { meetingCode?: unknown };
+    const code = typeof parsed.meetingCode === "string" ? parsed.meetingCode.replace(/\s+/g, "") : "";
+    return /^\d{6,20}$/.test(code) ? `meet:${code}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The surfaces the watcher scrapes, as lazy accessors so it can skip the
  * expensive ones — hand-rolled fakes in tests, the real page in production
  * (same pattern as meet-meeting-id.ts's `TileDocumentLike`).
@@ -124,7 +148,9 @@ export class TeamsMeetingIdWatcher {
     const threadId =
       parseTeamsMeetingIdFromUrl(sources.url) ??
       parseTeamsMeetingId(sources.documentText()) ??
-      (sweepHtml ? parseTeamsMeetingId(sources.documentHtml()) : null);
+      (sweepHtml ? parseTeamsMeetingId(sources.documentHtml()) : null) ??
+      // Only after a full sweep has missed, so a thread id wins when the page has one.
+      (sweepHtml ? parseTeamsMeetingCodeFromUrl(sources.url) : null);
     if (!threadId) return;
     this.resolved = threadId;
     this.onResolved(threadId);

@@ -430,6 +430,7 @@ struct SessionCommand: AsyncParsableCommand {
       SessionShowCommand.self, SessionStartCommand.self, SessionEndCommand.self,
       SessionPauseCommand.self,
       SessionResumeCommand.self, SessionRenameCommand.self, SessionListCommand.self,
+      SessionRetryCommand.self,
     ]
   )
 }
@@ -555,50 +556,162 @@ struct SessionShowCommand: AsyncParsableCommand {
   var warnings = false
 
   func run() async throws {
-    let environment: ScanEnvironment
-    switch SessionArtifactScanner.environment(configFlag: options.config) {
-    case .failure(let error):
-      ControlClientRuntime.writeStderr(error.description)
-      throw ExitCode(1)
-    case .success(let resolved):
-      environment = resolved
-    }
-
-    let sessions = SessionStore.readAll(dataRoot: environment.dataRoot)
+    let environment = try loadScanEnvironment(options)
     let now = Instant(secondsSinceEpoch: Date().timeIntervalSince1970)
     let timeZone = TimeZone.current
+    let session = try resolveSession(ref, environment: environment, now: now, timeZone: timeZone)
+    try printPipeline(
+      session, environment: environment, now: now, timeZone: timeZone, json: options.json,
+      showWarnings: warnings)
+  }
+}
 
-    switch SessionRef.resolve(ref, in: sessions, now: now, timeZone: timeZone) {
-    case .notFound:
-      ControlClientRuntime.writeStderr(
-        "error: no session matches '\(ref)' — try a unique id prefix, a title fragment, "
-          + "or a start time HH:MM (today); `ears sessions --all` lists them")
-      throw ExitCode(1)
-    case .ambiguous(let candidates):
-      var lines = ["error: '\(ref)' matches \(candidates.count) sessions:"]
-      for candidate in candidates {
-        let day = HumanUnits.localDate(candidate.started, timeZone: timeZone)
-        let clock = HumanUnits.clock(candidate.started, timeZone: timeZone)
-        lines.append("  \(candidate.id.prefix(8))  \(day) \(clock)  \(candidate.title)")
+struct SessionRetryCommand: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    commandName: "retry",
+    abstract: "Rerun an ended session's pipeline from the stage that did not finish.",
+    discussion: """
+      The daemon runs the stages and the command waits for them, then prints the \
+      pipeline view. A failed cleanup or summarize reruns from that stage, \
+      reusing the transcript on disk.
+      """)
+
+  @OptionGroup var options: ClientOptions
+
+  @Argument(
+    help: "A unique session-id prefix, a title fragment, or a start time HH:MM (today).")
+  var ref: String
+
+  @Option(
+    name: .customLong("from"),
+    help: "Rerun from this stage (transcribe, cleanup, summarize), not the first unfinished one.")
+  var from: String?
+
+  func run() async throws {
+    let environment = try loadScanEnvironment(options)
+    let now = Instant(secondsSinceEpoch: Date().timeIntervalSince1970)
+    let timeZone = TimeZone.current
+    let session = try resolveSession(ref, environment: environment, now: now, timeZone: timeZone)
+    let artifacts = SessionArtifactScanner.scan(session: session, environment: environment)
+
+    let stage: String
+    if let from {
+      stage = from
+    } else {
+      let stages = SessionPipeline.stages(
+        session: session, artifacts: artifacts, now: now, emptiness: environment.emptiness)
+      switch SessionPipeline.retryStart(stages) {
+      case .from(let name):
+        stage = name
+      case .nothingToRetry:
+        ControlClientRuntime.writeStderr(
+          "error: every stage of '\(session.title)' finished; "
+            + "pass --from <stage> to rerun one anyway")
+        throw ExitCode(1)
+      case .emptyTranscript:
+        ControlClientRuntime.writeStderr(
+          "error: '\(session.title)' was not summarized because its transcript is empty; "
+            + "pass --from cleanup to summarize it anyway")
+        throw ExitCode(1)
+      case .live:
+        ControlClientRuntime.writeStderr(
+          "error: '\(session.title)' has not ended; its pipeline runs when it does")
+        throw ExitCode(1)
       }
-      lines.append("narrow it: a longer id prefix, or a more specific title fragment")
-      ControlClientRuntime.writeStderr(lines.joined(separator: "\n"))
-      throw ExitCode(1)
-    case .match(let session):
-      let artifacts = SessionArtifactScanner.scan(session: session, environment: environment)
-      if options.json {
-        let view = SessionShowView.build(
-          session: session, artifacts: artifacts, now: now, emptiness: environment.emptiness)
-        let code = OutputFormatting.emit(view, json: true, humanSuccess: { _ in "" })
-        if code != 0 { throw ExitCode(code) }
-        return
+    }
+
+    let input: String?
+    switch stage {
+    case "cleanup":
+      input = artifacts.transcriptPath
+    case "summarize":
+      guard artifacts.cleanupExists, let cleanupPath = artifacts.cleanupPath else {
+        ControlClientRuntime.writeStderr(
+          "error: no cleaned transcript for '\(session.title)'; retry from cleanup instead")
+        throw ExitCode(1)
       }
-      print(
-        SessionShowRendering.render(
-          session: session, artifacts: artifacts, now: now, timeZone: timeZone,
-          showWarnings: warnings, emptiness: environment.emptiness))
+      input = cleanupPath
+    default:
+      input = nil
+    }
+
+    let debug = options.debug
+    guard let client = await ControlClientRuntime.connect(configFlag: options.config, debug: debug)
+    else {
+      throw ExitCode(1)
+    }
+    ControlClientRuntime.writeStderr("retrying '\(session.title)' from \(stage)…")
+    let retried = try await ControlClientRuntime.send(
+      .sessionRetry(SessionRetryParams(session: session.id, from: stage, input: input)),
+      expecting: Session.self, via: client, debug: debug)
+    await client.close()
+
+    try printPipeline(
+      retried, environment: environment,
+      now: Instant(secondsSinceEpoch: Date().timeIntervalSince1970), timeZone: timeZone,
+      json: options.json, showWarnings: false)
+    if retried.pipelineIssues.contains(where: { $0.kind == .failed }) {
+      throw ExitCode(1)
     }
   }
+}
+
+/// The scan environment `session show` and `session retry` read, or exit 1
+/// with the config error.
+private func loadScanEnvironment(_ options: ClientOptions) throws -> ScanEnvironment {
+  switch SessionArtifactScanner.environment(configFlag: options.config) {
+  case .failure(let error):
+    ControlClientRuntime.writeStderr(error.description)
+    throw ExitCode(1)
+  case .success(let resolved):
+    return resolved
+  }
+}
+
+/// The one session `ref` names, read from disk; exits 1 with a hint when it
+/// names none or several.
+private func resolveSession(
+  _ ref: String, environment: ScanEnvironment, now: Instant, timeZone: TimeZone
+) throws -> Session {
+  let sessions = SessionStore.readAll(dataRoot: environment.dataRoot)
+  switch SessionRef.resolve(ref, in: sessions, now: now, timeZone: timeZone) {
+  case .notFound:
+    ControlClientRuntime.writeStderr(
+      "error: no session matches '\(ref)' — try a unique id prefix, a title fragment, "
+        + "or a start time HH:MM (today); `ears sessions --all` lists them")
+    throw ExitCode(1)
+  case .ambiguous(let candidates):
+    var lines = ["error: '\(ref)' matches \(candidates.count) sessions:"]
+    for candidate in candidates {
+      let day = HumanUnits.localDate(candidate.started, timeZone: timeZone)
+      let clock = HumanUnits.clock(candidate.started, timeZone: timeZone)
+      lines.append("  \(candidate.id.prefix(8))  \(day) \(clock)  \(candidate.title)")
+    }
+    lines.append("narrow it: a longer id prefix, or a more specific title fragment")
+    ControlClientRuntime.writeStderr(lines.joined(separator: "\n"))
+    throw ExitCode(1)
+  case .match(let session):
+    return session
+  }
+}
+
+/// Prints one session's pipeline view, scanned fresh from disk.
+private func printPipeline(
+  _ session: Session, environment: ScanEnvironment, now: Instant, timeZone: TimeZone,
+  json: Bool, showWarnings: Bool
+) throws {
+  let artifacts = SessionArtifactScanner.scan(session: session, environment: environment)
+  if json {
+    let view = SessionShowView.build(
+      session: session, artifacts: artifacts, now: now, emptiness: environment.emptiness)
+    let code = OutputFormatting.emit(view, json: true, humanSuccess: { _ in "" })
+    if code != 0 { throw ExitCode(code) }
+    return
+  }
+  print(
+    SessionShowRendering.render(
+      session: session, artifacts: artifacts, now: now, timeZone: timeZone,
+      showWarnings: showWarnings, emptiness: environment.emptiness))
 }
 
 // MARK: - watch

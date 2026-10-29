@@ -1,3 +1,4 @@
+import type { SilentDiagnosis } from "./silent-diagnosis";
 // The attribution flight recorder's vocabulary: every input the attribution
 // decision consumes, and every decision taken, as one typed, timestamped,
 // versioned event stream (docs/plans/attribution-refactor.md R1). Recorded
@@ -134,6 +135,16 @@ export type AttributionEvent =
       trackId: string;
       captureId: string;
       participantId: string;
+    }
+  // ── Silent capture ─────────────────────────────────────────────────────────
+  // The silent watchdog fired with nothing decoded on the call: the receiver's
+  // stats at that moment, and the cause they point to (silent-diagnosis.ts).
+  | {
+      type: "silent-diagnosis";
+      t: number;
+      trackId: string;
+      participantId: string;
+      diagnosis: SilentDiagnosis;
     };
 
 const EVENT_TYPES: ReadonlySet<string> = new Set([
@@ -152,6 +163,7 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
   "roster-delta",
   "provisional-binding",
   "identity-link",
+  "silent-diagnosis",
 ]);
 
 /** One event → one JSONL line, `schema` first so a human tailing the file can

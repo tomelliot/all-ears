@@ -202,6 +202,7 @@ Grouped by capability. All carried in the v2 envelope.
 | `sessions` | `session.attendee` | `{session, id, display_name?, joined?, left?, source?, origin?, self?}` → session. Upsert |
 | `sessions` | `session.list` | `{}` → live + recent sessions (ended history is read from disk, not the socket) |
 | `sessions` | `session.get` | `{session}` → session |
+| `admin` | `session.retry` | `{session, from, input?}` → session, once the chain stops. Reruns an ended session's on-end chain from `from` (`transcribe`, `cleanup` or `summarize`). `input` is the file the resumed stage reads: the transcript for `cleanup` (default: the session's own `transcript.md`), the cleaned transcript for `summarize` (required). Issues recorded by earlier stages are kept. Not ended, unknown stage, or a stage not in `on_end_stages` → `invalid_request`; a chain already running for the session → `conflict` |
 | `publish` | `segment.publish` | `{session, speaker, start, end, text}` → `{}`. Notification-only republish from `transcribe --follow` |
 | `publish` | `job.publish` | `{job, kind: "transcribe", session?, state: "started"\|"running"\|"done"\|"failed", detail?}` → `{}`. Notification-only, same pattern as `segment.publish`: pipeline tools report progress, the daemon persists nothing, subscribers get real state instead of guessing |
 | `sources` | `sources.list` / `sources.enable` / `sources.disable` | source listing and enable/disable |

@@ -16,6 +16,7 @@ public enum ControlMethod: String, Sendable, Hashable, Codable, CaseIterable {
   case sessionAttendee = "session.attendee"
   case sessionList = "session.list"
   case sessionGet = "session.get"
+  case sessionRetry = "session.retry"
 
   case segmentPublish = "segment.publish"
   case jobPublish = "job.publish"
@@ -45,7 +46,9 @@ public enum ControlMethod: String, Sendable, Hashable, Codable, CaseIterable {
       return .publish
     case .sourcesList, .sourcesEnable, .sourcesDisable:
       return .sources
-    case .sourcesAdd, .sourcesRemove, .capturePause, .captureResume, .flush:
+    // `session.retry` spawns the LLM stages, so the loopback WebSocket's
+    // `sessions` tier does not reach it.
+    case .sourcesAdd, .sourcesRemove, .capturePause, .captureResume, .flush, .sessionRetry:
       return .admin
     }
   }

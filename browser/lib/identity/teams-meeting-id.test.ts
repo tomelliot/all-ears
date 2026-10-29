@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   parseTeamsMeetingId,
   parseTeamsMeetingIdFromUrl,
+  parseTeamsMeetingCodeFromUrl,
   TeamsMeetingIdWatcher,
   type TeamsIdSources,
 } from "./teams-meeting-id";
@@ -157,5 +158,30 @@ describe("TeamsMeetingIdWatcher", () => {
 
     expect(watcher.threadId).toBe(THREAD_ID);
     expect(onResolved).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("parseTeamsMeetingCodeFromUrl", () => {
+  const coords = btoa(JSON.stringify({ meetingUrl: "x", meetingCode: "123456789012345", passcode: "p" }));
+  const url = `https://teams.microsoft.com/light-meetings/launch?p=x&anon=true&agent=web&coords=${encodeURIComponent(coords)}`;
+
+  it("reads meetingCode out of the base64 coords param of a meeting-ID join", () => {
+    expect(parseTeamsMeetingCodeFromUrl(url)).toBe("meet:123456789012345");
+  });
+
+  it("returns null without coords, or when coords is not base64 JSON", () => {
+    expect(parseTeamsMeetingCodeFromUrl("https://teams.microsoft.com/light-meetings/launch")).toBeNull();
+    expect(parseTeamsMeetingCodeFromUrl("https://teams.microsoft.com/x?coords=%%%")).toBeNull();
+    expect(parseTeamsMeetingCodeFromUrl(null)).toBeNull();
+  });
+
+  it("is the watcher's fallback only when no thread id is on the page", () => {
+    const seen: string[] = [];
+    new TeamsMeetingIdWatcher((id) => seen.push(id)).poll(fakeSources({ url }));
+    expect(seen).toEqual(["meet:123456789012345"]);
+
+    const seen2: string[] = [];
+    new TeamsMeetingIdWatcher((id) => seen2.push(id)).poll(fakeSources({ url, documentText: () => THREAD_ID }));
+    expect(seen2).toEqual([THREAD_ID]);
   });
 });

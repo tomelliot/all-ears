@@ -283,4 +283,45 @@ struct SessionPipelineTests {
     #expect(outcome.text == "empty, not summarized")
     #expect(outcome.glyph == "–")
   }
+
+  // MARK: - retry start
+
+  @Test("retry resumes at the failed cleanup, not at transcribe")
+  func retryStartsAtFailedCleanup() {
+    var artifacts = fullArtifacts()
+    artifacts.cleanupExists = false
+    artifacts.summaryCount = 0
+    artifacts.noteLink = nil
+    let failed = session(pipelineIssues: [
+      PipelineIssue(
+        stage: "cleanup", kind: .failed, message: "LLM backend call timed out",
+        exitClass: "retryable-upstream")
+    ])
+    let stages = SessionPipeline.stages(session: failed, artifacts: artifacts, now: muchLater)
+    #expect(SessionPipeline.retryStart(stages) == .from("cleanup"))
+  }
+
+  @Test("retry resumes at summarize when cleanup published")
+  func retryStartsAtSummarize() {
+    var artifacts = fullArtifacts()
+    artifacts.summaryCount = 0
+    artifacts.noteLink = nil
+    let stages = SessionPipeline.stages(session: session(), artifacts: artifacts, now: muchLater)
+    #expect(SessionPipeline.retryStart(stages) == .from("summarize"))
+  }
+
+  @Test("retry has nothing to do for a published session, an empty one, or a live one")
+  func retryRefusals() {
+    let published = SessionPipeline.stages(
+      session: session(), artifacts: fullArtifacts(), now: muchLater)
+    #expect(SessionPipeline.retryStart(published) == .nothingToRetry)
+
+    let empty = SessionPipeline.stages(
+      session: session(), artifacts: emptyTranscriptArtifacts(), now: muchLater)
+    #expect(SessionPipeline.retryStart(empty) == .emptyTranscript)
+
+    let live = SessionPipeline.stages(
+      session: session(state: .active), artifacts: SessionArtifacts(), now: justAfter)
+    #expect(SessionPipeline.retryStart(live) == .live)
+  }
 }
