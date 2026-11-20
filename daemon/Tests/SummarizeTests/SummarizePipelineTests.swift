@@ -17,13 +17,15 @@ struct SummarizePipelineTests {
     at directory: URL,
     name: String = "standup.transcript.md",
     sources: [SourceID] = ["mic"],
-    text: String = "Morning standup. Let's keep this quick."
+    text: String = "Morning standup. Let's keep this quick.",
+    session: String? = nil
   ) throws -> URL {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let frontmatter = TranscriptFrontmatter(
       schema: 1,
       kind: .transcript,
-      rangeRun: "2026-07-17T10-30-00Z_standup",
+      rangeRun: session == nil ? "2026-07-17T10-30-00Z_standup" : nil,
+      session: session,
       sources: sources,
       range: TimeRange(start: Instant(secondsSinceEpoch: 0), end: Instant(secondsSinceEpoch: 60)),
       model: TranscriptModelInfo(name: "parakeet", backend: "fluidaudio", version: "0.x"),
@@ -257,6 +259,40 @@ struct SummarizePipelineTests {
     #expect(
       !FileManager.default.fileExists(
         atPath: directory.appendingPathComponent("daily/2026-08-05.json").path))
+  }
+
+  @Test(
+    "a frontmatter = false note gets the session id in the block it has, and none if it has no block"
+  )
+  func stampsTheSessionIntoTheNote() async throws {
+    let session = "d74b62b0-a704-4aac-bca8-840a153f4350"
+    for (reply, expected) in [
+      (
+        "---\ntitle: Jan\ntranscript: \"[[t.md]]\"\n---\n\n- notes",
+        "---\ntitle: Jan\ntranscript: \"[[t.md]]\"\nsession: \(session)\n---\n\n- notes\n"
+      ),
+      ("# Notes\n\n- no block", "# Notes\n\n- no block\n"),
+    ] {
+      let directory = Self.makeTempDirectory("notes-session")
+      defer { try? FileManager.default.removeItem(at: directory) }
+      let transcriptURL = try Self.writeFixtureTranscript(at: directory, session: session)
+      let noteURL = directory.appendingPathComponent("note.md")
+      let (deps, _) = Self.dependencies(llmResults: [.success(LLMCompletionResult(text: reply))])
+
+      let exitCode = await SummarizePipeline.run(
+        inputs: SummarizePipeline.Inputs(
+          transcriptPaths: [transcriptURL.path],
+          presets: [
+            SummarizePipeline.Preset(
+              name: "meeting", promptContent: "Notes:",
+              out: PathTemplate("{output_root}/note.md"), frontmatter: false)
+          ],
+          out: nil, outputRoot: directory.path),
+        dependencies: deps)
+
+      #expect(exitCode == 0)
+      #expect(try String(contentsOf: noteURL, encoding: .utf8) == expected)
+    }
   }
 
   @Test("two presets resolving to one path: the first keeps it, the second is renamed and logged")
@@ -839,7 +875,10 @@ struct SummarizeMisattributedCallTests {
 
     // The caveat is in the note, under the note's own frontmatter — which is
     // still the first thing in the file, or Obsidian would not read it.
-    #expect(written.hasPrefix("---\ntitle: Matthew Barras\n---\n"))
+    // It also carries the session id, stamped by the pipeline.
+    #expect(
+      written.hasPrefix(
+        "---\ntitle: Matthew Barras\nsession: ea510e3a-b9e8-4e9d-9844-0f5dbf7e5852\n---\n"))
     #expect(written.contains("> [!warning] All Ears"))
     #expect(written.contains("browser capture only ever records other participants"))
 

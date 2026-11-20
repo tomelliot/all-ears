@@ -313,7 +313,17 @@ enum SummarizePipeline {
         }
         let body = summaryText.hasSuffix("\n") ? summaryText : summaryText + "\n"
         let annotated = annotate(body, warnings: noteWarnings(plan, baseFrontmatter))
-        let markdown = preset.frontmatter ? TranscriptRenderer.renderMarkdown(document) : annotated
+        // A rendered ears document already carries `session:`. The plain
+        // note's frontmatter is the LLM's, so the id is stamped here rather
+        // than asked for in the prompt — a UUID must not pass through a model.
+        // Only into a block the note already has: `frontmatter = false`
+        // promises a note with none stays that way.
+        let stamped =
+          baseFrontmatter.session.flatMap { session in
+            TranscriptFrontmatterEditor.hasFrontmatterBlock(annotated)
+              ? TranscriptFrontmatterEditor.settingSession(session, in: annotated) : nil
+          } ?? annotated
+        let markdown = preset.frontmatter ? TranscriptRenderer.renderMarkdown(document) : stamped
         try AtomicFileIO.writeAtomically(to: outputURL) { tempURL in
           try markdown.write(to: tempURL, atomically: false, encoding: .utf8)
         }

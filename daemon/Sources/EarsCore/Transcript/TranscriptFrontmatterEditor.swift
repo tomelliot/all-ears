@@ -27,6 +27,21 @@ public enum TranscriptFrontmatterEditor {
       line, key: "note", after: ["title", "session", "kind"], in: markdown)
   }
 
+  /// Returns `markdown` with `session:` set to `id`, replacing an existing
+  /// `session:` line or inserting one if there is none.
+  ///
+  /// For the note `summarize` writes, whose frontmatter the LLM composes: the
+  /// session id is the one field that must be exact, and it is what leads
+  /// from a note back to the session's audio and logs. Inserted after
+  /// `transcript:` where there is one, else after `title:`, else at the end
+  /// of the block. A note with no frontmatter block would get one holding
+  /// just this field; `summarize` checks ``hasFrontmatterBlock(_:)`` first.
+  public static func settingSession(_ id: String, in markdown: String) -> String {
+    let line = FrontmatterRenderer.line("session", id)
+    return replacingOrInserting(
+      line, key: "session", after: ["transcript", "title"], in: markdown)
+  }
+
   private static func replacingOrInserting(
     _ line: String, key: String, after anchors: [String], in markdown: String
   ) -> String {

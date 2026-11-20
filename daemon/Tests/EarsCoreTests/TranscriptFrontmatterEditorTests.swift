@@ -139,4 +139,43 @@ struct TranscriptFrontmatterEditorTests {
     // has to survive that, not just the splice that wrote it.
     #expect(TranscriptRenderer.renderMarkdown(parsed).contains("note: \"\(Self.link)\""))
   }
+
+  @Test("session: is inserted after transcript:, and a second stamp replaces the first")
+  func stampsSessionIntoANote() throws {
+    let note = """
+      ---
+      title: Jan Oberhauser
+      type: note
+      transcript: "[[Transcripts/2026/11/19/2026-11-19 - Jan Oberhauser.md]]"
+      ---
+
+      ### Background
+
+      """
+    let once = TranscriptFrontmatterEditor.settingSession(
+      "d74b62b0-a704-4aac-bca8-840a153f4350", in: note)
+    #expect(
+      once.contains(
+        """
+        transcript: "[[Transcripts/2026/11/19/2026-11-19 - Jan Oberhauser.md]]"
+        session: d74b62b0-a704-4aac-bca8-840a153f4350
+        ---
+        """))
+    #expect(once.hasSuffix("---\n\n### Background\n"))
+
+    let twice = TranscriptFrontmatterEditor.settingSession("other-id", in: once)
+    #expect(twice.contains("session: other-id\n"))
+    #expect(!twice.contains("d74b62b0"))
+  }
+
+  @Test("with no transcript:, session: falls back to after title:, then the end of the block")
+  func sessionFallbackAnchors() throws {
+    #expect(
+      TranscriptFrontmatterEditor.settingSession(
+        "abc", in: "---\ntitle: T\ntype: note\n---\nBody\n")
+        == "---\ntitle: T\nsession: abc\ntype: note\n---\nBody\n")
+    #expect(
+      TranscriptFrontmatterEditor.settingSession("abc", in: "---\ntype: note\n---\nBody\n")
+        == "---\ntype: note\nsession: abc\n---\nBody\n")
+  }
 }
