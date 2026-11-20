@@ -461,6 +461,36 @@ enum TranscribePipeline {
       }
     }
 
+    // A browser source that repeats the mic is the user's own outgoing audio,
+    // captured a second time; its turns would duplicate every `You` turn under
+    // somebody else's name. Leave it out before labels are derived, so the
+    // roster is reconciled against the sources that are really remote.
+    //
+    // When the copy carries clearly more speech than the mic, the copy is the
+    // better record of the user: it stands in for the mic over the span it
+    // covers, labelled `You`, and the mic's turns inside that span go instead.
+    let micResolution = MicDuplicateSources.resolve(transcriptions)
+    // Every source the roster must not name: the dropped copies and the one
+    // standing in for the mic.
+    let micDuplicates = Set(
+      micResolution.dropped + [micResolution.micReplacement].compactMap { $0 })
+    if !micResolution.isEmpty {
+      let dropped = Set(micResolution.dropped)
+      transcriptions.removeAll { dropped.contains($0.sourceID) }
+      diarization = diarization.filter { !micDuplicates.contains($0.key) }
+      if let span = micResolution.replacedSpan,
+        let micIndex = transcriptions.firstIndex(where: { $0.sourceID == SourceID("mic") })
+      {
+        transcriptions[micIndex].segments.removeAll { span.contains($0.start) }
+      }
+      dependencies.log(
+        "left out \(dropped.count) browser source(s) that repeat the mic: "
+          + dropped.map(\.rawValue).sorted().joined(separator: ", ")
+          + (micResolution.micReplacement.map {
+            "; \($0.rawValue) carries more of the user's speech than the mic and replaces it"
+          } ?? ""))
+    }
+
     let generated = dependencies.clock.now()
     let modelInfo = TranscriptModelInfo(
       name: transcriber.info.name, backend: backendName, version: transcriber.info.version)
@@ -486,6 +516,7 @@ enum TranscribePipeline {
     if let sessionRecord, !sessionRecord.attendees.isEmpty,
       inputs.rereconcile || sessionRecord.speakers.isEmpty
         || sessionRecord.reconcilerVersion < RosterReconciler.version
+        || !micDuplicates.isEmpty
     {
       // The attribution log's binding hints feed the re-derivation exactly as
       // they feed the daemon's own session.end reconciliation: sources are
@@ -495,7 +526,8 @@ enum TranscribePipeline {
         dataRoot: dataRoot, sessionID: sessionRecord.id)
       let attributionText = try? String(contentsOf: attributionURL, encoding: .utf8)
       let outcome = RosterReconciler.reconcile(
-        attendees: sessionRecord.attendees, sources: sessionRecord.sources,
+        attendees: sessionRecord.attendees,
+        sources: sessionRecord.sources.filter { !micDuplicates.contains($0) },
         sessionStart: sessionRecord.started,
         hints: attributionText.map { AttributionBindingHints.parse(jsonl: $0) } ?? [],
         speech: attributionText.map { AttributionBindingHints.speechEvidence(jsonl: $0) })
@@ -505,8 +537,10 @@ enum TranscribePipeline {
         ? "re-reconciliation requested (--rereconcile)"
         : sessionRecord.speakers.isEmpty
           ? "no stored speaker map"
-          : "stored speaker map is reconciler v\(sessionRecord.reconcilerVersion), "
-            + "current is v\(RosterReconciler.version)"
+          : !micDuplicates.isEmpty
+            ? "the stored speaker map names sources that repeat the mic"
+            : "stored speaker map is reconciler v\(sessionRecord.reconcilerVersion), "
+              + "current is v\(RosterReconciler.version)"
       dependencies.log(
         "session \(sessionRecord.id): \(reason); reconciled the roster into "
           + "\(outcome.speakers.count) speaker(s) with \(outcome.warnings.count) warning(s)")
@@ -514,7 +548,18 @@ enum TranscribePipeline {
     // The full rows (name + confidence per source), not a flattened lookup:
     // assembly labels turns from them *and* records them in the sidecar, the
     // one durable trace of a re-derived map (`session.toml` never sees it).
-    let speakers = reconciled?.speakers ?? sessionRecord?.speakers ?? []
+    var speakers = (reconciled?.speakers ?? sessionRecord?.speakers ?? []).filter {
+      !micDuplicates.contains($0.source)
+    }
+    if let replacement = micResolution.micReplacement {
+      speakers.append(
+        SessionSpeaker(
+          source: replacement, name: TranscriptAssembly.speakerLabel(for: SourceID("mic")),
+          confidence: .inferred))
+    }
+    let warnings =
+      (reconciled?.warnings ?? sessionRecord?.warnings ?? [])
+      + MicDuplicateSources.warnings(for: micResolution)
     // Everyone the roster named, whether or not any audio was matched to them
     // — the fact that survives a total attribution failure. The local
     // participant is marked the way the summarize prompt's own `speakers:`
@@ -561,7 +606,7 @@ enum TranscribePipeline {
       title: derivedTitle ?? sessionRecord?.title,
       started: sessionRecord?.started ?? requestedRange.start,
       attendees: attendees,
-      warnings: reconciled?.warnings ?? sessionRecord?.warnings ?? [],
+      warnings: warnings,
       speakers: speakers,
       diarization: diarization,
       diarizationBackend: diarizer?.info.name,
