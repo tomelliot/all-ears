@@ -29,6 +29,15 @@ export const CAPTURE_ENABLED_KEY = "captureEnabled";
 export const DEBUG_REPORT_KEY = "debugReportNonce";
 
 /**
+ * Storage key the popup's "Send track snapshot" button nudges. Same
+ * fresh-timestamp path as {@link DEBUG_REPORT_KEY}; content.ts forwards a
+ * `send-track-snapshot` control message and the MAIN world records a
+ * `track-snapshot` attribution event, which earsd appends to the live
+ * session's `attribution.jsonl`.
+ */
+export const DEBUG_SNAPSHOT_KEY = "debugSnapshotNonce";
+
+/**
  * Boolean flag (storage.local) gating debug logging. When true, every context
  * tees its `console.*` output into a persisted IndexedDB ring (log-store.ts)
  * the popup can export as a file; the MAIN-world hook learns the flag over the

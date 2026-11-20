@@ -2,6 +2,7 @@ import { isCurrentEpoch } from "./epoch";
 import { livePeerConnections, liveTracks, setTrackSink, type TrackRecord, type TrackSink } from "./rtc-hook";
 import { diagnoseSilentTrack } from "./silent-diagnosis";
 import {
+  trackGraphRoots,
   trackProvenance,
   webAudioTracks,
   type TrackProvenanceRecord,
@@ -120,6 +121,8 @@ export interface CaptureDeps {
   webAudioTracks(): MediaStreamTrack[];
   /** Local/remote lineage for a track id (rtc-hook.ts). */
   trackProvenance(id: string): TrackProvenanceRecord | undefined;
+  /** Where a graph-minted track's audio starts from (track-provenance.ts). */
+  trackGraphRoots?(id: string): string[] | undefined;
   /** The escalation state machine for a platform's seam order (capture-seams.ts). */
   makeArbiter(platform: Platform): SeamArbiter;
   /** Frame source for the meet-encoded-tee seam (meet-decode.ts). */
@@ -139,6 +142,7 @@ function productionDeps(): CaptureDeps {
     liveTracks,
     webAudioTracks,
     trackProvenance,
+    trackGraphRoots,
     makeArbiter: (platform) => new SeamArbiter(seamOrderFor(platform)),
     meetDecodeSource,
     trackProcessorSource,
@@ -522,7 +526,15 @@ export class CaptureOrchestrator {
       const provDesc = record ? `${record.origin} via=${record.via}` : "unknown provenance";
       console.debug(`[ears][capture] adopt webaudio track ${source.id} (${provDesc})`);
       this.noteTrackAppeared(source, seam);
-      this.deps.record({ type: "adopted", t: this.deps.now(), trackId: source.id, seam, reason: provDesc });
+      const graphRoots = this.deps.trackGraphRoots?.(source.id);
+      this.deps.record({
+        type: "adopted",
+        t: this.deps.now(),
+        trackId: source.id,
+        seam,
+        reason: provDesc,
+        ...(graphRoots ? { graphRoots } : {}),
+      });
       this.adoptedSeamTracks.set(source.id, clone);
       this.startPipeline(clone, { seam, sourceTrackId: source.id });
     }

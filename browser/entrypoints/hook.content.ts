@@ -6,8 +6,11 @@ import { initCapture, captureDebugState, __devCaptureStream } from "../lib/audio
 import {
   attributionDebugState,
   exportAttributionLog,
+  flushAttribution,
+  recordAttribution,
   setAttributionPlatform,
 } from "../lib/attribution-recorder";
+import { trackSnapshot } from "../lib/track-provenance";
 import { mainPerf } from "../lib/perf-main";
 import { selectAdapter, type PlatformAdapter } from "../lib/identity/adapter";
 import { MeetMeetingIdWatcher } from "../lib/identity/meet-meeting-id";
@@ -115,6 +118,26 @@ export default defineContentScript({
       console.debug("[ears][debug][state]", snapshot);
     };
     (window as unknown as { __earsReportState?: () => void }).__earsReportState = reportDebugState;
+
+    // The popup's "Send track snapshot" button: one `track-snapshot` event in
+    // the attribution log, flushed at once so it reaches the live session's
+    // attribution.jsonl without waiting for the next sweep. Read-only.
+    const sendTrackSnapshot = (): void => {
+      try {
+        const captureIds = new Map<string, string>();
+        for (const p of captureDebugState()?.participants ?? []) {
+          if (p.sourceTrackId) captureIds.set(p.sourceTrackId, p.id);
+        }
+        const snapshot = trackSnapshot(captureIds);
+        recordAttribution({ type: "track-snapshot", t: Date.now(), ...snapshot });
+        flushAttribution();
+        console.debug("[ears][debug][track-snapshot]", snapshot);
+      } catch (err) {
+        console.debug("[ears][debug][track-snapshot] failed:", err);
+      }
+    };
+    (window as unknown as { __earsSendTrackSnapshot?: () => void }).__earsSendTrackSnapshot =
+      sendTrackSnapshot;
     // On-demand export of the attribution flight recorder's per-call ring as
     // JSONL — call from this tab's DevTools console mid- or post-call:
     //   copy(__earsExportAttribution())
@@ -145,6 +168,10 @@ export default defineContentScript({
       const msg = event.data.msg;
       if (msg.kind === "report-state") {
         reportDebugState();
+        return;
+      }
+      if (msg.kind === "send-track-snapshot") {
+        sendTrackSnapshot();
         return;
       }
       if (msg.kind === "debug-log-state") {

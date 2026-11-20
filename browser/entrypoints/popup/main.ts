@@ -3,6 +3,7 @@ import {
   CAPTURE_ENABLED_KEY,
   DEBUG_LOG_KEY,
   DEBUG_REPORT_KEY,
+  DEBUG_SNAPSHOT_KEY,
   PERF_DETAIL_KEY,
   resolveCaptureToggleState,
   resolvePerfDetailState,
@@ -236,6 +237,23 @@ debugBtnEl?.addEventListener("click", () => {
     })
     .catch(() => {
       if (debugNoteEl) debugNoteEl.textContent = "Couldn't trigger the report.";
+    });
+});
+
+// "Send track snapshot": same nonce path; the meeting tab records a
+// `track-snapshot` attribution event that earsd files under the live session.
+const snapshotBtnEl = document.getElementById("debug-snapshot") as HTMLButtonElement | null;
+
+snapshotBtnEl?.addEventListener("click", () => {
+  browser.storage.local
+    .set({ [DEBUG_SNAPSHOT_KEY]: Date.now() })
+    .then(() => {
+      if (debugNoteEl) {
+        debugNoteEl.textContent = "Snapshot sent — it lands in the live session's attribution.jsonl.";
+      }
+    })
+    .catch(() => {
+      if (debugNoteEl) debugNoteEl.textContent = "Couldn't send the snapshot.";
     });
 });
 

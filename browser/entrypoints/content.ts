@@ -4,6 +4,7 @@ import {
   CAPTURE_ENABLED_KEY,
   DEBUG_LOG_KEY,
   DEBUG_REPORT_KEY,
+  DEBUG_SNAPSHOT_KEY,
   PERF_DETAIL_KEY,
   PERF_ENABLED_KEY,
   resolveCaptureToggleState,
@@ -132,6 +133,7 @@ export default defineContentScript({
       // The popup's "Report state" button writes a fresh nonce here; nudge the
       // MAIN world to dump its state to this tab's console.
       if (changes[DEBUG_REPORT_KEY]) postToMain({ kind: "report-state" });
+      if (changes[DEBUG_SNAPSHOT_KEY]) postToMain({ kind: "send-track-snapshot" });
       const dl = changes[DEBUG_LOG_KEY];
       if (dl) setDebugLogging(dl.newValue === true);
       if (changes[PERF_ENABLED_KEY] || changes[PERF_DETAIL_KEY]) {

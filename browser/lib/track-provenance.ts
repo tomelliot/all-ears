@@ -1,4 +1,6 @@
+import type { ProvenanceSnapshotEntry, TrackSnapshotEntry } from "./attribution-log";
 import { looksLikeCaptureDevice } from "./capture-seams";
+import { lineageOrigin, type GraphLineage, type GraphNodeSnapshot } from "./meet-audio-graph";
 
 // Track provenance and the WebAudio track registry (split out of rtc-hook.ts,
 // refactor R7): the realm-global bookkeeping that classifies tracks as
@@ -79,7 +81,74 @@ export function webAudioTracks(): MediaStreamTrack[] {
       pruneTrackProvenance(id);
     }
   }
+  classifyGraphOutputs([...registry.keys()]);
   return [...registry.values()].map((rec) => rec.track);
+}
+
+
+// ── Graph lineage: outputs of the page's own audio graph ────────────────────
+//
+// Meet mints tracks inside its WebAudio graph (MediaStreamAudioDestinationNode)
+// and feeds them back into `createMediaStreamSource`. Such a track comes from
+// no getUserMedia, sender or `ontrack` call and reports no capture device, so
+// every other rule here leaves it unknown — yet some carry remote voices and
+// some carry the user's processed microphone. On the 2026-11-19 call three of
+// six were the microphone, and the transcript repeated the user under the
+// other participant's name. The graph map (meet-webaudio-probe.ts) is the only
+// thing that tells them apart: an output fed solely by local tracks is local.
+
+/** The graph map, as provenance reads it. Installed by the WebAudio probe. */
+export interface GraphLineageSource {
+  lineageOf(trackId: string): GraphLineage | null;
+  nodes(): GraphNodeSnapshot[];
+}
+
+interface GraphLineageWindow extends Window {
+  __earsGraphLineage?: GraphLineageSource;
+}
+
+export function setGraphLineageSource(source: GraphLineageSource | null): void {
+  const g = window as unknown as GraphLineageWindow;
+  if (source) g.__earsGraphLineage = source;
+  else delete g.__earsGraphLineage;
+}
+
+function graphLineageSource(): GraphLineageSource | undefined {
+  try {
+    return (window as unknown as GraphLineageWindow).__earsGraphLineage;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Passes over the registry per sweep: one output can feed the next, and each
+ * pass settles one more link of such a chain. */
+const GRAPH_CLASSIFY_MAX_PASSES = 4;
+
+/**
+ * Name as `local` every unclassified track the graph shows is fed only by
+ * local tracks. Runs on each registry read, so a track adopted before the page
+ * finished wiring its graph is named on a later sweep and retired then
+ * (`seamTracksToRetire`). Only ever writes `local`, on positive evidence.
+ */
+function classifyGraphOutputs(ids: string[]): void {
+  try {
+    const source = graphLineageSource();
+    if (!source) return;
+    const originOf = (id: string): TrackOrigin | undefined => provenanceRegistry().get(id)?.origin;
+    for (let pass = 0; pass < GRAPH_CLASSIFY_MAX_PASSES; pass += 1) {
+      let changed = false;
+      for (const id of ids) {
+        if (provenanceRegistry().has(id)) continue;
+        if (lineageOrigin(source.lineageOf(id), originOf) !== "local") continue;
+        registerTrackProvenance(id, "local", "graph");
+        changed = true;
+      }
+      if (!changed) return;
+    }
+  } catch {
+    // bookkeeping only — a track the graph cannot place stays unknown
+  }
 }
 
 
@@ -94,7 +163,8 @@ export function webAudioTracks(): MediaStreamTrack[] {
 // construction; a track delivered by `ontrack` is remote; a clone inherits its
 // parent; a track that reports a capture device in getSettings() is local
 // (`classifyOnSight`, the signal that survives when the hook installed too late
-// to witness any of the above). Everything else stays unknown — and unknown
+// to witness any of the above); a track minted by the page's audio graph from
+// local tracks alone is local (`classifyGraphOutputs`). Everything else stays unknown — and unknown
 // ADOPTS (capture-seams.ts policy): a wrongly dropped remote track is
 // unrecoverable data loss, a missed local one only a transcript-quality bug, so
 // classification can only fail safe.
@@ -166,6 +236,94 @@ export function trackProvenance(id: string): TrackProvenanceRecord | undefined {
     return provenanceRegistry().get(id);
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Every WebAudio-registry track and every provenance record, as plain data —
+ * the popup's "Send track snapshot" diagnostic (hook.content.ts).
+ *
+ * Read-only: `getSettings()`, `label` and the registries, the same reads
+ * `classifyOnSight` already makes. No sender or receiver is enumerated and no
+ * track is cloned or touched. `captureIds` maps a registry track id to the
+ * capture handle recording it (audio-tap's `sourceTrackId`).
+ */
+export function trackSnapshot(captureIds: ReadonlyMap<string, string> = new Map()): {
+  tracks: TrackSnapshotEntry[];
+  provenance: ProvenanceSnapshotEntry[];
+  graph: GraphNodeSnapshot[];
+} {
+  const lineageSource = graphLineageSource();
+  const tracks: TrackSnapshotEntry[] = [];
+  for (const [id, rec] of webAudioTrackRegistry()) {
+    try {
+      const track = rec.track;
+      const record = trackProvenance(id);
+      const captureId = captureIds.get(id);
+      let settings: Record<string, unknown> = {};
+      try {
+        settings = { ...(track.getSettings?.() as Record<string, unknown> | undefined) };
+      } catch {
+        // a track that won't report settings still appears, with none
+      }
+      tracks.push({
+        trackId: id,
+        via: rec.via,
+        registeredAt: rec.registeredAt,
+        readyState: String(track.readyState),
+        muted: track.muted === true,
+        enabled: track.enabled === true,
+        label: String(track.label ?? ""),
+        constructorName: String(track.constructor?.name ?? ""),
+        settings,
+        ...(record ? { origin: record.origin, provenanceVia: record.via, rootId: record.rootId } : {}),
+        ...(captureId ? { captureId } : {}),
+        ...graphRootsOf(lineageSource, id),
+      });
+    } catch {
+      // diagnostic only — one unreadable track must not hide the rest
+    }
+  }
+  const provenance: ProvenanceSnapshotEntry[] = [];
+  try {
+    for (const [trackId, r] of provenanceRegistry()) {
+      provenance.push({ trackId, origin: r.origin, via: r.via, rootId: r.rootId, seq: r.seq });
+    }
+  } catch {
+    // diagnostic only
+  }
+  let graph: GraphNodeSnapshot[] = [];
+  try {
+    graph = lineageSource?.nodes() ?? [];
+  } catch {
+    // diagnostic only
+  }
+  return { tracks, provenance, graph };
+}
+
+/** The graph roots feeding `id`, labelled; undefined when no graph output
+ * owns the track. Recorded with every adoption (audio-tap.ts). */
+export function trackGraphRoots(id: string): string[] | undefined {
+  return graphRootsOf(graphLineageSource(), id).graphRoots;
+}
+
+/** The graph roots feeding a track, labelled for the snapshot — track ids and
+ * node types only. Absent when no graph output owns the track. */
+function graphRootsOf(source: GraphLineageSource | undefined, id: string): { graphRoots?: string[] } {
+  try {
+    const lineage = source?.lineageOf(id);
+    if (!lineage) return {};
+    return {
+      graphRoots: lineage.roots.map((root) =>
+        root.processor
+          ? `${root.type}(${root.processor})`
+          : root.trackIds
+            ? `${root.type}(tracks=${root.trackIds.join("|")})`
+            : root.type,
+      ),
+    };
+  } catch {
+    return {};
   }
 }
 

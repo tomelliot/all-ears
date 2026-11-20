@@ -29,6 +29,8 @@ interface GraphNodeInfo {
   processor?: string;
   /** MediaStreamAudioSourceNode input track ids, when known. */
   trackIds?: string[];
+  /** MediaStreamAudioDestinationNode output track ids, when known. */
+  outputTrackIds?: string[];
   outs: Set<string>;
   fanIn: number;
   createdAt: number;
@@ -40,8 +42,48 @@ export interface GraphNodeSnapshot {
   type: string;
   processor?: string;
   trackIds?: string[];
+  outputTrackIds?: string[];
   outs: string[];
   fanIn: number;
+}
+
+/** A node that feeds a graph output and has no recorded input of its own —
+ * where that output's audio comes from. */
+export interface GraphRoot {
+  id: string;
+  type: string;
+  processor?: string;
+  trackIds?: string[];
+}
+
+/** Where one graph-output track's audio comes from. */
+export interface GraphLineage {
+  /** The MediaStreamAudioDestinationNode that owns the track. */
+  nodeId: string;
+  roots: GraphRoot[];
+}
+
+/**
+ * Whether a graph output carries only the user's own audio.
+ *
+ * `local` needs positive evidence on every road in: each root must be a
+ * stream source whose every track is already known local. A worklet root
+ * (Meet's NetEQ playout), a source with an unknown or remote track, any other
+ * generator, or no recorded root at all leaves the output unclassified — and
+ * unclassified adopts (capture-seams.ts), so a gap in the map can only cost a
+ * duplicate, never a participant.
+ */
+export function lineageOrigin(
+  lineage: GraphLineage | null,
+  originOf: (trackId: string) => "local" | "remote" | undefined,
+): "local" | undefined {
+  if (!lineage || lineage.roots.length === 0) return undefined;
+  for (const root of lineage.roots) {
+    if (root.type !== "MediaStreamAudioSourceNode") return undefined;
+    if (!root.trackIds || root.trackIds.length === 0) return undefined;
+    if (!root.trackIds.every((id) => originOf(id) === "local")) return undefined;
+  }
+  return "local";
 }
 
 /**
@@ -98,6 +140,65 @@ export class AudioGraphRegistry {
     const id = this.register(node, "MediaStreamAudioSourceNode");
     if (id) this.info.get(id)!.trackIds = trackIds;
     return id;
+  }
+
+  /** True once a source node's input tracks are recorded. */
+  hasSourceTracks(node: object): boolean {
+    const id = this.ids.get(node);
+    return id !== undefined && this.info.get(id)?.trackIds !== undefined;
+  }
+
+  /** Register a MediaStreamAudioDestinationNode with the track ids it mints. */
+  noteDestination(node: object, trackIds: string[]): string | null {
+    const id = this.register(node, "MediaStreamAudioDestinationNode");
+    if (id) this.info.get(id)!.outputTrackIds = trackIds;
+    return id;
+  }
+
+  /**
+   * The roots feeding the destination node that mints `trackId`, or null when
+   * no recorded destination owns that track. Walks the recorded edges
+   * backwards; a cycle is visited once.
+   */
+  lineageOf(trackId: string): GraphLineage | null {
+    let destId: string | null = null;
+    for (const node of this.info.values()) {
+      if (node.outputTrackIds?.includes(trackId)) {
+        destId = node.id;
+        break;
+      }
+    }
+    if (!destId) return null;
+    const inputs = new Map<string, string[]>();
+    for (const node of this.info.values()) {
+      for (const out of node.outs) {
+        const list = inputs.get(out);
+        if (list) list.push(node.id);
+        else inputs.set(out, [node.id]);
+      }
+    }
+    const roots: GraphRoot[] = [];
+    const seen = new Set<string>([destId]);
+    const queue = [...(inputs.get(destId) ?? [])];
+    while (queue.length > 0) {
+      const id = queue.pop()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const node = this.info.get(id);
+      if (!node) continue;
+      const feeders = inputs.get(id) ?? [];
+      if (feeders.length === 0) {
+        roots.push({
+          id: node.id,
+          type: node.type,
+          ...(node.processor !== undefined ? { processor: node.processor } : {}),
+          ...(node.trackIds !== undefined ? { trackIds: node.trackIds } : {}),
+        });
+      } else {
+        queue.push(...feeders);
+      }
+    }
+    return { nodeId: destId, roots };
   }
 
   /** Record `from.connect(to)`. Either end registers on first sight. `to` may
@@ -157,6 +258,7 @@ export class AudioGraphRegistry {
         type: node.type,
         ...(node.processor !== undefined ? { processor: node.processor } : {}),
         ...(node.trackIds !== undefined ? { trackIds: node.trackIds } : {}),
+        ...(node.outputTrackIds !== undefined ? { outputTrackIds: node.outputTrackIds } : {}),
         outs: [...node.outs],
         fanIn: node.fanIn,
       });
@@ -182,7 +284,9 @@ export class AudioGraphRegistry {
         ? `${node.type}(${node.processor})`
         : node.trackIds
           ? `${node.type}(tracks=${node.trackIds.join("|")})`
-          : node.type;
+          : node.outputTrackIds
+            ? `${node.type}(mints=${node.outputTrackIds.join("|")})`
+            : node.type;
       const outs = node.outs.size > 0 ? ` ->${[...node.outs].join(",")}` : "";
       fields[node.id] = `${label}${outs} in:${node.fanIn}`;
     }

@@ -311,6 +311,9 @@
       <!-- Debug: dump MAIN-world capture/probe/hook state to each open meeting
            tab's console (filter the console by [ears][debug][state]). -->
       <button type="button" id="debug-report" class="debug-btn">Report state to console</button>
+      <!-- Debug: record every WebAudio track and provenance record as one
+           track-snapshot event in the live session's attribution.jsonl. -->
+      <button type="button" id="debug-snapshot" class="debug-btn">Send track snapshot to earsd</button>
       <!-- Site hooks: register the capture scripts on the current site (and its
            iframe origins) when the manifest doesn't cover it. Hidden on built-in
            platforms and non-web pages. lib/site-hooks.ts. -->

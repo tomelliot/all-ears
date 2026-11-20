@@ -1,5 +1,5 @@
-import { AudioGraphRegistry } from "./meet-audio-graph";
-import { registerWebAudioTrack } from "./track-provenance";
+import { AudioGraphRegistry, GRAPH_MAX_NODES } from "./meet-audio-graph";
+import { registerWebAudioTrack, setGraphLineageSource } from "./track-provenance";
 
 // The Meet WebAudio probe and audio-graph bridge (split out of rtc-hook.ts,
 // refactor R7). Two jobs share the constructor wraps installed here:
@@ -8,7 +8,10 @@ import { registerWebAudioTrack } from "./track-provenance";
 //      (createMediaStreamSource inputs, audio MediaStreamTrackGenerator
 //      outputs) is registered with track-provenance.ts's registry — the
 //      webaudio-track capture seam's supply. This part is NOT debug-gated.
-//   2. Investigation surfaces, all flag-gated: the graph topology map and
+//      So is the audio-graph map (meet-audio-graph.ts): it is what tells a
+//      graph output carrying the user's own microphone from one carrying
+//      remote voices, and provenance reads it on every seam sweep.
+//   2. Investigation surfaces, all flag-gated: the graph topology emitter and
 //      per-track energy meters (__earsDebugAudio), and the downstream capture
 //      bridge (__earsGraphBridge). rtc-hook.ts's audioprocessor tee shares the
 //      same __earsDebugAudio flag via energyProbeEnabled.
@@ -95,10 +98,8 @@ export function installMeetWebAudioProbe(): void {
               // the NATIVE node downstream instead — see tapNetEqDownstream.
               netEqWorklets.add(instance);
             }
-            if (energyProbeEnabled()) {
-              meetGraph().noteWorklet(instance, processor);
-              ensureGraphTimer();
-            }
+            meetGraph().noteWorklet(instance, processor);
+            if (energyProbeEnabled()) ensureGraphTimer();
           } catch {
             // diagnostic only — never throws into Meet's audio path
           }
@@ -173,7 +174,7 @@ export function installMeetWebAudioProbe(): void {
         // receiver), so the graph records them for the offline unmute-edge join
         // instead. Ids only — never names.
         try {
-          if (energyProbeEnabled() && node !== null && typeof node === "object") {
+          if (node !== null && typeof node === "object") {
             meetGraph().noteSource(node, tracks.map((t) => t.id));
           }
         } catch {
@@ -198,10 +199,9 @@ export function installMeetWebAudioProbe(): void {
       nodeProto.connect = function (this: object, ...args: unknown[]): unknown {
         const result = native.apply(this, args);
         try {
-          if (energyProbeEnabled()) {
-            meetGraph().noteConnect(this, args[0]);
-            ensureGraphTimer();
-          }
+          noteGraphEnds(this, args[0]);
+          meetGraph().noteConnect(this, args[0]);
+          if (energyProbeEnabled()) ensureGraphTimer();
           // Meet wiring a neteq worklet into its own graph names the one safe
           // tap point for that participant's decoded audio: the NATIVE node
           // downstream. Branch the capture bridge off that, never the worklet.
@@ -221,13 +221,20 @@ export function installMeetWebAudioProbe(): void {
       nodeProto.disconnect = function (this: object, ...args: unknown[]): unknown {
         const result = native.apply(this, args);
         try {
-          if (energyProbeEnabled()) meetGraph().noteDisconnect(this, args[0]);
+          meetGraph().noteDisconnect(this, args[0]);
         } catch {
           // diagnostic only
         }
         return result;
       };
     }
+
+    // Provenance asks the graph where an output track's audio comes from.
+    // Realm-global, so a re-injected epoch reads the map these wraps feed.
+    setGraphLineageSource({
+      lineageOf: (trackId) => meetGraph().lineageOf(trackId),
+      nodes: () => meetGraph().snapshot(GRAPH_MAX_NODES),
+    });
 
     // media.srcObject = stream — the other way decoded audio reaches output.
     const meProto = (w.HTMLMediaElement as { prototype?: object } | undefined)?.prototype;
@@ -412,6 +419,42 @@ function meetGraph(): AudioGraphRegistry {
   return graphRegistry;
 }
 
+/**
+ * Record the track ids at either end of an edge the page is making: the
+ * stream a source node reads, and the stream a destination node mints.
+ *
+ * Read at connect time off the nodes themselves (`mediaStream`, `stream` —
+ * passive getters), so both the factory methods and the `new …Node(ctx)`
+ * constructors are covered without wrapping either. The output ids are what
+ * joins the graph to the WebAudio track registry: Meet feeds a destination's
+ * stream back into `createMediaStreamSource`, and that is the track the
+ * webaudio seam is offered.
+ */
+function noteGraphEnds(from: object, to: unknown): void {
+  const ids = (stream: unknown): string[] | null => {
+    const tracks = (stream as { getAudioTracks?: () => Array<{ id?: unknown }> } | null | undefined)
+      ?.getAudioTracks?.();
+    if (!Array.isArray(tracks)) return null;
+    return tracks.map((t) => t?.id).filter((id): id is string => typeof id === "string");
+  };
+  try {
+    if (!meetGraph().hasSourceTracks(from)) {
+      const input = ids((from as { mediaStream?: unknown }).mediaStream);
+      if (input) meetGraph().noteSource(from, input);
+    }
+  } catch {
+    // bookkeeping only
+  }
+  try {
+    if (typeof to === "object" && to !== null) {
+      const output = ids((to as { stream?: unknown }).stream);
+      if (output) meetGraph().noteDestination(to, output);
+    }
+  } catch {
+    // bookkeeping only
+  }
+}
+
 function graphBridgeEnabled(): boolean {
   try {
     return localStorage.getItem("__earsGraphBridge") === "1";
@@ -578,6 +621,7 @@ export function __resetMeetGraphProbe(): void {
   graphTick = 0;
   bridgedNodeCount = 0;
   probeNetEqWorkletCount = 0;
+  probeAudioWorkletNodeCount = 0;
   netEqWorklets = new WeakSet();
   tappedTargets = new WeakSet();
 }

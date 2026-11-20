@@ -6,6 +6,13 @@ import {
   setMeetGraphSinks,
   stopMeetGraphProbe,
 } from "./meet-webaudio-probe";
+import {
+  registerTrackProvenance,
+  registerWebAudioTrack,
+  trackProvenance,
+  trackSnapshot,
+  webAudioTracks,
+} from "./track-provenance";
 
 // The Meet audio-graph probe's DOM-facing half: the pass-through wraps on
 // AudioNode.connect/disconnect and the AudioWorkletNode constructor, plus the
@@ -50,6 +57,9 @@ function setUpGlobals(opts?: {
   delete g.__earsLivePCs;
   delete g.__earsWebAudioTracks;
   delete g.__earsGraphSinks;
+  delete g.__earsGraphLineage;
+  delete g.__earsTrackProvenance;
+  delete g.__earsTrackProvenanceSeq;
   g.window = globalThis;
   g.location = { host: "meet.google.com" };
 
@@ -71,6 +81,9 @@ function setUpGlobals(opts?: {
 
   class FakeMediaStream {
     constructor(public tracks: unknown[] = []) {}
+    getAudioTracks(): unknown[] {
+      return this.tracks;
+    }
   }
   g.MediaStream = FakeMediaStream;
 
@@ -177,13 +190,107 @@ describe("Meet audio-graph probe (meet-webaudio-probe.ts)", () => {
     expect(hookDebugState().graph).toMatchObject({ nodes: 2, edges: 1 });
   });
 
-  it("does no graph bookkeeping when __earsDebugAudio is off — but native still runs", () => {
+  it("maps the graph with __earsDebugAudio off — provenance needs it on every call", () => {
     const h = setUpGlobals({ debugAudio: false });
     const a = new h.FakeAudioNode();
     const b = new h.FakeAudioNode();
     a.connect(b);
     expect(h.connectCalls).toHaveLength(1);
-    expect(hookDebugState().graph).toMatchObject({ nodes: 0, edges: 0 });
+    expect(hookDebugState().graph).toMatchObject({ nodes: 2, edges: 1 });
+    vi.advanceTimersByTime(60_000);
+    expect(h.emitted).toEqual([]); // the emitter stays a debug surface
+  });
+
+  describe("graph outputs and provenance", () => {
+    const track = (id: string): MediaStreamTrack =>
+      ({ id, kind: "audio", readyState: "live", getSettings: () => ({}) }) as unknown as MediaStreamTrack;
+    const stream = (...tracks: MediaStreamTrack[]): unknown => {
+      const Ctor = (globalThis as unknown as Record<string, unknown>).MediaStream as new (t: unknown[]) => unknown;
+      return new Ctor(tracks);
+    };
+    /** A node carrying `mediaStream` (a source) or `stream` (a destination). */
+    const node = (h: ReturnType<typeof setUpGlobals>, extra: Record<string, unknown> = {}) =>
+      Object.assign(new h.FakeAudioNode(), extra);
+
+    it("names an output fed only by the microphone local, through intermediate nodes", () => {
+      const h = setUpGlobals({ debugAudio: false });
+      registerTrackProvenance("mic", "local", "gum");
+      const source = node(h, { mediaStream: stream(track("mic")) });
+      const gain = node(h);
+      const noiseFilter = newWorklet(h, "noise-filter");
+      const dest = node(h, { stream: stream(track("out")) });
+      source.connect(gain);
+      gain.connect(noiseFilter);
+      noiseFilter.connect(dest);
+
+      registerWebAudioTrack(track("out"), "createMediaStreamSource");
+      expect(trackProvenance("out")).toBeUndefined(); // nothing but the graph knows
+      webAudioTracks();
+      expect(trackProvenance("out")).toMatchObject({ origin: "local", via: "graph" });
+    });
+
+    it("leaves an output fed by the NetEQ worklet unclassified — it adopts", () => {
+      const h = setUpGlobals({ debugAudio: false });
+      const dest = node(h, { stream: stream(track("remote-out")) });
+      newWorklet(h).connect(dest);
+      registerWebAudioTrack(track("remote-out"), "createMediaStreamSource");
+      webAudioTracks();
+      expect(trackProvenance("remote-out")).toBeUndefined();
+    });
+
+    it("leaves an output that mixes the microphone with a remote road unclassified", () => {
+      const h = setUpGlobals({ debugAudio: false });
+      registerTrackProvenance("mic", "local", "gum");
+      const dest = node(h, { stream: stream(track("mixed")) });
+      node(h, { mediaStream: stream(track("mic")) }).connect(dest);
+      newWorklet(h).connect(dest);
+      registerWebAudioTrack(track("mixed"), "createMediaStreamSource");
+      webAudioTracks();
+      expect(trackProvenance("mixed")).toBeUndefined();
+    });
+
+    it("follows a chain of outputs fed back in as sources", () => {
+      const h = setUpGlobals({ debugAudio: false });
+      registerTrackProvenance("mic", "local", "gum");
+      const first = node(h, { stream: stream(track("stage-1")) });
+      node(h, { mediaStream: stream(track("mic")) }).connect(first);
+      const second = node(h, { stream: stream(track("stage-2")) });
+      node(h, { mediaStream: stream(track("stage-1")) }).connect(second);
+      // Registered downstream-first: the chain must not depend on order.
+      registerWebAudioTrack(track("stage-2"), "createMediaStreamSource");
+      registerWebAudioTrack(track("stage-1"), "createMediaStreamSource");
+      webAudioTracks();
+      expect(trackProvenance("stage-1")).toMatchObject({ origin: "local", via: "graph" });
+      expect(trackProvenance("stage-2")).toMatchObject({ origin: "local", via: "graph" });
+    });
+
+    it("names an already-registered output local once the page wires it up", () => {
+      const h = setUpGlobals({ debugAudio: false });
+      registerTrackProvenance("mic", "local", "gum");
+      const dest = node(h, { stream: stream(track("late")) });
+      registerWebAudioTrack(track("late"), "createMediaStreamSource");
+      webAudioTracks();
+      expect(trackProvenance("late")).toBeUndefined();
+      node(h, { mediaStream: stream(track("mic")) }).connect(dest);
+      webAudioTracks();
+      expect(trackProvenance("late")).toMatchObject({ origin: "local", via: "graph" });
+    });
+
+    it("reports each output's roots and the mapped graph in the track snapshot", () => {
+      const h = setUpGlobals({ debugAudio: false });
+      const dest = node(h, { stream: stream(track("remote-out")) });
+      newWorklet(h).connect(dest);
+      registerWebAudioTrack(track("remote-out"), "createMediaStreamSource");
+      const snapshot = trackSnapshot();
+      expect(snapshot.tracks[0]).toMatchObject({
+        trackId: "remote-out",
+        graphRoots: ["AudioWorkletNode(neteq-processor)"],
+      });
+      expect(snapshot.graph).toContainEqual(
+        expect.objectContaining({ type: "MediaStreamAudioDestinationNode", outputTrackIds: ["remote-out"] }),
+      );
+      expect(JSON.parse(JSON.stringify(snapshot))).toEqual(snapshot);
+    });
   });
 
   it("registers worklet nodes and counts neteq-processor instances", () => {

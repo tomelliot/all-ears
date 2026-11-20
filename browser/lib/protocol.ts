@@ -202,6 +202,9 @@ export type ControlMessage =
   // console. Triggered from the popup via a storage-key nudge (content.ts),
   // so it reaches every open meeting tab and needs no extra permissions.
   | { kind: "report-state" }
+  // Debug: record a `track-snapshot` attribution event (every WebAudio track
+  // and provenance record) and ship it to earsd. Same popup trigger path.
+  | { kind: "send-track-snapshot" }
   // Debug logging flag, mirrored from storage.local (which the MAIN world
   // can't read) so the hook installs/removes its console tap. Same
   // storage ⇄ content ⇄ MAIN path as capture-state.

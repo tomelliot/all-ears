@@ -1,3 +1,4 @@
+import type { GraphNodeSnapshot } from "./meet-audio-graph";
 import type { SilentDiagnosis } from "./silent-diagnosis";
 // The attribution flight recorder's vocabulary: every input the attribution
 // decision consumes, and every decision taken, as one typed, timestamped,
@@ -87,7 +88,10 @@ export type AttributionEvent =
   // Admission waited (muted receiver track — journal #165's phantom guard).
   | { type: "deferred"; t: number; trackId: string; seam: SeamId; reason: string }
   // A non-receiver seam adopted the track (a clone captures it).
-  | { type: "adopted"; t: number; trackId: string; seam: SeamId; reason: string }
+  // `graphRoots`: for a track the page's audio graph mints, the nodes its
+  // audio starts from — what separates a remote voice from a second copy of
+  // the user's microphone when provenance has no verdict.
+  | { type: "adopted"; t: number; trackId: string; seam: SeamId; reason: string; graphRoots?: string[] }
   // An adopted track was retired (classified the user's own audio).
   | { type: "retired"; t: number; trackId: string; reason: string }
   // The seam arbiter moved off a seam that produced no audio.
@@ -136,6 +140,19 @@ export type AttributionEvent =
       captureId: string;
       participantId: string;
     }
+  // ── On-demand diagnostics ──────────────────────────────────────────────────
+  // The popup's "Send track snapshot" button: every track in the WebAudio
+  // registry and every provenance record at one instant, with which capture
+  // handle (if any) each track feeds. The evidence for "why was this track
+  // adopted" — settings, label and lineage per track (track-provenance.ts).
+  | {
+      type: "track-snapshot";
+      t: number;
+      tracks: TrackSnapshotEntry[];
+      provenance: ProvenanceSnapshotEntry[];
+      /** The page's audio graph as mapped — node types, edges, track ids. */
+      graph?: GraphNodeSnapshot[];
+    }
   // ── Silent capture ─────────────────────────────────────────────────────────
   // The silent watchdog fired with nothing decoded on the call: the receiver's
   // stats at that moment, and the cause they point to (silent-diagnosis.ts).
@@ -147,7 +164,43 @@ export type AttributionEvent =
       diagnosis: SilentDiagnosis;
     };
 
+/** One WebAudio-registry track as the snapshot saw it. */
+export interface TrackSnapshotEntry {
+  trackId: string;
+  /** The WebAudio call that registered it (`createMediaStreamSource`, …). */
+  via: string;
+  registeredAt: string;
+  readyState: string;
+  muted: boolean;
+  enabled: boolean;
+  label: string;
+  /** `track.constructor.name` — tells a generator-minted track from a plain one. */
+  constructorName: string;
+  /** `track.getSettings()`, verbatim. */
+  settings: Record<string, unknown>;
+  /** The provenance verdict, absent when the track is unclassified. */
+  origin?: "local" | "remote";
+  provenanceVia?: string;
+  rootId?: string;
+  /** The capture handle (`t5`) recording this track, when one is. */
+  captureId?: string;
+  /** For a track minted by the page's audio graph: the nodes its audio
+   * starts from. Empty when the output has no recorded input. */
+  graphRoots?: string[];
+}
+
+/** One provenance record — includes tracks never routed through WebAudio
+ * (the ones handed to a sender), which is what makes a lineage gap visible. */
+export interface ProvenanceSnapshotEntry {
+  trackId: string;
+  origin: "local" | "remote";
+  via: string;
+  rootId: string;
+  seq: number;
+}
+
 const EVENT_TYPES: ReadonlySet<string> = new Set([
+  "track-snapshot",
   "track-appeared",
   "track-unmuted",
   "track-muted",

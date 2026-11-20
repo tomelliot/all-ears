@@ -3,7 +3,9 @@ import { installHook } from "./rtc-hook";
 import {
   PROVENANCE_MAX_ENTRIES,
   registerTrackProvenance,
+  registerWebAudioTrack,
   trackProvenance,
+  trackSnapshot,
   webAudioTracks,
 } from "./track-provenance";
 import { setUpGlobals } from "./rtc-test-helpers";
@@ -259,5 +261,30 @@ describe("track provenance", () => {
     expect(trackProvenance("t-0")).toBeUndefined();
     expect(trackProvenance(`t-${PROVENANCE_MAX_ENTRIES}`)).toMatchObject({ origin: "local" });
   });
-});
 
+  it("snapshots every WebAudio track with its settings, verdict and capture handle", () => {
+    setUpProvenance([]);
+    const mic = new FakeMediaStreamTrack("snap-mic", "audio", { deviceId: "default", groupId: "g1" });
+    const mystery = new FakeMediaStreamTrack("snap-mystery", "audio", { deviceId: "snap-mystery" });
+    registerWebAudioTrack(mic as unknown as MediaStreamTrack, "createMediaStreamSource");
+    registerWebAudioTrack(mystery as unknown as MediaStreamTrack, "createMediaStreamSource");
+    // A sender-side track that never reached WebAudio still shows in provenance.
+    registerTrackProvenance("snap-sent", "local", "sender");
+
+    const snapshot = trackSnapshot(new Map([["snap-mystery", "t5"]]));
+    const byId = new Map(snapshot.tracks.map((t) => [t.trackId, t]));
+    expect(byId.get("snap-mic")).toMatchObject({
+      via: "createMediaStreamSource",
+      origin: "local",
+      provenanceVia: "device-settings",
+      settings: { groupId: "g1" },
+    });
+    expect(byId.get("snap-mystery")).toMatchObject({ captureId: "t5", readyState: "live" });
+    expect(byId.get("snap-mystery")?.origin).toBeUndefined();
+    expect(snapshot.provenance).toContainEqual(
+      expect.objectContaining({ trackId: "snap-sent", origin: "local", via: "sender" }),
+    );
+    // Plain data: survives the JSONL encoding the attribution log applies.
+    expect(JSON.parse(JSON.stringify(snapshot))).toEqual(snapshot);
+  });
+});
