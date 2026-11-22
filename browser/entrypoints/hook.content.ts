@@ -15,6 +15,7 @@ import {
   exportAttributionLog,
   flushAttribution,
   recordAttribution,
+  setAttributionMeetingLive,
   setAttributionPlatform,
 } from "../lib/attribution-recorder";
 import { trackSnapshot } from "../lib/track-provenance";
@@ -23,7 +24,7 @@ import { selectAdapter, type PlatformAdapter } from "../lib/identity/adapter";
 import { MeetMeetingIdWatcher } from "../lib/identity/meet-meeting-id";
 import { MeetMeetingTitleWatcher } from "../lib/identity/meet-meeting-title";
 import { startMeetSpeakingWatch } from "../lib/identity/meet-speaking-dom";
-import { isControlEnvelope, isMainEnvelope, postToIsolated, type Platform } from "../lib/protocol";
+import { isControlEnvelope, isMainEnvelope, postToIsolated, type MainMessage, type Platform } from "../lib/protocol";
 import { createBatcher, installConsoleTap } from "../lib/debug-log";
 import { perfTag, setPerfState } from "../lib/perf-main";
 import { parseZoomMeetingId } from "../lib/identity/zoom";
@@ -471,6 +472,14 @@ const MEETING_TITLE_WATCH_MS = 60_000;
  * the background turns into a compare-and-set `session.rename`. No name found
  * sends no title at all.
  */
+/** Post a meeting start or end, and tell the attribution recorder: batches
+ * sent before the daemon has a session are dropped, so it holds them until
+ * the meeting is declared. */
+function postMeetingEvent(msg: Extract<MainMessage, { kind: "meeting-started" | "meeting-ended" }>): void {
+  postToIsolated(msg);
+  setAttributionMeetingLive(msg.kind === "meeting-started");
+}
+
 function startMeetingWatch(platform: Platform, onMeetingId?: (id: string) => void): () => void {
   if (platform === "zoom") return startZoomMeetingWatch(onMeetingId);
   if (platform === "teams") return startTeamsMeetingWatch(onMeetingId);
@@ -500,7 +509,7 @@ function startMeetingWatch(platform: Platform, onMeetingId?: (id: string) => voi
     console.debug(`[ears][hook] Meet meeting id resolved: ${resolvedSpaceId}`);
     spaceId = resolvedSpaceId;
     onMeetingId?.(resolvedSpaceId);
-    postToIsolated({
+    postMeetingEvent({
       kind: "meeting-started",
       platform,
       externalMeetingId: resolvedSpaceId,
@@ -542,7 +551,7 @@ function startMeetingWatch(platform: Platform, onMeetingId?: (id: string) => voi
     clearInterval(interval);
     window.removeEventListener("message", onMessage);
     if (spaceId) {
-      postToIsolated({ kind: "meeting-ended", platform, externalMeetingId: spaceId });
+      postMeetingEvent({ kind: "meeting-ended", platform, externalMeetingId: spaceId });
     }
   };
 }
@@ -595,7 +604,7 @@ function startZoomMeetingWatch(onMeetingId?: (id: string) => void): () => void {
     declared = true;
     declaredAt = Date.now();
     onMeetingId?.(meetingId);
-    postToIsolated({
+    postMeetingEvent({
       kind: "meeting-started",
       platform: "zoom",
       externalMeetingId: meetingId,
@@ -626,7 +635,7 @@ function startZoomMeetingWatch(onMeetingId?: (id: string) => void): () => void {
   return () => {
     clearInterval(interval);
     if (declared) {
-      postToIsolated({ kind: "meeting-ended", platform: "zoom", externalMeetingId: meetingId });
+      postMeetingEvent({ kind: "meeting-ended", platform: "zoom", externalMeetingId: meetingId });
     }
   };
 }
@@ -675,7 +684,7 @@ function startDailyMeetingWatch(onMeetingId?: (id: string) => void): () => void 
     if (!declared && pcs > 0) {
       declared = true;
       onMeetingId?.(room);
-      postToIsolated({ kind: "meeting-started", platform: "daily", externalMeetingId: room });
+      postMeetingEvent({ kind: "meeting-started", platform: "daily", externalMeetingId: room });
       console.debug(`[ears][daily] meeting declared: ${room}`);
     }
     observeAudioCheck(check, pcs, "daily");
@@ -686,7 +695,7 @@ function startDailyMeetingWatch(onMeetingId?: (id: string) => void): () => void 
   return () => {
     clearInterval(interval);
     if (declared) {
-      postToIsolated({ kind: "meeting-ended", platform: "daily", externalMeetingId: room });
+      postMeetingEvent({ kind: "meeting-ended", platform: "daily", externalMeetingId: room });
     }
   };
 }
@@ -758,7 +767,7 @@ function startJitsiMeetingWatch(onMeetingId?: (id: string) => void): () => void 
           declared = room;
           declaredAt = Date.now();
           onMeetingId?.(room);
-          postToIsolated({
+          postMeetingEvent({
             kind: "meeting-started",
             platform: "jitsi",
             externalMeetingId: room,
@@ -779,7 +788,7 @@ function startJitsiMeetingWatch(onMeetingId?: (id: string) => void): () => void 
   return () => {
     clearInterval(interval);
     if (declared) {
-      postToIsolated({ kind: "meeting-ended", platform: "jitsi", externalMeetingId: declared });
+      postMeetingEvent({ kind: "meeting-ended", platform: "jitsi", externalMeetingId: declared });
     }
   };
 }
@@ -829,7 +838,7 @@ function startTeamsMeetingWatch(onMeetingId?: (id: string) => void): () => void 
     declared = threadId;
     declaredAt = Date.now();
     onMeetingId?.(threadId);
-    postToIsolated({
+    postMeetingEvent({
       kind: "meeting-started",
       platform: "teams",
       externalMeetingId: threadId,
@@ -873,7 +882,7 @@ function startTeamsMeetingWatch(onMeetingId?: (id: string) => void): () => void 
   return () => {
     if (interval !== null) clearInterval(interval);
     if (declared) {
-      postToIsolated({ kind: "meeting-ended", platform: "teams", externalMeetingId: declared });
+      postMeetingEvent({ kind: "meeting-ended", platform: "teams", externalMeetingId: declared });
     }
   };
 }
