@@ -55,4 +55,11 @@ Drives the probe against a synthetic Teams-shaped DOM: asserts the census finds 
 
 ## Zoom: checking the name selectors
 
-`identity/zoom-dom.ts` reads participant names and the meeting topic from class names that have not been confirmed on a live build. In a call, open DevTools on the Zoom tab, paste `zoom-names-probe.js`, and read the JSON it logs. Each selector lists one hash per match, plus the role suffix Zoom put on it (`host`, `host, me`), never the name. A selector with no matches and a `classes` census that shows the real name holder means the selector needs changing. Nothing is clicked; open the Participants panel by hand only to check `participantName` and the `(me)` marker.
+`identity/zoom-dom.ts` reads participant names and the meeting topic from class names. The tile names are confirmed live; the participants panel, pre-join field and topic selectors are not. In a call, open DevTools on the Zoom tab, paste `zoom-names-probe.js`, and read the JSON it logs. Each selector lists one hash per match, plus the role suffix Zoom put on it (`host`, `host, me`), never the name. A selector with no matches and a `classes` census that shows the real name holder means the selector needs changing. Nothing is clicked.
+
+To find what marks your own tile, run `copy(JSON.stringify(__earsZoom.snapshot("Your Name")))` twice: once with the Participants panel closed and once with it open. The name is compared, never printed. Read:
+
+- `self.ownOnly`: classes and attribute names on your tile's ancestry that no other tile has. A self-view class here is the tile signal `zoom-dom.ts` lacks.
+- `participantRows[].label` on the `own: true` row: `(Host, me)` or `Me` confirms the panel marker and its selector.
+- `preJoin`: whether the pre-join field exists in this frame. Run the probe once on the pre-join screen too.
+- `selfNames` and `selfText`: any class, id or attribute name that says "self", and any element whose text or aria-label carries `(me)`.
