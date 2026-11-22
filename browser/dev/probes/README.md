@@ -8,6 +8,7 @@ Every probe here obeys the same three rules. It polls and diffs rather than atta
 |---|---|
 | `meet-identity-probe.js` | Which streams belong in the transcript, and which tile is the local user (journal #142, #158) |
 | `teams-identity-probe.js` | Where Teams keeps participant identity, and whether a speaking signal exists in the DOM at all |
+| `zoom-names-probe.js` | Whether the selectors in `identity/zoom-dom.ts` match the live web client, and which classes hold the names if not |
 
 ## Teams: finding the speaker-name signal
 
@@ -51,3 +52,14 @@ node browser/dev/probes/teams-identity-probe.smoke.mjs      # add VERBOSE=1 to s
 ```
 
 Drives the probe against a synthetic Teams-shaped DOM: asserts the census finds the row key, that a speaking-class toggle reaches the change log, and — the part worth having a test for — that no display name, MRI, or meeting URL survives into the output.
+
+## Zoom: checking the name selectors
+
+`identity/zoom-dom.ts` reads participant names and the meeting topic from class names. The tile names are confirmed live; the participants panel, pre-join field and topic selectors are not. In a call, open DevTools on the Zoom tab, paste `zoom-names-probe.js`, and read the JSON it logs. Each selector lists one hash per match, plus the role suffix Zoom put on it (`host`, `host, me`), never the name. A selector with no matches and a `classes` census that shows the real name holder means the selector needs changing. Nothing is clicked.
+
+To find what marks your own tile, run `copy(JSON.stringify(__earsZoom.snapshot("Your Name")))` twice: once with the Participants panel closed and once with it open. The name is compared, never printed. Read:
+
+- `self.ownOnly`: classes and attribute names on your tile's ancestry that no other tile has. A self-view class here is the tile signal `zoom-dom.ts` lacks.
+- `participantRows[].label` on the `own: true` row: `(Host, me)` or `Me` confirms the panel marker and its selector.
+- `preJoin`: whether the pre-join field exists in this frame. Run the probe once on the pre-join screen too.
+- `selfNames` and `selfText`: any class, id or attribute name that says "self", and any element whose text or aria-label carries `(me)`.
