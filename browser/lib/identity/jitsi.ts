@@ -1,9 +1,11 @@
 import { registerAdapter, type PlatformAdapter, type PlatformParticipantId } from "./adapter";
 import type { RosterEntry } from "../protocol";
-import { colibriLocalEndpointId } from "./jitsi-colibri";
+import { livePeerConnections } from "../rtc-hook";
+import { colibriAudioOwner, colibriLocalEndpointId, setBridgeListener } from "./jitsi-colibri";
 
 // Jitsi Meet (meet.jit.si, 8x8.vc / JaaS). Read from lib-jitsi-meet and
-// jitsi-meet sources (2026-11-22). Not yet verified on a live call.
+// jitsi-meet sources, and checked on a live three-person meet.jit.si call
+// (2026-11-22, current lib-jitsi-meet production build).
 //
 // Media. A call opens a peer connection to the videobridge (JVB). With exactly
 // two people it also opens a direct P2P connection and moves media onto it,
@@ -14,32 +16,42 @@ import { colibriLocalEndpointId } from "./jitsi-colibri";
 // on Zoom. After a P2P↔bridge switch one person can own a track on each
 // connection; both identify to the same endpoint id, so they share a name.
 //
-// Identity is intrinsic to the track, Zoom-style. lib-jitsi-meet rewrites
-// every local MSID to `<endpointId>-<audio|video>-<index>-<pcId>`
-// (LocalSdpMunger; older builds omit `-<pcId>`). That MSID is signalled to the
-// other side unchanged, so the remote `MediaStream.id` names the sender's
-// endpoint id: the MUC resource every other surface (the tile DOM, the
-// participant list) keys participants by. No correlation, no guessing.
+// Two kinds of remote audio track, told apart by the stream id:
 //
-// Two stream ids carry no owner:
-//   - `mixedmslabel` is the bridge's own RTCP-only stream. It sends no audio,
-//     so the capture layer's wait-for-unmute keeps it from becoming a source.
-//   - `remote-audio-<n>` appears when the deployment turns on SSRC rewriting
-//     (`flags.ssrcRewritingEnabled`). The bridge then forwards audio over a
-//     pool of reused slots and announces each slot's current owner in
-//     `AudioSourcesMap` messages on its bridge channel. Neither meet.jit.si
-//     nor 8x8.vc enables it (their config.js, 2026-11-22), so this adapter
-//     does not read that channel: slot tracks are captured and stay
-//     anonymous, with one log line saying why.
+//   - `<endpointId>-audio-<index>[-<pcId>]`: the sender's own MSID, rewritten
+//     by its LocalSdpMunger and signalled unchanged. The endpoint id is the MUC
+//     resource every other surface (the tile DOM, the participant list) keys
+//     participants by, so the track names its sender. The P2P connection
+//     always looks like this, and so does the bridge when SSRC rewriting is
+//     off.
+//   - `remote-audio-<n>`: an SSRC-rewriting slot. meet.jit.si has rewriting
+//     on (live call: three people gave `remote-audio-1..3`, with matching
+//     `remoteAudio_remote-audio-<n>` elements). The bridge forwards audio over
+//     a pool of reused slots, and the slot's owner is in no id. It is resolved
+//     in two steps: slot → SSRC from the bridge connection's remote SDP
+//     (`a=ssrc:<ssrc> msid:remote-audio-<n> …`; getSynchronizationSources()
+//     returned nothing for these), then SSRC → endpoint id from the bridge
+//     channel's `AudioSourcesMap` (jitsi-colibri.ts). The bridge reuses slots,
+//     so an owner can change: an unresolved slot is named when its owner
+//     arrives (`onIdentity`), and a slot whose owner changes is reported with
+//     `onTrackReassigned`, so the capture layer starts a new source for the
+//     new owner and each source stays one person.
+//
+// `mixedmslabel` is the bridge's own RTCP-only stream. It sends no audio, so
+// the capture layer's wait-for-unmute keeps it from becoming a source.
 //
 // Names come from the filmstrip tiles (`#participant_<endpointId>_name`), the
 // same DOM the user sees. Jitsi's Redux store (`APP.store`) holds them too, but
 // reading a private store is ruled out by the extension spec (MUST-NOT #6).
 //
 // You. The munged MSID is only in the SDP lib-jitsi-meet signals, never on our
-// own peer connection, so the local endpoint id comes from the bridge
-// channel's URL instead (jitsi-colibri.ts). The local tile carries no endpoint
-// id in the DOM; its name label is `#localDisplayName`, shown as `<name> (me)`.
+// own peer connection, and no DOM attribute carries the local endpoint id
+// (live call). It comes from the bridge channel instead (jitsi-colibri.ts): a
+// `SenderSourceConstraints` message for our video source, or the colibri-ws
+// URL where the channel is a socket. With the camera off on a data-channel
+// deployment there may be no local id, and then nothing is flagged local. The
+// local tile's name label is `#localDisplayName`, shown as `<name> (me)`. A
+// slot or a remote track never binds to the local id.
 
 /** Hosted Jitsi deployments handled out of the box. Self-hosted instances go
  * through the popup's "Enable hooks on this site" and report as `web`. */
@@ -117,6 +129,82 @@ export function parseJitsiEndpointId(streamId: string | null | undefined): Platf
 export function isJitsiSlotStream(streamId: string | null | undefined): boolean {
   return !!streamId && SLOT_MSID_RE.test(streamId);
 }
+
+const SSRC_MSID_LINE_RE = /^a=ssrc:(\d+) msid:(\S+)/;
+const MEDIA_MSID_LINE_RE = /^a=msid:(\S+)/;
+const SSRC_LINE_RE = /^a=ssrc:(\d+) /;
+
+/**
+ * Slot stream id (`remote-audio-<n>`) → SSRC, from a remote SDP. Reads the
+ * `a=ssrc:<ssrc> msid:<slot> …` lines the bridge sends (live meet.jit.si,
+ * 2026-11-22). A media section that names its slot only in `a=msid:` counts
+ * when it has exactly one SSRC. Read-only: the SDP is never changed.
+ */
+export function parseJitsiSlotSsrcs(sdp: string): Map<string, number> {
+  const out = new Map<string, number>();
+  let sectionMsid: string | null = null;
+  let sectionSsrcs = new Set<number>();
+  const endSection = (): void => {
+    if (sectionMsid && SLOT_MSID_RE.test(sectionMsid) && !out.has(sectionMsid) && sectionSsrcs.size === 1) {
+      out.set(sectionMsid, [...sectionSsrcs][0]!);
+    }
+    sectionMsid = null;
+    sectionSsrcs = new Set();
+  };
+  for (const line of sdp.split(/\r?\n/)) {
+    if (line.startsWith("m=")) {
+      endSection();
+      continue;
+    }
+    const ssrcMsid = line.match(SSRC_MSID_LINE_RE);
+    if (ssrcMsid) {
+      const ssrc = Number(ssrcMsid[1]);
+      const msid = ssrcMsid[2]!;
+      if (SLOT_MSID_RE.test(msid) && ssrc <= 0xffffffff) out.set(msid, ssrc);
+    }
+    const ssrc = line.match(SSRC_LINE_RE);
+    if (ssrc) sectionSsrcs.add(Number(ssrc[1]));
+    const media = line.match(MEDIA_MSID_LINE_RE);
+    if (media) sectionMsid = media[1]!;
+  }
+  endSection();
+  return out;
+}
+
+/** What the adapter reads from the bridge (jitsi-colibri.ts) and the bridge
+ * connection. Injected so tests can drive it. */
+export interface JitsiBridgeView {
+  /** Remote SDPs of the page's live peer connections. */
+  remoteSdps(): string[];
+  /** The endpoint the bridge last named as sending on `ssrc`. */
+  audioOwner(ssrc: number): string | null;
+  /** Be told when a slot owner or the local id changes (latest wins). */
+  listen(cb: () => void): void;
+  /** Stop being told, if `cb` is still the registered listener. */
+  unlisten(cb: () => void): void;
+}
+
+const liveBridge: JitsiBridgeView = {
+  remoteSdps() {
+    const out: string[] = [];
+    try {
+      for (const pc of livePeerConnections()) {
+        const sdp = pc.remoteDescription?.sdp;
+        if (sdp) out.push(sdp);
+      }
+    } catch {
+      // no page realm (tests) or a closed connection: no SDP
+    }
+    return out;
+  },
+  audioOwner: colibriAudioOwner,
+  listen: (cb) => setBridgeListener(cb),
+  unlisten: (cb) => setBridgeListener(null, cb),
+};
+
+/** Slot tracks remembered at most (a slot track lives for the bridge session;
+ * the pool is a handful). */
+const MAX_SLOT_TRACKS = 64;
 
 /** Names Jitsi shows for a participant who never set one. Lower-case. */
 const PLACEHOLDER_NAMES = new Set(["fellow jitster", "me", ""]);
@@ -218,18 +306,28 @@ export class JitsiAdapter implements PlatformAdapter {
   readonly platform = "jitsi" as const;
   private readonly names = new Map<string, string>();
   private rosterCb: ((entries: RosterEntry[]) => void) | null = null;
+  private identityCb: ((trackId: string, id: PlatformParticipantId) => void) | null = null;
+  private reassignCb: ((trackId: string) => void) | null = null;
+  /** Slot tracks seen by identify(): track id → slot and the owner it is
+   * currently identified as (null while unknown). Insertion-ordered, capped. */
+  private readonly slotTracks = new Map<string, { slot: string; bound: string | null }>();
+  private slotSsrcCache: { sdps: string[]; map: Map<string, number> } | null = null;
   private warnedSlots = false;
   private warnedLocal = false;
+  private warnedLocalSlot = false;
   /** The endpoint id last reported with `isLocal`. */
   private reportedLocal: string | null = null;
   private disposed = false;
+  private readonly onBridgeChange = (): void => this.checkSlots();
 
   constructor(
     private readonly dom: () => JitsiRosterDom | null = () => globalThis.document ?? null,
     private readonly localEndpoint: () => string | null = colibriLocalEndpointId,
+    private readonly bridge: JitsiBridgeView = liveBridge,
   ) {}
 
-  identify(_track: MediaStreamTrack, stream: MediaStream): PlatformParticipantId | null {
+  identify(track: MediaStreamTrack, stream: MediaStream): PlatformParticipantId | null {
+    if (isJitsiSlotStream(stream.id)) return this.identifySlot(track.id, stream.id);
     const id = parseJitsiEndpointId(stream.id);
     if (id !== null && id === this.localEndpoint()) {
       // Your own audio never comes back from the bridge, so this stream id was
@@ -240,14 +338,92 @@ export class JitsiAdapter implements PlatformAdapter {
       }
       return null;
     }
-    if (!id && isJitsiSlotStream(stream.id) && !this.warnedSlots) {
+    return id;
+  }
+
+  onIdentity(cb: (trackId: string, id: PlatformParticipantId) => void): void {
+    this.identityCb = cb;
+    this.listenToBridge();
+  }
+
+  onTrackReassigned(cb: (trackId: string) => void): void {
+    this.reassignCb = cb;
+    this.listenToBridge();
+  }
+
+  private listenToBridge(): void {
+    if (this.disposed) return;
+    try {
+      this.bridge.listen(this.onBridgeChange);
+    } catch {
+      // no page realm: the 3 s poll still checks the slots
+    }
+  }
+
+  /** A slot track at admission (or again after a reassignment): name it after
+   * its current owner when the bridge has said who that is. */
+  private identifySlot(trackId: string, slot: string): PlatformParticipantId | null {
+    const owner = this.slotOwner(slot);
+    this.slotTracks.delete(trackId);
+    this.slotTracks.set(trackId, { slot, bound: owner });
+    while (this.slotTracks.size > MAX_SLOT_TRACKS) this.slotTracks.delete(this.slotTracks.keys().next().value!);
+    if (!owner && !this.warnedSlots) {
       this.warnedSlots = true;
       console.debug(
-        "[ears][jitsi] this deployment forwards audio over SSRC-rewriting slots (remote-audio-<n>) — " +
-          "audio is captured, but sources stay anonymous: the slot's owner is only on the bridge channel",
+        `[ears][jitsi] SSRC-rewriting slot ${slot}: owner not known yet — ` +
+          "named once the bridge channel's AudioSourcesMap and the bridge SDP both cover it",
       );
     }
-    return id;
+    return owner;
+  }
+
+  /** The endpoint now sending on a slot: slot → SSRC (bridge SDP) → owner
+   * (AudioSourcesMap). Never the local endpoint. */
+  private slotOwner(slot: string): string | null {
+    const ssrc = this.slotSsrcs().get(slot);
+    if (ssrc === undefined) return null;
+    const owner = this.bridge.audioOwner(ssrc);
+    if (!owner) return null;
+    if (owner === this.localEndpoint()) {
+      if (!this.warnedLocalSlot) {
+        this.warnedLocalSlot = true;
+        console.debug(`[ears][jitsi] slot ${slot} maps to the local endpoint — left as it was`);
+      }
+      return null;
+    }
+    return owner;
+  }
+
+  private slotSsrcs(): Map<string, number> {
+    const sdps = this.bridge.remoteSdps();
+    const cached = this.slotSsrcCache;
+    if (cached && cached.sdps.length === sdps.length && cached.sdps.every((s, i) => s === sdps[i])) return cached.map;
+    const map = new Map<string, number>();
+    for (const sdp of sdps) for (const [slot, ssrc] of parseJitsiSlotSsrcs(sdp)) if (!map.has(slot)) map.set(slot, ssrc);
+    this.slotSsrcCache = { sdps: [...sdps], map };
+    return map;
+  }
+
+  /** Compare every known slot track with its slot's current owner: name a
+   * slot that was anonymous, and report one whose owner changed. Runs when
+   * the bridge channel changes something and on every poll (the SDP can
+   * arrive after the map). */
+  private checkSlots(): void {
+    if (this.disposed) return;
+    // A snapshot: a reassignment re-enters identify(), which re-inserts the entry.
+    for (const [trackId, entry] of [...this.slotTracks]) {
+      const owner = this.slotOwner(entry.slot);
+      if (!owner || owner === entry.bound) continue;
+      const previous = entry.bound;
+      entry.bound = owner;
+      if (previous === null) {
+        console.debug(`[ears][jitsi] slot ${entry.slot} (track ${trackId}) → ${owner}`);
+        this.identityCb?.(trackId, owner);
+      } else {
+        console.debug(`[ears][jitsi] slot ${entry.slot} (track ${trackId}) changed owner: ${previous} → ${owner}`);
+        this.reassignCb?.(trackId);
+      }
+    }
   }
 
   displayName(id: PlatformParticipantId): string | undefined {
@@ -261,6 +437,7 @@ export class JitsiAdapter implements PlatformAdapter {
 
   pollIdentities(): void {
     if (this.disposed) return;
+    this.checkSlots(); // the bridge SDP can name a slot after its map arrived
     const dom = this.dom();
     if (!dom) return;
     const local = this.localEndpoint();
@@ -286,6 +463,13 @@ export class JitsiAdapter implements PlatformAdapter {
   dispose(): void {
     this.disposed = true;
     this.rosterCb = null;
+    this.identityCb = null;
+    this.reassignCb = null;
+    try {
+      this.bridge.unlisten(this.onBridgeChange);
+    } catch {
+      // nothing registered
+    }
   }
 }
 

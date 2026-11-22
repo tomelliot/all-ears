@@ -55,6 +55,10 @@ export function setUpGlobals(host: string, nativeCreateEncodedStreams?: (...a: u
   delete g.__earsTrackProvenance;
   delete g.__earsTrackProvenanceSeq;
   delete g.__earsWebAudioTracks;
+  delete g.__earsJvbChannelWatch;
+  delete g.__earsJitsiLocalEndpoint;
+  delete g.__earsJitsiAudioOwners;
+  delete g.__earsJitsiBridgeListener;
   g.window = globalThis;
   g.location = { host };
 

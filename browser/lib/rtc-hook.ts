@@ -7,6 +7,7 @@ import {
   summarizeFields,
   type CollectionsMuteEvent,
 } from "./identity/meet-collections";
+import { JVB_DATA_CHANNEL_LABEL, observeBridgeDataChannel } from "./identity/jitsi-colibri";
 import {
   installProvenanceWraps,
   registerTrackProvenance,
@@ -40,7 +41,9 @@ import {
 //
 // We never enumerate getReceivers()/getTransceivers() (breaks when Zoom wraps
 // tracks) and never touch transceiver.direction or SDP (the crash class). The
-// hook is a passive listener on the `track` event plus an ontrack-setter wrap.
+// hook is a passive listener on the `track` event plus an ontrack-setter wrap;
+// on Jitsi pages also a pass-through createDataChannel wrap (§Jitsi bridge
+// datachannel below).
 
 export type TrackSink = (track: MediaStreamTrack, stream: MediaStream) => void;
 
@@ -131,6 +134,7 @@ function onPeerConnection(pc: RTCPeerConnection): void {
   pc.addEventListener("track", dispatchTrack);
   registerPeerConnection(pc);
   if (location.host === "meet.google.com") installMeetCollectionsTracer(pc);
+  if ((window as unknown as JvbWatchWindow).__earsJvbChannelWatch) observeJvbDataChannels(pc);
 
   // Also wrap the ontrack *setter* so a page handler assigned after us can't
   // shadow the hook. We call our dispatch first, then the page's handler.
@@ -288,6 +292,53 @@ function installMeetCollectionsTracer(pc: RTCPeerConnection): void {
   pc.addEventListener("datachannel", (ev: RTCDataChannelEvent) => {
     if (ev.channel.label === "collections") attachCollectionsLogger(ev.channel);
     else if (ev.channel.label === "audioprocessor") maybeAttachAudioprocessorTee(ev.channel);
+  });
+}
+
+// ── Jitsi bridge datachannel (identity, passive) ───────────────────────────
+//
+// On meet.jit.si the videobridge's Colibri channel is an RTCDataChannel
+// labelled `JVB data channel` on the bridge peer connection, not a WebSocket
+// (live call, 2026-11-22). Its messages name the local endpoint and the owner
+// of each SSRC-rewriting audio slot; identity/jitsi-colibri.ts parses them.
+// lib-jitsi-meet may open the channel itself (`createDataChannel`) or receive
+// it from the bridge (`datachannel` event), so both are watched. The
+// `createDataChannel` wrap is per connection, like the `ontrack` one: it calls
+// the native method with the same arguments and returns its channel
+// untouched. Observation is one added `message` listener — nothing is
+// consumed, altered or re-dispatched. Enabled by hook.content.ts on `jitsi`
+// and `web` pages, before any page script constructs a connection.
+
+interface JvbWatchWindow {
+  __earsJvbChannelWatch?: boolean;
+}
+
+/** Watch every peer connection constructed from now on for the Jitsi bridge
+ * channel. Idempotent; call at document_start, right after installHook. */
+export function watchJvbDataChannels(): void {
+  (window as unknown as JvbWatchWindow).__earsJvbChannelWatch = true;
+}
+
+function maybeObserveJvbChannel(channel: RTCDataChannel | null | undefined): void {
+  try {
+    if (channel?.label === JVB_DATA_CHANNEL_LABEL) observeBridgeDataChannel(channel);
+  } catch {
+    // identity is best-effort; it never affects the page's channel
+  }
+}
+
+function observeJvbDataChannels(pc: RTCPeerConnection): void {
+  pc.addEventListener("datachannel", (ev: RTCDataChannelEvent) => maybeObserveJvbChannel(ev.channel));
+  const native = (pc as { createDataChannel?: RTCPeerConnection["createDataChannel"] }).createDataChannel;
+  if (typeof native !== "function") return;
+  Object.defineProperty(pc, "createDataChannel", {
+    configurable: true,
+    writable: true,
+    value: function createDataChannel(this: RTCPeerConnection, ...args: Parameters<RTCPeerConnection["createDataChannel"]>) {
+      const channel = native.apply(this, args);
+      maybeObserveJvbChannel(channel);
+      return channel;
+    },
   });
 }
 

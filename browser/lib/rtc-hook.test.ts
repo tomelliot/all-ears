@@ -1,8 +1,9 @@
 import { gzipSync } from "node:zlib";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { formatChannelSummary, installHook, setCollectionsListener } from "./rtc-hook";
+import { formatChannelSummary, installHook, setCollectionsListener, watchJvbDataChannels } from "./rtc-hook";
 import { setUpGlobals } from "./rtc-test-helpers";
 import type { CollectionsMuteEvent } from "./identity/meet-collections";
+import { colibriAudioOwner } from "./identity/jitsi-colibri";
 
 // Node has global ReadableStream/WritableStream (18+); no DOM needed. We fake
 // just enough of the browser surface (window === globalThis, location,
@@ -166,5 +167,69 @@ describe("formatChannelSummary (audioprocessor tee)", () => {
 
   it("marks an unsniffed window", () => {
     expect(formatChannelSummary([], null)).toBe("0 msgs sizes{} fields=unsniffed");
+  });
+});
+
+// ── Jitsi bridge datachannel ────────────────────────────────────────────────
+
+describe("Jitsi bridge datachannel (rtc-hook.ts)", () => {
+  const MAP =
+    '{"colibriClass":"AudioSourcesMap","mappedSources":[{"source":"85b964a6-a0","owner":"85b964a6","ssrc":391968325}]}';
+
+  type FakePc = {
+    dispatch(type: string, ev: unknown): void;
+    createDataChannel(label: string, init?: unknown): FakeDataChannel;
+  };
+
+  function connect(opts: { watch: boolean }): { pc: FakePc; created: Array<{ label: string; init: unknown }> } {
+    setUpGlobals("meet.jit.si");
+    const created: Array<{ label: string; init: unknown }> = [];
+    const Native = (globalThis as unknown as { RTCPeerConnection: { prototype: Record<string, unknown> } })
+      .RTCPeerConnection;
+    Native.prototype.createDataChannel = function (label: string, init?: unknown) {
+      created.push({ label, init });
+      return fakeDataChannel(label);
+    };
+    installHook();
+    if (opts.watch) watchJvbDataChannels();
+    const Ctor = (globalThis as unknown as { RTCPeerConnection: new () => FakePc }).RTCPeerConnection;
+    return { pc: new Ctor(), created };
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+  });
+
+  it("observes a JVB data channel the bridge opens (datachannel event)", () => {
+    const { pc } = connect({ watch: true });
+    const channel = fakeDataChannel("JVB data channel");
+    pc.dispatch("datachannel", { channel });
+    channel.dispatch("message", { data: MAP });
+    expect(colibriAudioOwner(391968325)).toBe("85b964a6");
+  });
+
+  it("observes a JVB data channel the page creates, and hands back the native channel untouched", () => {
+    const { pc, created } = connect({ watch: true });
+    const init = { protocol: "http://jitsi.org/protocols/colibri" };
+    const channel = pc.createDataChannel("JVB data channel", init);
+    expect(created).toEqual([{ label: "JVB data channel", init }]);
+    expect(channel.label).toBe("JVB data channel");
+    channel.dispatch("message", { data: MAP });
+    expect(colibriAudioOwner(391968325)).toBe("85b964a6");
+  });
+
+  it("ignores other channels, and every connection when the watch is off", () => {
+    const watched = connect({ watch: true });
+    watched.pc.createDataChannel("something else").dispatch("message", { data: MAP });
+    expect(colibriAudioOwner(391968325)).toBeNull();
+
+    const unwatched = connect({ watch: false });
+    const jvb = fakeDataChannel("JVB data channel");
+    unwatched.pc.dispatch("datachannel", { channel: jvb });
+    jvb.dispatch("message", { data: MAP });
+    unwatched.pc.createDataChannel("JVB data channel").dispatch("message", { data: MAP });
+    expect(colibriAudioOwner(391968325)).toBeNull();
+    expect(Object.prototype.hasOwnProperty.call(unwatched.pc, "createDataChannel")).toBe(false);
   });
 });

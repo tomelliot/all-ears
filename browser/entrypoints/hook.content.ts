@@ -6,6 +6,7 @@ import {
   livePeerConnections,
   liveTracks,
   onRemoteAudioStream,
+  watchJvbDataChannels,
 } from "../lib/rtc-hook";
 import { setMeetGraphSinks, stopMeetGraphProbe } from "../lib/meet-webaudio-probe";
 import { initCapture, captureDebugState, __devCaptureStream } from "../lib/audio-tap";
@@ -110,11 +111,16 @@ export default defineContentScript({
     // from the popup) that turns out to be Jitsi becomes `jitsi` — see
     // watchForJitsi below and identity/jitsi-detect.ts.
     let platform = platformForHost(host, adapter);
-    // Jitsi's local endpoint id rides the bridge channel's socket URL
-    // (identity/jitsi-colibri.ts). Installed here, at document_start, on any
-    // page that is or may become Jitsi — a `web` page is upgraded later, and
-    // the socket may open before that.
-    if (platform === "jitsi" || platform === "web") installColibriSocketWatch();
+    // Jitsi's local endpoint id and slot owners ride the bridge channel: an
+    // RTCDataChannel on meet.jit.si, a WebSocket on deployments configured for
+    // one (identity/jitsi-colibri.ts). Both watches are installed here, at
+    // document_start, on any page that is or may become Jitsi — a `web` page
+    // is upgraded later, and the channel opens (with the initial slot map)
+    // before that.
+    if (platform === "jitsi" || platform === "web") {
+      installColibriSocketWatch();
+      watchJvbDataChannels();
+    }
     if (!adapter) console.warn(`[ears][hook] no identity adapter for ${host} — using speaker-<n>`);
     // The adapter for the current platform. A detected Jitsi page has no
     // hostname match in the registry, so it is built directly.
