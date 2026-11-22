@@ -725,4 +725,52 @@ describe("CaptureOrchestrator reconcile sweep and handles (fakes)", () => {
     expect(h.ofKind("participant-left")).toHaveLength(0); // no restart, ever
     expect(h.frameSources.get("r1")?.stopped).toBe(false);
   });
+
+  it("a reassigned track (reused Jitsi slot) ends its source and continues the same pipeline under a fresh handle", () => {
+    let reassign: ((trackId: string) => void) | undefined;
+    let owner = "aaaa0001";
+    const h = makeHarness({
+      platform: "jitsi",
+      adapter: {
+        identify: () => owner,
+        onTrackReassigned: (cb) => {
+          reassign = cb;
+        },
+        displayName: (id: string) => ({ aaaa0001: "Ada", bbbb0002: "Bea" })[id],
+      },
+    });
+    const track = new FakeSeamTrack("remote-audio-1");
+    h.registerLive(track);
+    h.init();
+    const first = (h.ofKind("participant-joined")[0]!.participant as { id: string }).id;
+    h.pushFrame("remote-audio-1");
+    expect(h.ofKind("pcm").at(-1)).toMatchObject({ participantId: first });
+
+    owner = "bbbb0002";
+    reassign!("remote-audio-1");
+
+    const joined = h.ofKind("participant-joined");
+    expect(joined).toHaveLength(2);
+    const second = (joined[1]!.participant as { id: string }).id;
+    expect(second).not.toBe(first);
+    expect(joined[1]!.generation).toBe(1);
+    expect(h.ofKind("participant-left")).toMatchObject([{ participantId: first, generation: 1 }]);
+    expect(h.ofKind("participant-identified")).toMatchObject([
+      { participantId: "aaaa0001", captureId: first, displayName: "Ada" },
+      { participantId: "bbbb0002", captureId: second, displayName: "Bea" },
+    ]);
+    // Same pipeline, same frame source: a track allows one processor ever.
+    expect(h.frameSources.get("remote-audio-1")?.stopped).toBe(false);
+    const before = h.ofKind("pcm").length;
+    h.pushFrame("remote-audio-1");
+    const after = h.ofKind("pcm").slice(before);
+    expect(after.length).toBeGreaterThan(0);
+    expect(after.every((m) => m.participantId === second)).toBe(true);
+    expect(after[0]).toMatchObject({ seq: 1 }); // a new source counts from the start
+
+    // The sweep keeps the new handle; an unknown track id is ignored.
+    h.orchestrator.reconcile();
+    reassign!("no-such-track");
+    expect(h.ofKind("participant-joined")).toHaveLength(2);
+  });
 });

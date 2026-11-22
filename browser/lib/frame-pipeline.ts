@@ -349,7 +349,7 @@ export class TrackCapture {
   private seq = 0;
 
   constructor(
-    private readonly participantId: string,
+    private participantId: string,
     private readonly currentGeneration: () => number,
     private readonly makeSource: FrameSourceFactory,
     private readonly onFatal: () => void,
@@ -396,6 +396,31 @@ export class TrackCapture {
     // #171), and arming those would fire spurious SILENT warnings for phantom
     // clones.
     if (seamUsesReceiverTracks(this.seam) && !this.track.muted) this.unmuteHandler();
+  }
+
+  /**
+   * Emit from now on under another source handle, without touching the frame
+   * source. For a track whose sender changed mid-life (a reused Jitsi slot):
+   * the old source ends and a new one starts, and a track's processor cannot
+   * be rebuilt, so the live one is kept. An open speaking edge is closed on
+   * the old source, so each source's onsets pair up; the frame counter
+   * restarts, as it would for any new source.
+   */
+  retarget(participantId: string): void {
+    if (this.stopped || participantId === this.participantId) return;
+    if (this.speaking) {
+      this.speaking = false;
+      this.hooks.record({
+        type: "audio-onset",
+        t: this.hooks.now(),
+        participantId: this.participantId,
+        trackId: this.trackId,
+        state: "stop",
+        framePeak: 0,
+      });
+    }
+    this.participantId = participantId;
+    this.seq = 0;
   }
 
   stop(): void {

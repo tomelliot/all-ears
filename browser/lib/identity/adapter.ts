@@ -56,6 +56,16 @@ export interface PlatformAdapter {
    */
   onIdentity?(cb: (trackId: string, id: PlatformParticipantId) => void): void;
   /**
+   * Optional: register a callback for a captured track that now carries a
+   * different person than the one it was identified as — a Jitsi
+   * SSRC-rewriting slot the bridge gave to a new sender. A source binds one
+   * person (the daemon's RosterReconciler keeps the first claim on a source),
+   * so audio-tap.ts ends the track's current source and continues the same
+   * live pipeline under a fresh handle, then calls `identify()` again to name
+   * the new sender. Same best-effort contract as onTrackSpeaking.
+   */
+  onTrackReassigned?(cb: (trackId: string) => void): void;
+  /**
    * Optional: register a callback for batches of resolved participant identities
    * (id → display name) read from the platform's own roster/UI, independent of
    * whether each id has been tied to a captured track. audio-tap.ts forwards

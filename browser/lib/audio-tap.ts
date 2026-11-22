@@ -77,6 +77,8 @@ interface Pipeline {
   generation: number;
   origin: PipelineOrigin;
   stop(): void;
+  /** Emit under another handle from now on (see reassignTrack). */
+  retarget(participantId: string): void;
   /** Whether this pipeline has decoded at least one audio frame (debug report). */
   receiving(): boolean;
 }
@@ -162,7 +164,9 @@ export class CaptureOrchestrator {
   private readonly adoptedSeamTracks = new Map<string, MediaStreamTrack>();
   private readonly generations = new Map<string, number>(); // capture handle → segment counter
   // Source handles: one short opaque slug (`t<n>`) per admitted track, minted at
-  // first admission and NEVER changed for the track's life (R3). The earsd
+  // first admission and never changed for the track's life (R3), except when
+  // the adapter reports the track now carries another person (a reassigned
+  // Jitsi slot — see reassignTrack): then a fresh handle replaces it. The earsd
   // source id is `browser:<platform>:<slug>` — a handle on a captured track,
   // carrying no identity guess. Whose voice a source carries lives exclusively
   // in the attendee/speaker layer (participant-identified upserts, and the
@@ -283,6 +287,7 @@ export class CaptureOrchestrator {
 
     this.deps.setTrackSink(this.sink);
     config.adapter?.onIdentity?.((trackId, id) => this.handleIdentity(trackId, id));
+    config.adapter?.onTrackReassigned?.((trackId) => this.reassignTrack(trackId));
     // Forward roster names (id → display name) the adapter resolves to the daemon,
     // decoupled from track capture, so a participant's name reaches session.toml
     // even when the speaking-onset correlation never tied them to a track (#23).
@@ -652,6 +657,9 @@ export class CaptureOrchestrator {
       stop() {
         capture.stop();
       },
+      retarget(participantId) {
+        capture.retarget(participantId);
+      },
       receiving: () => capture.receiving,
     };
     this.pipelines.set(track, pipeline);
@@ -681,11 +689,11 @@ export class CaptureOrchestrator {
     track.addEventListener("ended", end);
     track.addEventListener("mute", () => {
       this.deps.record({ type: "track-muted", t: this.deps.now(), trackId: track.id });
-      console.debug(`[ears][capture] mute → ${participant.id}`);
+      console.debug(`[ears][capture] mute → ${pipeline.participant.id}`);
     });
     track.addEventListener("unmute", () => {
       this.deps.record({ type: "track-unmuted", t: this.deps.now(), trackId: track.id });
-      console.debug(`[ears][capture] unmute → ${participant.id}`);
+      console.debug(`[ears][capture] unmute → ${pipeline.participant.id}`);
       // Meet identity: an unmute pairs with the collections channel's per-device
       // mic-open edge (the only per-device event that channel still carries).
       try {
@@ -694,6 +702,58 @@ export class CaptureOrchestrator {
         // best-effort — identity must never affect capture
       }
     });
+  }
+
+  /**
+   * The adapter says a captured track now carries a different person (a
+   * Jitsi SSRC-rewriting slot the bridge reassigned). A source binds one
+   * person — the daemon keeps the first identity claimed on a source
+   * (RosterReconciler invariant 3) and has no time-bounded re-link — so the
+   * track's current source ends and a fresh handle takes over. The pipeline
+   * itself keeps running: a track allows one MediaStreamTrackProcessor ever
+   * (frame-pipeline.ts), so it is retargeted, not rebuilt, and no audio is
+   * dropped. The daemon sees the ordinary `participant-left` /
+   * `participant-joined` pair, then `identify()` names the new sender.
+   * Receiver-seam tracks only: only they carry the RTC context identify needs.
+   */
+  private reassignTrack(trackId: string): void {
+    if (!this.cfg || !this.deps.isCurrentEpoch(this.cfg.epoch)) return;
+    let track: MediaStreamTrack | undefined;
+    let pipeline: Pipeline | undefined;
+    for (const [t, p] of this.pipelines) {
+      if (t.id !== trackId) continue;
+      track = t;
+      pipeline = p;
+      break;
+    }
+    const rtc = pipeline?.origin.rtc;
+    if (!track || !pipeline || !rtc || !seamUsesReceiverTracks(pipeline.origin.seam)) return;
+    const previous = pipeline.participant;
+    this.deps.post({ kind: "participant-left", participantId: previous.id, generation: pipeline.generation });
+
+    this.trackHandleCounter += 1;
+    const participant = syntheticParticipant(`t${this.trackHandleCounter}`);
+    this.trackHandles.set(pipeline.origin.sourceTrackId ?? track.id, participant);
+    this.participantsByTrackId.set(track.id, participant);
+    const generation = (this.generations.get(participant.id) ?? 0) + 1;
+    this.generations.set(participant.id, generation);
+    pipeline.participant = participant;
+    pipeline.generation = generation;
+    pipeline.retarget(participant.id);
+
+    this.deps.record({
+      type: "admitted",
+      t: this.deps.now(),
+      trackId: track.id,
+      seam: pipeline.origin.seam,
+      participantId: participant.id,
+      participantOrigin: participant.kind,
+      generation,
+    });
+    this.deps.post({ kind: "participant-joined", platform: this.cfg.platform, participant, generation });
+    console.debug(`[ears][capture] track ${track.id} reassigned: source ${previous.id} → ${participant.id}`);
+    const platformId = this.cfg.adapter?.identify(track, rtc.stream) ?? null;
+    if (platformId) this.postIdentity(track.id, participant.id, platformId);
   }
 
   private stopPipeline(track: MediaStreamTrack): void {
