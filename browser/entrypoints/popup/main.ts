@@ -61,8 +61,9 @@ async function loadSiteHooks(): Promise<void> {
       target: { tabId: tab.id },
       func: () => ({
         frames: [...document.querySelectorAll("iframe")].map((f) => f.src),
-        scripts: [...document.scripts].map((s) => s.src).filter(Boolean),
-        resources: performance.getEntriesByType("resource").map((e) => e.name),
+        // Capped like the hook's own detector (JITSI_MAX_SCRIPTS / _RESOURCE_ENTRIES).
+        scripts: Array.from(document.scripts, (s) => s.src).filter(Boolean).slice(0, 300),
+        resources: performance.getEntriesByType("resource").slice(0, 3000).map((e) => e.name),
       }),
     });
     const r = res?.result as { frames?: unknown; scripts?: unknown; resources?: unknown } | undefined;

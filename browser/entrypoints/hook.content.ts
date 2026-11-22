@@ -1,6 +1,12 @@
 import { defineContentScript } from "#imports";
 import { claimEpoch } from "../lib/epoch";
-import { installHook, hookDebugState, livePeerConnections, liveTracks } from "../lib/rtc-hook";
+import {
+  installHook,
+  hookDebugState,
+  livePeerConnections,
+  liveTracks,
+  onRemoteAudioStream,
+} from "../lib/rtc-hook";
 import { setMeetGraphSinks, stopMeetGraphProbe } from "../lib/meet-webaudio-probe";
 import { initCapture, captureDebugState, __devCaptureStream } from "../lib/audio-tap";
 import {
@@ -30,7 +36,12 @@ import "../lib/identity/daily";
 import { DailyAudioCheck, parseDailyRoom } from "../lib/identity/daily";
 import "../lib/identity/jitsi";
 import { JitsiAdapter, JitsiMeetingTitleWatcher, parseJitsiRoom } from "../lib/identity/jitsi";
-import { describeJitsiSignal, detectJitsi, type JitsiSignal } from "../lib/identity/jitsi-detect";
+import {
+  JitsiDetector,
+  describeJitsiSignal,
+  hasJitsiMeetJSGlobal,
+  type JitsiSignal,
+} from "../lib/identity/jitsi-detect";
 import { platformForHost } from "../lib/site-hooks";
 
 // MAIN-world hook. Registered as a content script so the browser runs it at
@@ -270,44 +281,101 @@ export default defineContentScript({
   },
 });
 
-const JITSI_DETECT_MS = 1000;
+/** How long after `load` the network signal is watched; scripts and the
+ * library global are there from page load, so this only waits for a late
+ * join request. The audio signal is event-driven and needs no deadline. */
+const JITSI_NETWORK_WATCH_MS = 120_000;
 
 /**
- * Poll a `web` page for Jitsi's fingerprint until it shows one. Runs only on
- * sites the user enabled from the popup, and stops at the first signal. The
- * checks are cheap: the page's script list, resource-timing entries since the
- * last tick, and the hook's own live-track registry.
+ * Watch a `web` page for Jitsi's fingerprint (identity/jitsi-detect.ts) without
+ * ever costing the page noticeably:
+ *
+ *   - Event-driven, no polling. Resources arrive through a PerformanceObserver
+ *     (only new entries, batched by the browser off the loading path); the
+ *     script list and library global are read once at DOMContentLoaded and
+ *     once at `load`, each in an idle callback; streams arrive with their
+ *     tracks (rtc-hook onRemoteAudioStream).
+ *   - Bounded. JitsiDetector caps total CPU time and resource URLs examined;
+ *     the network observer stops two minutes after load or at the cap.
+ *   - Nothing that can block: no awaits, no network, no page getters (the
+ *     global is read by property descriptor), every callback in try/catch.
+ *   - Fully torn down at the first match or when the budget runs out.
  */
 function watchForJitsi(onDetected: (signal: JitsiSignal) => void): void {
-  let resourcesSeen = 0;
-  let done = false;
-  let timer: ReturnType<typeof setInterval> | null = null;
-  const check = (): void => {
-    if (done) return;
-    try {
-      const all = performance.getEntriesByType("resource");
-      // The buffer can be cleared by the page; start over when it shrinks.
-      if (all.length < resourcesSeen) resourcesSeen = 0;
-      const fresh = all.slice(resourcesSeen).map((e) => e.name);
-      resourcesSeen = all.length;
-      const jitsiGlobal = (window as unknown as { JitsiMeetJS?: { version?: unknown } }).JitsiMeetJS;
-      const signal = detectJitsi({
-        hasJitsiMeetJSGlobal: typeof jitsiGlobal?.version === "string",
-        scriptSrcs: [...document.scripts].map((s) => s.src).filter(Boolean),
-        resourceUrls: fresh,
-        remoteAudioStreamIds: [...liveTracks().values()].map((r) => r.stream.id),
-      });
-      if (!signal) return;
-      done = true;
-      if (timer !== null) clearInterval(timer);
-      onDetected(signal);
-    } catch {
-      // Detection is best-effort: a hostile getter or a missing API leaves
-      // the page as `web`, which still captures audio.
-    }
+  const cleanups: Array<() => void> = [];
+  const detector = new JitsiDetector(
+    () => performance.now(),
+    (result) => {
+      for (const cleanup of cleanups.splice(0)) {
+        try {
+          cleanup();
+        } catch {
+          // teardown is best-effort
+        }
+      }
+      console.debug(
+        `[ears][hook] Jitsi detection ${result.signal ? `matched (${result.signal})` : `stopped (${result.reason})`}` +
+          ` after ${result.checks} checks, ${result.spentMs.toFixed(2)} ms`,
+      );
+      if (result.signal) onDetected(result.signal);
+    },
+  );
+
+  const idle = (fn: () => void): void => {
+    const ric = (window as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number })
+      .requestIdleCallback;
+    if (typeof ric === "function") ric(fn, { timeout: 2000 });
+    else setTimeout(fn, 0);
   };
-  document.addEventListener("DOMContentLoaded", check, { once: true });
-  timer = setInterval(check, JITSI_DETECT_MS);
+
+  // Network: new resource entries only, including those buffered before now.
+  let stopNetwork: () => void = () => {};
+  try {
+    const observer = new PerformanceObserver((list) => {
+      if (!detector.active) return;
+      detector.feed({ resourceUrls: list.getEntries().map((e) => e.name) });
+      if (detector.resourcesExhausted) stopNetwork();
+    });
+    observer.observe({ type: "resource", buffered: true });
+    stopNetwork = () => observer.disconnect();
+    cleanups.push(() => stopNetwork());
+  } catch {
+    // No PerformanceObserver: the other signals still apply.
+  }
+
+  // Document: the library global and script tags, twice per page load.
+  const scanDocument = (): void =>
+    idle(() => {
+      if (!detector.active) return;
+      detector.feed({
+        hasJitsiMeetJSGlobal: hasJitsiMeetJSGlobal(window),
+        scriptSrcs: Array.from(document.scripts, (el) => el.src).filter(Boolean),
+      });
+    });
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", scanDocument, { once: true });
+    cleanups.push(() => document.removeEventListener("DOMContentLoaded", scanDocument));
+  } else {
+    scanDocument();
+  }
+  let networkDeadline: ReturnType<typeof setTimeout> | null = null;
+  const onLoad = (): void => {
+    scanDocument();
+    networkDeadline = setTimeout(() => stopNetwork(), JITSI_NETWORK_WATCH_MS);
+  };
+  if (document.readyState === "complete") onLoad();
+  else window.addEventListener("load", onLoad, { once: true });
+  cleanups.push(() => {
+    window.removeEventListener("load", onLoad);
+    if (networkDeadline !== null) clearTimeout(networkDeadline);
+  });
+
+  // Audio: each remote stream as its track arrives, plus any already live.
+  const ids = Array.from(liveTracks().values(), (r) => r.stream.id);
+  if (ids.length > 0) detector.feed({ remoteAudioStreamIds: ids });
+  if (detector.active) {
+    cleanups.push(onRemoteAudioStream((stream) => detector.feed({ remoteAudioStreamIds: [stream.id] })));
+  }
 }
 
 function startEpoch(platform: Platform, adapter: PlatformAdapter | null): void {
