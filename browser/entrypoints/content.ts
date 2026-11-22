@@ -131,6 +131,12 @@ export default defineContentScript({
       })
       .catch(() => applyPerfState(true, false)); // unreadable ⇒ tier 1 default
 
+    // The popup asks the active tab to re-run platform detection when it
+    // opens. Fire-and-forget: the result shows up as session status.
+    browser.runtime.onMessage?.addListener?.((msg: unknown) => {
+      if ((msg as { kind?: unknown } | null)?.kind === "recheck-platform") postToMain({ kind: "recheck-platform" });
+    });
+
     browser.storage.local.onChanged?.addListener?.((changes) => {
       const c = changes[CAPTURE_ENABLED_KEY];
       if (c) publishToggle(c.newValue);

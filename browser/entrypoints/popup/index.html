@@ -242,6 +242,34 @@
         font-size: 11px;
         color: var(--muted);
       }
+      #site-list-items {
+        list-style: none;
+        margin: 4px 0 0;
+        padding: 0;
+        font-size: 12px;
+      }
+      #site-list-items li {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 2px 0;
+      }
+      #site-list-items span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .site-remove {
+        font: inherit;
+        font-size: 11px;
+        padding: 1px 6px;
+        border: 1px solid var(--line, rgba(0, 0, 0, 0.2));
+        border-radius: 4px;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+      }
       .debug-log-row {
         margin-top: 14px;
       }
@@ -321,6 +349,12 @@
         <button type="button" id="site-hooks-btn" class="debug-btn">Enable hooks on this site</button>
         <button type="button" id="site-hooks-reload" class="debug-btn" hidden>Reload tab to load hooks</button>
         <div id="site-hooks-note" class="debug-note" aria-live="polite"></div>
+      </div>
+      <!-- Every site enabled above, on any tab, each removable (which also
+           drops its host permission). -->
+      <div id="site-list" hidden>
+        <div class="debug-note">Sites with hooks enabled</div>
+        <ul id="site-list-items"></ul>
       </div>
       <!-- Debug logging: tee every context's console into a persisted ring
            buffer, exportable as a .jsonl file. Off by default. -->

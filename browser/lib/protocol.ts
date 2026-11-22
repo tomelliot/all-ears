@@ -205,6 +205,10 @@ export type ControlMessage =
   // Debug: record a `track-snapshot` attribution event (every WebAudio track
   // and provenance record) and ship it to earsd. Same popup trigger path.
   | { kind: "send-track-snapshot" }
+  // The popup was opened on this tab: run platform detection again now
+  // (identity/jitsi-detect.ts), in case it missed or gave up at page load.
+  // Sent to the active tab only (tabs.sendMessage → content.ts), every frame.
+  | { kind: "recheck-platform" }
   // Debug logging flag, mirrored from storage.local (which the MAIN world
   // can't read) so the hook installs/removes its console tap. Same
   // storage ⇄ content ⇄ MAIN path as capture-state.

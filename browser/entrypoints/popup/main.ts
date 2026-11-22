@@ -39,7 +39,45 @@ function siteEnabled(): boolean {
   return siteTab !== null && siteTab.patterns.every((p) => siteStored.includes(p));
 }
 
+const siteListEl = document.getElementById("site-list");
+const siteListItemsEl = document.getElementById("site-list-items");
+
+/** The saved list of enabled sites, each removable. Shown on any tab. */
+function renderSiteList(): void {
+  if (!siteListEl || !siteListItemsEl) return;
+  siteListEl.hidden = siteStored.length === 0;
+  siteListItemsEl.replaceChildren(
+    ...siteStored.map((pattern) => {
+      const li = document.createElement("li");
+      const name = document.createElement("span");
+      name.textContent = hostOfPattern(pattern);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "site-remove";
+      remove.textContent = "Remove";
+      remove.setAttribute("aria-label", `Remove ${hostOfPattern(pattern)}`);
+      remove.addEventListener("click", () => {
+        siteStored = siteStored.filter((p) => p !== pattern);
+        browser.storage.local
+          .set({ [SITE_HOOKS_KEY]: siteStored })
+          .then(() => browser.permissions.remove({ origins: [pattern] }))
+          .catch(() => {})
+          .finally(() => {
+            renderSiteList();
+            if (siteTab?.patterns.includes(pattern)) {
+              if (siteHooksReloadEl) siteHooksReloadEl.hidden = false;
+              renderSiteHooks("Hooks removed. Reload the tab to unload them.");
+            }
+          });
+      });
+      li.append(name, remove);
+      return li;
+    }),
+  );
+}
+
 function renderSiteHooks(note?: string): void {
+  renderSiteList();
   if (!siteTab || !siteHooksEl || !siteHooksBtnEl) return;
   siteHooksEl.hidden = false;
   siteHooksBtnEl.textContent = siteEnabled() ? "Disable hooks on this site" : "Enable hooks on this site";
@@ -49,9 +87,17 @@ function renderSiteHooks(note?: string): void {
 }
 
 async function loadSiteHooks(): Promise<void> {
-  if (!browser.scripting?.executeScript) return;
+  const stored = await browser.storage.local.get(SITE_HOOKS_KEY);
+  siteStored = parseSiteHookPatterns((stored as Record<string, unknown>)[SITE_HOOKS_KEY]);
+  renderSiteList();
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   if (tab?.id === undefined || !tab.url) return;
+  // Opening the popup re-runs platform detection in every hooked frame of this
+  // tab, in case the page-load watch missed or gave up. Fire-and-forget: a
+  // match declares the meeting, which the status above then shows. Rejects
+  // harmlessly on a tab without our content scripts.
+  browser.tabs.sendMessage(tab.id, { kind: "recheck-platform" }).catch(() => {});
+  if (!browser.scripting?.executeScript) return;
   let frameUrls: string[] = [];
   let jitsi: JitsiSignal | null = null;
   try {
@@ -76,8 +122,6 @@ async function loadSiteHooks(): Promise<void> {
   const patterns = patternsForFrames(tab.url, frameUrls);
   if (patterns.length === 0) return; // built-in platform or non-web page
   siteTab = { id: tab.id, patterns };
-  const v = await browser.storage.local.get(SITE_HOOKS_KEY);
-  siteStored = parseSiteHookPatterns((v as Record<string, unknown>)[SITE_HOOKS_KEY]);
   // A Jitsi page the user hasn't enabled yet gets told so: it is the one kind
   // of unlisted site the extension can fully capture (names and session).
   renderSiteHooks(

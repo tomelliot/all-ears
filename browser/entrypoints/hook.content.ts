@@ -198,6 +198,7 @@ export default defineContentScript({
     // tracks already captured (the epoch handoff replays them as `jitsi`).
     const upgradeToJitsi = (signal: JitsiSignal): void => {
       if (platform !== "web") return;
+      stopJitsiWatch();
       platform = "jitsi";
       perfTag("platform", platform);
       setAttributionPlatform(platform);
@@ -208,7 +209,8 @@ export default defineContentScript({
       startEpoch(platform, adapter);
       stopMeetingWatch = startMeetingWatch(platform, onMeetingId);
     };
-    if (platform === "web") watchForJitsi(upgradeToJitsi);
+    let stopJitsiWatch: () => void = () => {};
+    if (platform === "web") stopJitsiWatch = watchForJitsi(upgradeToJitsi);
 
     window.addEventListener("message", (event: MessageEvent) => {
       if (event.source !== window) return; // only same-window
@@ -220,6 +222,13 @@ export default defineContentScript({
       }
       if (msg.kind === "send-track-snapshot") {
         sendTrackSnapshot();
+        return;
+      }
+      if (msg.kind === "recheck-platform") {
+        if (platform !== "web") return;
+        const signal = checkJitsiNow();
+        if (signal) upgradeToJitsi(signal);
+        else console.debug(`[ears][hook] re-check on ${host}: no Jitsi signal — staying web`);
         return;
       }
       if (msg.kind === "debug-log-state") {
@@ -301,7 +310,7 @@ const JITSI_NETWORK_WATCH_MS = 120_000;
  *     global is read by property descriptor), every callback in try/catch.
  *   - Fully torn down at the first match or when the budget runs out.
  */
-function watchForJitsi(onDetected: (signal: JitsiSignal) => void): void {
+function watchForJitsi(onDetected: (signal: JitsiSignal) => void): () => void {
   const cleanups: Array<() => void> = [];
   const detector = new JitsiDetector(
     () => performance.now(),
@@ -376,6 +385,34 @@ function watchForJitsi(onDetected: (signal: JitsiSignal) => void): void {
   if (detector.active) {
     cleanups.push(onRemoteAudioStream((stream) => detector.feed({ remoteAudioStreamIds: [stream.id] })));
   }
+  return () => detector.stop();
+}
+
+/**
+ * One full detection pass over the page as it is now, for the popup's
+ * re-check. Same limits as the watcher (its own JitsiDetector budget, capped
+ * inputs, no page getters); reads the current resource buffer rather than
+ * waiting for new entries.
+ */
+function checkJitsiNow(): JitsiSignal | null {
+  let signal: JitsiSignal | null = null;
+  try {
+    const detector = new JitsiDetector(
+      () => performance.now(),
+      (result) => {
+        signal = result.signal;
+      },
+    );
+    detector.feed({
+      hasJitsiMeetJSGlobal: hasJitsiMeetJSGlobal(window),
+      scriptSrcs: Array.from(document.scripts, (el) => el.src).filter(Boolean),
+      resourceUrls: performance.getEntriesByType("resource").map((e) => e.name),
+      remoteAudioStreamIds: Array.from(liveTracks().values(), (r) => r.stream.id),
+    });
+  } catch {
+    // best-effort, like the watcher
+  }
+  return signal;
 }
 
 function startEpoch(platform: Platform, adapter: PlatformAdapter | null): void {
