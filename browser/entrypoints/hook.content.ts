@@ -36,6 +36,7 @@ import "../lib/identity/daily";
 import { DailyAudioCheck, parseDailyRoom } from "../lib/identity/daily";
 import "../lib/identity/jitsi";
 import { JitsiAdapter, JitsiMeetingTitleWatcher, parseJitsiRoom } from "../lib/identity/jitsi";
+import { installColibriSocketWatch } from "../lib/identity/jitsi-colibri";
 import {
   JitsiDetector,
   describeJitsiSignal,
@@ -108,6 +109,11 @@ export default defineContentScript({
     // from the popup) that turns out to be Jitsi becomes `jitsi` — see
     // watchForJitsi below and identity/jitsi-detect.ts.
     let platform = platformForHost(host, adapter);
+    // Jitsi's local endpoint id rides the bridge channel's socket URL
+    // (identity/jitsi-colibri.ts). Installed here, at document_start, on any
+    // page that is or may become Jitsi — a `web` page is upgraded later, and
+    // the socket may open before that.
+    if (platform === "jitsi" || platform === "web") installColibriSocketWatch();
     if (!adapter) console.warn(`[ears][hook] no identity adapter for ${host} — using speaker-<n>`);
     // The adapter for the current platform. A detected Jitsi page has no
     // hostname match in the registry, so it is built directly.

@@ -1,5 +1,6 @@
 import { registerAdapter, type PlatformAdapter, type PlatformParticipantId } from "./adapter";
 import type { RosterEntry } from "../protocol";
+import { colibriLocalEndpointId } from "./jitsi-colibri";
 
 // Jitsi Meet (meet.jit.si, 8x8.vc / JaaS). Read from lib-jitsi-meet and
 // jitsi-meet sources (2026-11-22). Not yet verified on a live call.
@@ -34,6 +35,11 @@ import type { RosterEntry } from "../protocol";
 // Names come from the filmstrip tiles (`#participant_<endpointId>_name`), the
 // same DOM the user sees. Jitsi's Redux store (`APP.store`) holds them too, but
 // reading a private store is ruled out by the extension spec (MUST-NOT #6).
+//
+// You. The munged MSID is only in the SDP lib-jitsi-meet signals, never on our
+// own peer connection, so the local endpoint id comes from the bridge
+// channel's URL instead (jitsi-colibri.ts). The local tile carries no endpoint
+// id in the DOM; its name label is `#localDisplayName`, shown as `<name> (me)`.
 
 /** Hosted Jitsi deployments handled out of the box. Self-hosted instances go
  * through the popup's "Enable hooks on this site" and report as `web`. */
@@ -123,6 +129,7 @@ const VIRTUAL_SCREENSHARE_RE = /-v\d+$/;
 /** The minimal DOM surface the roster scan reads, so tests can pass a fake. */
 export interface JitsiRosterDom {
   querySelectorAll(selector: string): Iterable<{ id: string; textContent: string | null }>;
+  querySelector(selector: string): { textContent: string | null } | null;
 }
 
 /**
@@ -141,6 +148,21 @@ export function harvestJitsiRoster(doc: JitsiRosterDom): RosterEntry[] {
     out.set(id, name);
   }
   return [...out].map(([participantId, displayName]) => ({ participantId, displayName }));
+}
+
+/** The suffix Jitsi appends to the local tile's name
+ * (`interfaceConfig.DEFAULT_LOCAL_DISPLAY_NAME` via `appendSuffix`). */
+const LOCAL_SUFFIX_RE = /\s*\(me\)$/i;
+
+/**
+ * Your own name from the local tile (`#localDisplayName`), without the
+ * ` (me)` suffix. Null while the label is hidden or being edited, and for
+ * Jitsi's placeholder (a user who set no name sees just `me`).
+ */
+export function readJitsiLocalName(doc: JitsiRosterDom): string | null {
+  const text = doc.querySelector("#localDisplayName")?.textContent ?? "";
+  const name = text.replace(/\s+/g, " ").trim().replace(LOCAL_SUFFIX_RE, "").trim();
+  return PLACEHOLDER_NAMES.has(name.toLowerCase()) ? null : name;
 }
 
 /** Product-name tab titles that name no meeting. Lower-case. */
@@ -197,12 +219,27 @@ export class JitsiAdapter implements PlatformAdapter {
   private readonly names = new Map<string, string>();
   private rosterCb: ((entries: RosterEntry[]) => void) | null = null;
   private warnedSlots = false;
+  private warnedLocal = false;
+  /** The endpoint id last reported with `isLocal`. */
+  private reportedLocal: string | null = null;
   private disposed = false;
 
-  constructor(private readonly dom: () => JitsiRosterDom | null = () => globalThis.document ?? null) {}
+  constructor(
+    private readonly dom: () => JitsiRosterDom | null = () => globalThis.document ?? null,
+    private readonly localEndpoint: () => string | null = colibriLocalEndpointId,
+  ) {}
 
   identify(_track: MediaStreamTrack, stream: MediaStream): PlatformParticipantId | null {
     const id = parseJitsiEndpointId(stream.id);
+    if (id !== null && id === this.localEndpoint()) {
+      // Your own audio never comes back from the bridge, so this stream id was
+      // misread. You are on `mic`: never name a remote track after you.
+      if (!this.warnedLocal) {
+        this.warnedLocal = true;
+        console.debug(`[ears][jitsi] remote stream ${stream.id} names the local endpoint — left anonymous`);
+      }
+      return null;
+    }
     if (!id && isJitsiSlotStream(stream.id) && !this.warnedSlots) {
       this.warnedSlots = true;
       console.debug(
@@ -226,11 +263,22 @@ export class JitsiAdapter implements PlatformAdapter {
     if (this.disposed) return;
     const dom = this.dom();
     if (!dom) return;
+    const local = this.localEndpoint();
     const fresh: RosterEntry[] = [];
     for (const entry of harvestJitsiRoster(dom)) {
+      if (entry.participantId === local) continue; // only the local tile names you
       if (this.names.get(entry.participantId) === entry.displayName) continue;
       this.names.set(entry.participantId, entry.displayName);
       fresh.push(entry);
+    }
+    // You, once both halves are known: the endpoint id from the bridge channel
+    // and the name from the local tile. Sent again when either changes, so the
+    // newest pairing always carries the flag.
+    const localName = local ? readJitsiLocalName(dom) : null;
+    if (local && localName && (this.reportedLocal !== local || this.names.get(local) !== localName)) {
+      this.reportedLocal = local;
+      this.names.set(local, localName);
+      fresh.push({ participantId: local, displayName: localName, isLocal: true });
     }
     if (fresh.length > 0) this.rosterCb?.(fresh);
   }

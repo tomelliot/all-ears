@@ -8,6 +8,7 @@ import {
   isJitsiSlotStream,
   parseJitsiEndpointId,
   parseJitsiRoom,
+  readJitsiLocalName,
   type JitsiRosterDom,
 } from "./jitsi";
 import { selectAdapter } from "./adapter";
@@ -89,14 +90,34 @@ describe("parseJitsiEndpointId", () => {
   });
 });
 
-function fakeDom(els: Array<{ id: string; textContent: string | null }>): JitsiRosterDom {
+function fakeDom(
+  els: Array<{ id: string; textContent: string | null }>,
+  local: { textContent: string | null } | null = null,
+): JitsiRosterDom {
   return {
     querySelectorAll: (selector) => {
       expect(selector).toBe('[id^="participant_"][id$="_name"]');
       return els;
     },
+    querySelector: (selector) => {
+      expect(selector).toBe("#localDisplayName");
+      return local;
+    },
   };
 }
+
+describe("readJitsiLocalName", () => {
+  it("reads your name without the (me) suffix", () => {
+    expect(readJitsiLocalName(fakeDom([], { textContent: " Tom  Elliot (me) " }))).toBe("Tom Elliot");
+    expect(readJitsiLocalName(fakeDom([], { textContent: "Tom" }))).toBe("Tom");
+  });
+
+  it("returns null for the placeholder, an empty label, or no label", () => {
+    expect(readJitsiLocalName(fakeDom([], { textContent: "me" }))).toBeNull();
+    expect(readJitsiLocalName(fakeDom([], { textContent: "" }))).toBeNull();
+    expect(readJitsiLocalName(fakeDom([], null))).toBeNull();
+  });
+});
 
 describe("harvestJitsiRoster", () => {
   it("reads remote names from tile labels", () => {
@@ -185,6 +206,68 @@ describe("JitsiAdapter", () => {
       [{ participantId: "831de82b", displayName: "Ada Lovelace" }],
     ]);
     expect(a.displayName("831de82b")).toBe("Ada Lovelace");
+  });
+
+  it("reports you with isLocal once the endpoint id and your name are both known", () => {
+    const els = [{ id: "participant_4494e60c_name", textContent: "Ada" }];
+    const local = { textContent: "me" };
+    let endpoint: string | null = null;
+    const a = new JitsiAdapter(
+      () => fakeDom(els, local),
+      () => endpoint,
+    );
+    const batches: unknown[] = [];
+    a.onRoster((e) => batches.push(e));
+    a.pollIdentities(); // remote only: no endpoint id yet
+    endpoint = "831de82b";
+    a.pollIdentities(); // endpoint id, but you set no name yet
+    local.textContent = "Tom (me)";
+    a.pollIdentities();
+    a.pollIdentities(); // nothing changed
+    local.textContent = "Tom Elliot (me)";
+    a.pollIdentities();
+    expect(batches).toEqual([
+      [{ participantId: "4494e60c", displayName: "Ada" }],
+      [{ participantId: "831de82b", displayName: "Tom", isLocal: true }],
+      [{ participantId: "831de82b", displayName: "Tom Elliot", isLocal: true }],
+    ]);
+    expect(a.displayName("831de82b")).toBe("Tom Elliot");
+  });
+
+  it("reports you again under a new endpoint id after a rejoin", () => {
+    let endpoint = "831de82b";
+    const a = new JitsiAdapter(
+      () => fakeDom([], { textContent: "Tom (me)" }),
+      () => endpoint,
+    );
+    const batches: unknown[] = [];
+    a.onRoster((e) => batches.push(e));
+    a.pollIdentities();
+    endpoint = "5c1a7f02";
+    a.pollIdentities();
+    expect(batches).toEqual([
+      [{ participantId: "831de82b", displayName: "Tom", isLocal: true }],
+      [{ participantId: "5c1a7f02", displayName: "Tom", isLocal: true }],
+    ]);
+  });
+
+  it("never names a remote tile or a remote track after the local endpoint", () => {
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const els = [
+      { id: "participant_831de82b_name", textContent: "Impostor" },
+      { id: "participant_4494e60c_name", textContent: "Ada" },
+    ];
+    const a = new JitsiAdapter(
+      () => fakeDom(els, null),
+      () => "831de82b",
+    );
+    const batches: unknown[] = [];
+    a.onRoster((e) => batches.push(e));
+    a.pollIdentities();
+    expect(batches).toEqual([[{ participantId: "4494e60c", displayName: "Ada" }]]);
+    expect(a.identify(track, stream("831de82b-audio-0-1"))).toBeNull();
+    expect(a.identify(track, stream("4494e60c-audio-0-1"))).toBe("4494e60c");
+    debug.mockRestore();
   });
 
   it("is inert after dispose", () => {
