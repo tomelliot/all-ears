@@ -1,6 +1,12 @@
 import { defineContentScript } from "#imports";
 import { claimEpoch } from "../lib/epoch";
-import { installHook, hookDebugState, livePeerConnections, liveTracks } from "../lib/rtc-hook";
+import {
+  installHook,
+  hookDebugState,
+  livePeerConnections,
+  liveTracks,
+  onRemoteAudioStream,
+} from "../lib/rtc-hook";
 import { setMeetGraphSinks, stopMeetGraphProbe } from "../lib/meet-webaudio-probe";
 import { initCapture, captureDebugState, __devCaptureStream } from "../lib/audio-tap";
 import {
@@ -28,6 +34,14 @@ import "../lib/identity/zoom";
 import "../lib/identity/teams";
 import "../lib/identity/daily";
 import { DailyAudioCheck, parseDailyRoom } from "../lib/identity/daily";
+import "../lib/identity/jitsi";
+import { JitsiAdapter, JitsiMeetingTitleWatcher, parseJitsiRoom } from "../lib/identity/jitsi";
+import {
+  JitsiDetector,
+  describeJitsiSignal,
+  hasJitsiMeetJSGlobal,
+  type JitsiSignal,
+} from "../lib/identity/jitsi-detect";
 import { platformForHost } from "../lib/site-hooks";
 
 // MAIN-world hook. Registered as a content script so the browser runs it at
@@ -60,6 +74,8 @@ export default defineContentScript({
     "https://*.zoom.us/*",
     "https://teams.microsoft.com/*",
     "https://*.daily.co/*",
+    "https://meet.jit.si/*",
+    "https://8x8.vc/*",
     // Dev harness (dev/); stripped unless WXT_DEV_LOCALHOST is set at build.
     ...(import.meta.env.WXT_DEV_LOCALHOST ? ["http://localhost/*", "http://127.0.0.1/*"] : []),
   ],
@@ -88,8 +104,15 @@ export default defineContentScript({
     // establishes the platform and the missing-adapter warning — the first
     // epoch replaces it.
     let adapter = selectAdapter(host);
-    const platform = platformForHost(host, adapter);
+    // Mutable for one transition only: a `web` page (a site the user enabled
+    // from the popup) that turns out to be Jitsi becomes `jitsi` — see
+    // watchForJitsi below and identity/jitsi-detect.ts.
+    let platform = platformForHost(host, adapter);
     if (!adapter) console.warn(`[ears][hook] no identity adapter for ${host} — using speaker-<n>`);
+    // The adapter for the current platform. A detected Jitsi page has no
+    // hostname match in the registry, so it is built directly.
+    const makeAdapter = (): PlatformAdapter | null =>
+      selectAdapter(host) ?? (platform === "jitsi" ? new JitsiAdapter() : null);
 
     let captureOn = false;
     let stopMeetingWatch: (() => void) | null = null;
@@ -162,6 +185,33 @@ export default defineContentScript({
       }
     };
 
+    const onMeetingId = (id: string): void => {
+      lastMeetingId = id;
+      perfTag("meeting", id);
+    };
+
+    // A `web` page that shows Jitsi's fingerprint is captured as Jitsi from
+    // then on: its own adapter (names), and a meeting watch (session declare)
+    // that `web` never runs. Detection normally lands within a second of load,
+    // long before the call's first peer connection, so restarting the epoch
+    // here hands over nothing. A late audio-only detection re-labels the
+    // tracks already captured (the epoch handoff replays them as `jitsi`).
+    const upgradeToJitsi = (signal: JitsiSignal): void => {
+      if (platform !== "web") return;
+      stopJitsiWatch();
+      platform = "jitsi";
+      perfTag("platform", platform);
+      setAttributionPlatform(platform);
+      console.debug(`[ears][hook] Jitsi detected on ${host}: ${describeJitsiSignal(signal)} — capturing as jitsi`);
+      if (!captureOn) return;
+      stopMeetingWatch?.();
+      adapter = makeAdapter();
+      startEpoch(platform, adapter);
+      stopMeetingWatch = startMeetingWatch(platform, onMeetingId);
+    };
+    let stopJitsiWatch: () => void = () => {};
+    if (platform === "web") stopJitsiWatch = watchForJitsi(upgradeToJitsi);
+
     window.addEventListener("message", (event: MessageEvent) => {
       if (event.source !== window) return; // only same-window
       if (!isControlEnvelope(event.data)) return;
@@ -172,6 +222,13 @@ export default defineContentScript({
       }
       if (msg.kind === "send-track-snapshot") {
         sendTrackSnapshot();
+        return;
+      }
+      if (msg.kind === "recheck-platform") {
+        if (platform !== "web") return;
+        const signal = checkJitsiNow();
+        if (signal) upgradeToJitsi(signal);
+        else console.debug(`[ears][hook] re-check on ${host}: no Jitsi signal — staying web`);
         return;
       }
       if (msg.kind === "debug-log-state") {
@@ -187,12 +244,9 @@ export default defineContentScript({
       if (captureOn) {
         // Fresh adapter for the fresh epoch — the previous epoch's teardown
         // disposed its adapter, and a disposed adapter is inert by contract.
-        adapter = selectAdapter(host);
+        adapter = makeAdapter();
         startEpoch(platform, adapter);
-        stopMeetingWatch = startMeetingWatch(platform, (id) => {
-          lastMeetingId = id;
-          perfTag("meeting", id);
-        });
+        stopMeetingWatch = startMeetingWatch(platform, onMeetingId);
         // Meet speaking-ring → per-turn device onsets for the identity
         // correlator (meet-speaking-dom.ts). Meet-only by adapter contract.
         if (platform === "meet" && adapter?.onDeviceSpeaking) {
@@ -228,13 +282,138 @@ export default defineContentScript({
         if (!captureOn) return;
         // Same per-epoch adapter rule as the real toggle path: the superseded
         // epoch's teardown disposes the adapter it was given.
-        adapter = selectAdapter(host);
+        adapter = makeAdapter();
         startEpoch(platform, adapter);
       };
       dev.__earsDevCapture = (stream, id) => __devCaptureStream(stream, id);
     }
   },
 });
+
+/** How long after `load` the network signal is watched; scripts and the
+ * library global are there from page load, so this only waits for a late
+ * join request. The audio signal is event-driven and needs no deadline. */
+const JITSI_NETWORK_WATCH_MS = 120_000;
+
+/**
+ * Watch a `web` page for Jitsi's fingerprint (identity/jitsi-detect.ts) without
+ * ever costing the page noticeably:
+ *
+ *   - Event-driven, no polling. Resources arrive through a PerformanceObserver
+ *     (only new entries, batched by the browser off the loading path); the
+ *     script list and library global are read once at DOMContentLoaded and
+ *     once at `load`, each in an idle callback; streams arrive with their
+ *     tracks (rtc-hook onRemoteAudioStream).
+ *   - Bounded. JitsiDetector caps total CPU time and resource URLs examined;
+ *     the network observer stops two minutes after load or at the cap.
+ *   - Nothing that can block: no awaits, no network, no page getters (the
+ *     global is read by property descriptor), every callback in try/catch.
+ *   - Fully torn down at the first match or when the budget runs out.
+ */
+function watchForJitsi(onDetected: (signal: JitsiSignal) => void): () => void {
+  const cleanups: Array<() => void> = [];
+  const detector = new JitsiDetector(
+    () => performance.now(),
+    (result) => {
+      for (const cleanup of cleanups.splice(0)) {
+        try {
+          cleanup();
+        } catch {
+          // teardown is best-effort
+        }
+      }
+      console.debug(
+        `[ears][hook] Jitsi detection ${result.signal ? `matched (${result.signal})` : `stopped (${result.reason})`}` +
+          ` after ${result.checks} checks, ${result.spentMs.toFixed(2)} ms`,
+      );
+      if (result.signal) onDetected(result.signal);
+    },
+  );
+
+  const idle = (fn: () => void): void => {
+    const ric = (window as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number })
+      .requestIdleCallback;
+    if (typeof ric === "function") ric(fn, { timeout: 2000 });
+    else setTimeout(fn, 0);
+  };
+
+  // Network: new resource entries only, including those buffered before now.
+  let stopNetwork: () => void = () => {};
+  try {
+    const observer = new PerformanceObserver((list) => {
+      if (!detector.active) return;
+      detector.feed({ resourceUrls: list.getEntries().map((e) => e.name) });
+      if (detector.resourcesExhausted) stopNetwork();
+    });
+    observer.observe({ type: "resource", buffered: true });
+    stopNetwork = () => observer.disconnect();
+    cleanups.push(() => stopNetwork());
+  } catch {
+    // No PerformanceObserver: the other signals still apply.
+  }
+
+  // Document: the library global and script tags, twice per page load.
+  const scanDocument = (): void =>
+    idle(() => {
+      if (!detector.active) return;
+      detector.feed({
+        hasJitsiMeetJSGlobal: hasJitsiMeetJSGlobal(window),
+        scriptSrcs: Array.from(document.scripts, (el) => el.src).filter(Boolean),
+      });
+    });
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", scanDocument, { once: true });
+    cleanups.push(() => document.removeEventListener("DOMContentLoaded", scanDocument));
+  } else {
+    scanDocument();
+  }
+  let networkDeadline: ReturnType<typeof setTimeout> | null = null;
+  const onLoad = (): void => {
+    scanDocument();
+    networkDeadline = setTimeout(() => stopNetwork(), JITSI_NETWORK_WATCH_MS);
+  };
+  if (document.readyState === "complete") onLoad();
+  else window.addEventListener("load", onLoad, { once: true });
+  cleanups.push(() => {
+    window.removeEventListener("load", onLoad);
+    if (networkDeadline !== null) clearTimeout(networkDeadline);
+  });
+
+  // Audio: each remote stream as its track arrives, plus any already live.
+  const ids = Array.from(liveTracks().values(), (r) => r.stream.id);
+  if (ids.length > 0) detector.feed({ remoteAudioStreamIds: ids });
+  if (detector.active) {
+    cleanups.push(onRemoteAudioStream((stream) => detector.feed({ remoteAudioStreamIds: [stream.id] })));
+  }
+  return () => detector.stop();
+}
+
+/**
+ * One full detection pass over the page as it is now, for the popup's
+ * re-check. Same limits as the watcher (its own JitsiDetector budget, capped
+ * inputs, no page getters); reads the current resource buffer rather than
+ * waiting for new entries.
+ */
+function checkJitsiNow(): JitsiSignal | null {
+  let signal: JitsiSignal | null = null;
+  try {
+    const detector = new JitsiDetector(
+      () => performance.now(),
+      (result) => {
+        signal = result.signal;
+      },
+    );
+    detector.feed({
+      hasJitsiMeetJSGlobal: hasJitsiMeetJSGlobal(window),
+      scriptSrcs: Array.from(document.scripts, (el) => el.src).filter(Boolean),
+      resourceUrls: performance.getEntriesByType("resource").map((e) => e.name),
+      remoteAudioStreamIds: Array.from(liveTracks().values(), (r) => r.stream.id),
+    });
+  } catch {
+    // best-effort, like the watcher
+  }
+  return signal;
+}
 
 function startEpoch(platform: Platform, adapter: PlatformAdapter | null): void {
   const epoch = claimEpoch();
@@ -283,6 +462,7 @@ function startMeetingWatch(platform: Platform, onMeetingId?: (id: string) => voi
   if (platform === "zoom") return startZoomMeetingWatch(onMeetingId);
   if (platform === "teams") return startTeamsMeetingWatch(onMeetingId);
   if (platform === "daily") return startDailyMeetingWatch(onMeetingId);
+  if (platform === "jitsi") return startJitsiMeetingWatch(onMeetingId);
   if (platform !== "meet") return () => {};
 
   let spaceId: string | null = null;
@@ -429,23 +609,7 @@ function startDailyMeetingWatch(onMeetingId?: (id: string) => void): () => void 
       postToIsolated({ kind: "meeting-started", platform: "daily", externalMeetingId: room });
       console.debug(`[ears][daily] meeting declared: ${room}`);
     }
-    const elementTrackIds: string[] = [];
-    for (const el of document.querySelectorAll("audio,video")) {
-      const stream = (el as HTMLMediaElement).srcObject;
-      if (stream instanceof MediaStream) {
-        for (const t of stream.getAudioTracks()) elementTrackIds.push(t.id);
-      }
-    }
-    const { log, warn } = check.observe(
-      {
-        peerConnections: pcs,
-        hookedTrackIds: [...liveTracks().keys()].map((t) => t.id),
-        elementTrackIds,
-      },
-      Date.now(),
-    );
-    if (log) console.debug(`[ears][daily] ${log}`);
-    if (warn) console.warn(`[ears][daily] ${warn}`);
+    observeAudioCheck(check, pcs, "daily");
   };
 
   tick();
@@ -454,6 +618,99 @@ function startDailyMeetingWatch(onMeetingId?: (id: string) => void): () => void 
     clearInterval(interval);
     if (declared) {
       postToIsolated({ kind: "meeting-ended", platform: "daily", externalMeetingId: room });
+    }
+  };
+}
+
+/** Audio tracks attached to `<audio>`/`<video>` elements — what the page plays. */
+function playedAudioTrackIds(): string[] {
+  const ids: string[] = [];
+  for (const el of document.querySelectorAll("audio,video")) {
+    const stream = (el as HTMLMediaElement).srcObject;
+    if (stream instanceof MediaStream) {
+      for (const t of stream.getAudioTracks()) ids.push(t.id);
+    }
+  }
+  return ids;
+}
+
+/** One tick of the played-but-unhooked audio check, logged under `tag`. */
+function observeAudioCheck(check: DailyAudioCheck, pcs: number, tag: string): void {
+  const { log, warn } = check.observe(
+    {
+      peerConnections: pcs,
+      hookedTrackIds: [...liveTracks().keys()].map((t) => t.id),
+      elementTrackIds: playedAudioTrackIds(),
+    },
+    Date.now(),
+  );
+  if (log) console.debug(`[ears][${tag}] ${log}`);
+  if (warn) console.warn(`[ears][${tag}] ${warn}`);
+}
+
+/**
+ * Jitsi meeting start/end marking, plus the meeting name and the audio check.
+ * The room is in the URL (identity/jitsi.ts parseJitsiRoom), so this is the
+ * Zoom/Daily shape: declare only once a peer connection is live. That gate
+ * matters more here than anywhere — the pre-join screen and the lobby sit on
+ * the room's own URL, and Jicofo opens no media session while you are alone in
+ * the room, so the first connection is the first proof of an actual call.
+ *
+ * The URL is re-read each tick because Jitsi is a single-page app. The name
+ * follows Meet's early/late split: known at declare it rides on
+ * `meeting-started`, found later it goes out as `meeting-renamed`.
+ *
+ * Hanging up navigates away (close page or welcome page), so the tab-gone path
+ * ends the session; a P2P↔bridge switch replaces one connection while the
+ * other stays up, so the call never looks over in between.
+ */
+function startJitsiMeetingWatch(onMeetingId?: (id: string) => void): () => void {
+  const check = new DailyAudioCheck("Jitsi");
+  let declared: string | null = null;
+  let declaredAt = 0;
+  let title: string | null = null;
+  let titleDone = false;
+
+  const titleWatcher = new JitsiMeetingTitleWatcher((resolved) => {
+    console.debug(`[ears][jitsi] meeting name resolved: ${resolved}`);
+    title = resolved;
+    if (declared) {
+      postToIsolated({ kind: "meeting-renamed", platform: "jitsi", externalMeetingId: declared, title: resolved });
+    }
+  });
+
+  const tick = (): void => {
+    const pcs = livePeerConnections().size;
+    if (pcs > 0) {
+      if (!titleDone) titleWatcher.poll(document);
+      if (!declared) {
+        const room = parseJitsiRoom(location.href);
+        if (room) {
+          declared = room;
+          declaredAt = Date.now();
+          onMeetingId?.(room);
+          postToIsolated({
+            kind: "meeting-started",
+            platform: "jitsi",
+            externalMeetingId: room,
+            ...(title ? { title } : {}),
+          });
+          console.debug(`[ears][jitsi] meeting declared: ${room}`);
+        }
+      }
+      if (declared && (titleWatcher.title || Date.now() - declaredAt > MEETING_TITLE_WATCH_MS)) {
+        titleDone = true;
+      }
+    }
+    observeAudioCheck(check, pcs, "jitsi");
+  };
+
+  tick();
+  const interval = setInterval(tick, DAILY_CHECK_MS);
+  return () => {
+    clearInterval(interval);
+    if (declared) {
+      postToIsolated({ kind: "meeting-ended", platform: "jitsi", externalMeetingId: declared });
     }
   };
 }

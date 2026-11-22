@@ -52,6 +52,10 @@ export default defineConfig({
       "https://*.zoom.us/*",
       "https://teams.microsoft.com/*",
       "https://*.daily.co/*",
+      // Hosted Jitsi Meet (identity/jitsi.ts). Self-hosted Jitsi goes through
+      // the popup's per-site enable instead.
+      "https://meet.jit.si/*",
+      "https://8x8.vc/*",
       // Background WebSocket to loopback earsd. Some browsers (notably Brave,
       // with stricter localhost handling than Chrome) require this for the SW
       // to open ws://127.0.0.1. Harmless on browsers that don't.

@@ -42,6 +42,10 @@ export default defineContentScript({
     "https://teams.microsoft.com/*",
     // Daily's call frame (Cal Video and other embeds) — see identity/daily.ts.
     "https://*.daily.co/*",
+    // Hosted Jitsi Meet — see identity/jitsi.ts. Embeds of it (the IFrame API)
+    // are reached through allFrames.
+    "https://meet.jit.si/*",
+    "https://8x8.vc/*",
     ...(import.meta.env.WXT_DEV_LOCALHOST ? ["http://localhost/*", "http://127.0.0.1/*"] : []),
   ],
   runAt: "document_start",
@@ -126,6 +130,12 @@ export default defineContentScript({
         );
       })
       .catch(() => applyPerfState(true, false)); // unreadable ⇒ tier 1 default
+
+    // The popup asks the active tab to re-run platform detection when it
+    // opens. Fire-and-forget: the result shows up as session status.
+    browser.runtime.onMessage?.addListener?.((msg: unknown) => {
+      if ((msg as { kind?: unknown } | null)?.kind === "recheck-platform") postToMain({ kind: "recheck-platform" });
+    });
 
     browser.storage.local.onChanged?.addListener?.((changes) => {
       const c = changes[CAPTURE_ENABLED_KEY];

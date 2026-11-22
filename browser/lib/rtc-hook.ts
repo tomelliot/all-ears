@@ -90,6 +90,17 @@ function registerPeerConnection(pc: RTCPeerConnection): void {
   });
 }
 
+// Passive observers of remote audio streams (identity/jitsi-detect.ts uses
+// this to read the stream id when a track arrives, instead of polling the
+// registry). Each call is isolated: an observer can't break track dispatch.
+const remoteAudioObservers = new Set<(stream: MediaStream) => void>();
+
+/** Observe each remote audio stream as its track arrives. Returns unsubscribe. */
+export function onRemoteAudioStream(cb: (stream: MediaStream) => void): () => void {
+  remoteAudioObservers.add(cb);
+  return () => remoteAudioObservers.delete(cb);
+}
+
 /** Point the singleton hook at the newest epoch's sink. */
 export function setTrackSink(sink: TrackSink): void {
   hw().__earsOnTrack = sink;
@@ -107,6 +118,13 @@ function dispatchTrack(e: RTCTrackEvent): void {
   e.track.addEventListener("ended", () => registry.delete(e.track));
   if (location.host === "meet.google.com") noteMeetAudioTrackLive();
   hw().__earsOnTrack?.(e.track, stream);
+  for (const cb of remoteAudioObservers) {
+    try {
+      cb(stream);
+    } catch {
+      // an observer is never allowed to affect capture or the page
+    }
+  }
 }
 
 function onPeerConnection(pc: RTCPeerConnection): void {

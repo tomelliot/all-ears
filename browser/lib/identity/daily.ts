@@ -62,6 +62,10 @@ export const DAILY_UNHOOKED_GRACE_MS = 5_000;
  */
 export class DailyAudioCheck {
   private lastSummary = "";
+
+  /** `product` names the platform in the warning; Jitsi reuses this check. */
+  constructor(private readonly product: string = "Daily") {}
+
   private readonly unhookedSince = new Map<string, number>();
   private readonly warned = new Set<string>();
 
@@ -90,7 +94,7 @@ export class DailyAudioCheck {
     }
     if (overdue.length > 0) {
       out.warn =
-        `Daily is playing remote audio the hook never saw (tracks ${overdue.join(",")}, pcs=${s.peerConnections}) — ` +
+        `${this.product} is playing remote audio the hook never saw (tracks ${overdue.join(",")}, pcs=${s.peerConnections}) — ` +
         `that audio is not being captured`;
     }
     return out;
