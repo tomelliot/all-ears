@@ -11,6 +11,7 @@ import {
   type ZoomDocumentLike,
   type ZoomElementLike,
 } from "./zoom-dom";
+import type { RosterEntry } from "../protocol";
 
 // Hand-rolled DOM fixtures (no jsdom), matching meet-meeting-title.test.ts.
 // Shapes follow the class names in ZOOM_SELECTORS; they are not yet
@@ -128,6 +129,28 @@ describe("scanZoomRoster", () => {
     });
   });
 
+  it("reads a self marker from a label with or without parentheses", () => {
+    for (const label of ["Me", "(Me)", "Host, me", " (Host, me) "]) {
+      const scan = scanZoomRoster([fakeDoc({ participants: [["Tom Elliot", label], ["Emily Kegels"]] })]);
+      expect(scan).toMatchObject({ remote: ["Emily Kegels"], local: "Tom Elliot", localVia: "marker" });
+    }
+  });
+
+  it("ignores a participant label that is not a role", () => {
+    const scan = scanZoomRoster([fakeDoc({ participants: [["Emily Kegels", "Muted"]] })]);
+    expect(scan).toMatchObject({ remote: ["Emily Kegels"], local: null, localVia: null });
+  });
+
+  it("matches the local hint ignoring case, keeping Zoom's spelling", () => {
+    const scan = scanZoomRoster([fakeDoc({ avatarNames: ["Tom Elliot", "Emily Kegels"] })], " tom elliot ");
+    expect(scan).toMatchObject({ remote: ["Emily Kegels"], local: "Tom Elliot", localVia: "hint" });
+  });
+
+  it("leaves every tile remote and no one local with no marker and no hint (2026-10-26 live)", () => {
+    const scan = scanZoomRoster([fakeDoc({ avatarFooters: ["Tom Elliot", "Emily Kegels"] })]);
+    expect(scan).toMatchObject({ remote: ["Tom Elliot", "Emily Kegels"], local: null, localVia: null });
+  });
+
   it("merges names across frames", () => {
     const scan = scanZoomRoster([fakeDoc({ avatarNames: ["Emily Kegels"] }), fakeDoc({ avatarNames: ["Sam Lee"] })]);
     expect(scan.remote).toEqual(["Emily Kegels", "Sam Lee"]);
@@ -160,8 +183,8 @@ describe("ZoomRosterWatcher", () => {
   it("flags the local user from the pre-join field seen before join", () => {
     const batches: unknown[] = [];
     const w = new ZoomRosterWatcher((e) => batches.push(e));
-    w.observePreJoin(fakeDoc({ preJoinName: " Tom Elliot " }));
-    w.observePreJoin(fakeDoc({})); // the field is gone after join; the hint stays
+    w.observePreJoin([fakeDoc({ preJoinName: " Tom Elliot " })]);
+    w.observePreJoin([fakeDoc({})]); // the field is gone after join; the hint stays
     w.poll([fakeDoc({ avatarNames: ["Emily Kegels", "Tom Elliot"] })]);
     expect(batches).toEqual([
       [
@@ -169,6 +192,56 @@ describe("ZoomRosterWatcher", () => {
         { participantId: zoomNameId("Tom Elliot"), displayName: "Tom Elliot", isLocal: true },
       ],
     ]);
+  });
+
+  it("keeps the local user once the participants panel closes", () => {
+    const batches: RosterEntry[][] = [];
+    const lines: string[] = [];
+    const w = new ZoomRosterWatcher(
+      (e) => batches.push(e),
+      (l) => lines.push(l),
+    );
+    w.poll([fakeDoc({ participants: [["Tom Elliot", "(Host, me)"], ["Emily Kegels"]] })]);
+    w.poll([fakeDoc({ avatarNames: ["Tom Elliot", "Emily Kegels", "Sam Lee"] })]);
+    expect(w.localName).toBe("Tom Elliot");
+    expect(batches).toEqual([
+      [
+        { participantId: zoomNameId("Emily Kegels"), displayName: "Emily Kegels" },
+        { participantId: zoomNameId("Tom Elliot"), displayName: "Tom Elliot", isLocal: true },
+      ],
+      [{ participantId: zoomNameId("Sam Lee"), displayName: "Sam Lee" }],
+    ]);
+    expect(lines.at(-1)).toMatch(/^roster scan: 2 remote, 1 local \(pre-join name not seen; local via marker\)/);
+  });
+
+  it("reads the pre-join field in any frame, and again after join (a rejoin)", () => {
+    const batches: RosterEntry[][] = [];
+    const w = new ZoomRosterWatcher((e) => batches.push(e));
+    w.poll([fakeDoc({ avatarNames: ["Tom Elliot", "Emily Kegels"] })]);
+    // Rejoin: the field shows again, in the inner frame only.
+    w.observePreJoin([fakeDoc({}), fakeDoc({ preJoinName: "Tom Elliot" })]);
+    w.poll([fakeDoc({ avatarNames: ["Tom Elliot", "Emily Kegels"] })]);
+    expect(w.localName).toBe("Tom Elliot");
+    expect(batches.at(-1)).toEqual([
+      { participantId: zoomNameId("Tom Elliot"), displayName: "Tom Elliot", isLocal: true },
+    ]);
+  });
+
+  it("lets a (me) marker replace a pre-join name", () => {
+    const w = new ZoomRosterWatcher(() => {});
+    w.observePreJoin([fakeDoc({ preJoinName: "Emily Kegels" })]);
+    w.poll([fakeDoc({ avatarNames: ["Emily Kegels", "Tom Elliot"] })]);
+    expect(w.localName).toBe("Emily Kegels");
+    w.poll([fakeDoc({ participants: [["Tom Elliot (me)"], ["Emily Kegels"]] })]);
+    expect(w.localName).toBe("Tom Elliot");
+  });
+
+  it("offers the pre-join name as a hint before the roster confirms it", () => {
+    const w = new ZoomRosterWatcher(() => {});
+    expect(w.ownNameHint).toBeNull();
+    w.observePreJoin([fakeDoc({ preJoinName: "Tom Elliot" })]);
+    expect(w.localName).toBeNull();
+    expect(w.ownNameHint).toBe("Tom Elliot");
   });
 
   it("sends nothing when nothing matches", () => {
@@ -188,8 +261,8 @@ describe("ZoomRosterWatcher", () => {
     w.poll([fakeDoc({})]);
     w.poll([fakeDoc({ participants: [["Tom Elliot (me)"]], avatarNames: ["Emily Kegels", "Tom Elliot"] })]);
     expect(lines).toEqual([
-      "roster scan: 0 remote, 0 local (pre-join name not seen); matched nothing",
-      "roster scan: 1 remote, 1 local (pre-join name not seen); matched " +
+      "roster scan: 0 remote, 0 local (pre-join name not seen; local via nothing); matched nothing",
+      "roster scan: 1 remote, 1 local (pre-join name not seen; local via marker); matched " +
         ".participants-item__display-name=1 .video-avatar__avatar-name=2",
     ]);
     for (const l of lines) expect(l).not.toMatch(/Emily|Tom/);
@@ -216,6 +289,32 @@ describe("usableZoomTopic", () => {
 
   it("rejects a bare meeting id", () => {
     expect(usableZoomTopic("879 7373 4905")).toBeNull();
+  });
+
+  it("rejects the web client's own screen names", () => {
+    for (const t of [
+      "Zoom meeting on web", // live tab title, 2026-10-26
+      "Zoom Meeting on Web - Zoom",
+      "Zoom Webinar on the web",
+      "Zoom Web Client",
+      "Zoom web app",
+      "Zoom Workplace Meeting",
+      "Meeting on web",
+      "Waiting Room",
+      "Join from your browser",
+    ]) {
+      expect(usableZoomTopic(t)).toBeNull();
+    }
+  });
+
+  it("keeps a real topic that starts with the product name", () => {
+    expect(usableZoomTopic("Zoom rollout planning")).toBe("Zoom rollout planning");
+    expect(usableZoomTopic("Zoom meeting on web performance - Zoom")).toBe("Zoom meeting on web performance");
+  });
+
+  it("rejects a topic that is only the local user's name", () => {
+    expect(usableZoomTopic("Tom Elliot - Zoom", "tom elliot")).toBeNull();
+    expect(usableZoomTopic("Tom Elliot / Emily Kegels", "Tom Elliot")).toBe("Tom Elliot / Emily Kegels");
   });
 });
 
@@ -245,5 +344,15 @@ describe("ZoomMeetingTitleWatcher", () => {
     w.poll([fakeDoc({ title: "Something else - Zoom" })]);
     expect(seen).toEqual(["Design review"]);
     expect(w.title).toBe("Design review");
+  });
+
+  it("waits past a tab title that is the web client's or the local user's name", () => {
+    const seen: string[] = [];
+    const w = new ZoomMeetingTitleWatcher((t) => seen.push(t));
+    w.poll([fakeDoc({ title: "Zoom meeting on web" })]);
+    w.poll([fakeDoc({ title: "Tom Elliot - Zoom" })], "Tom Elliot");
+    expect(w.title).toBeNull();
+    w.poll([fakeDoc({ title: "Design review - Zoom" })], "Tom Elliot");
+    expect(seen).toEqual(["Design review"]);
   });
 });

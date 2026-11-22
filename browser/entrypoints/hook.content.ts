@@ -595,10 +595,12 @@ function startZoomMeetingWatch(onMeetingId?: (id: string) => void): () => void {
 
   const tick = (): void => {
     const docs = zoomDocuments();
-    if (!declared) rosterWatcher.observePreJoin(document);
+    // Every frame, every tick: the field can sit in a frame other than this
+    // one, and comes back on a rejoin. One querySelector per frame.
+    rosterWatcher.observePreJoin(docs);
     // The topic is scanned first so one already up at join declares with it.
     if (!titleWatcher.title && (!declared || Date.now() - declaredAt < MEETING_TITLE_WATCH_MS)) {
-      titleWatcher.poll(docs);
+      titleWatcher.poll(docs, rosterWatcher.ownNameHint);
     }
     if (declare()) rosterWatcher.poll(docs);
   };

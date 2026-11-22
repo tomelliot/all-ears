@@ -22,9 +22,20 @@ import type { RosterEntry } from "../protocol";
 // would stop the roster title from matching the note the user files under
 // the other person's name.
 //
+// ── LOCAL USER ──────────────────────────────────────────────────────────────
+// No self marker is known on the video tiles: on 2026-10-26 live, both tiles,
+// the user's own included, read as remote. The local user is named from two
+// signals only, and with neither, isLocal stays absent (RosterEntry contract):
+//   1. Zoom's own "(me)" marker in the participants panel, when it is open.
+//   2. The pre-join name field, read in every readable frame on every tick, so
+//      a field in another frame, or one that comes back on a rejoin, is seen.
+// The name first established is kept for the rest of the call, so closing the
+// panel does not turn the user back into a remote.
+//
 // ── SELECTORS ───────────────────────────────────────────────────────────────
-// All UNVERIFIED against a live web-client build (2026-10-15). A miss costs
-// nothing but the names; confirm with the console checks in the PR notes.
+// The tile names are verified live (2026-10-16, 2026-10-26). All others are
+// UNVERIFIED; a miss costs nothing but the names. zoom-names-probe.js checks
+// them, and hunts for a self-tile marker, in one call.
 
 /** Every DOM selector this module reads, in one place. */
 export const ZOOM_SELECTORS = {
@@ -37,8 +48,9 @@ export const ZOOM_SELECTORS = {
    * so the footer (which may hold more than the name) is a fallback only. */
   tileNames: [".video-avatar__avatar-name", ".video-avatar__avatar-footer"],
   /** The pre-join "Your Name" field — the local user's name, read before join
-   * so their own tile can be told apart when nothing marks it. */
-  preJoinName: "#input-for-name",
+   * so their own tile can be told apart when nothing marks it. The second id
+   * is the older web client's. */
+  preJoinName: "#input-for-name, #inputname",
   /** In-call topic elements. Low confidence: Zoom shows the topic in the
    * meeting-info popover, which is only in the DOM while open. */
   topic: ".meeting-info-container__meeting-topic, .meeting-topic",
@@ -91,13 +103,36 @@ export interface ZoomRosterScan {
   remote: string[];
   /** The local user's name, when something identified it. */
   local: string | null;
+  /** What identified `local`: a "(me)" marker on screen, or `localHint`. */
+  localVia: "marker" | "hint" | null;
   matched: Record<string, number>;
 }
 
 /**
+ * A participants-panel row as one string: the name element's text, plus its
+ * sibling label as a "(…)" group when the label holds only role tokens, with
+ * or without Zoom's parentheses ("(Host, me)", "Me"). Any other label is
+ * dropped, so it cannot leak into the name.
+ */
+function participantRowText(name: string, label: string): string {
+  const inner = label.replace(/\s+/g, " ").trim().replace(/^\((.*)\)$/, "$1").trim();
+  if (!inner) return name;
+  const tokens = inner.split(",").map((t) => t.trim().toLowerCase());
+  return tokens.every((t) => ROLE_TOKENS.has(t)) ? `${name} (${inner})` : name;
+}
+
+/** The entry of `names` equal to `wanted` ignoring case — the spelling Zoom
+ * shows, which can differ in case from what the user typed before join. */
+function findName(names: readonly string[], wanted: string | null | undefined): string | null {
+  const key = parseZoomDisplayName(wanted)?.name.toLowerCase();
+  return key ? (names.find((n) => n.toLowerCase() === key) ?? null) : null;
+}
+
+/**
  * Read every participant name visible in `docs` (the declaring frame plus
- * any same-origin frame around it). `localHint` is the pre-join name, used
- * when no "(me)" marker is on screen.
+ * any same-origin frame around it). `localHint` is a name already known to be
+ * the local user's (an earlier "(me)" marker, or the pre-join name), used when
+ * no marker is on screen. It counts only when it matches a name shown.
  */
 export function scanZoomRoster(docs: readonly ZoomDocumentLike[], localHint?: string | null): ZoomRosterScan {
   const matched: Record<string, number> = {};
@@ -118,7 +153,7 @@ export function scanZoomRoster(docs: readonly ZoomDocumentLike[], localHint?: st
     for (const el of doc.querySelectorAll(ZOOM_SELECTORS.participantName)) {
       n++;
       const label = el.parentElement?.querySelector(ZOOM_SELECTORS.participantLabel)?.textContent ?? "";
-      take(`${el.textContent ?? ""} ${label}`);
+      take(participantRowText(el.textContent ?? "", label));
     }
     count(ZOOM_SELECTORS.participantName, n);
 
@@ -131,10 +166,14 @@ export function scanZoomRoster(docs: readonly ZoomDocumentLike[], localHint?: st
     }
   }
 
-  const hint = parseZoomDisplayName(localHint)?.name ?? null;
-  if (!local && hint && names.includes(hint)) local = hint;
-  const remote = [...new Set(names)].filter((n) => n !== local);
-  return { remote, local, matched };
+  let localVia: ZoomRosterScan["localVia"] = local ? "marker" : null;
+  if (!local) {
+    local = findName(names, localHint);
+    if (local) localVia = "hint";
+  }
+  const localKey = local?.toLowerCase();
+  const remote = [...new Set(names)].filter((n) => n.toLowerCase() !== localKey);
+  return { remote, local, localVia, matched };
 }
 
 /** The roster id for a DOM-read name. Zoom's DOM exposes no participant id,
@@ -159,22 +198,46 @@ export class ZoomRosterWatcher {
   /** id → whether it was last sent as local. */
   private readonly sent = new Map<string, boolean>();
   private lastSummary = "";
-  private localHint: string | null = null;
+  private preJoinName: string | null = null;
+  /** The local user's name once a scan established it, kept for the call. */
+  private local: string | null = null;
+  /** Which signal established `local`, for the debug line. */
+  private localVia: "marker" | "pre-join" | null = null;
 
   constructor(
     private readonly onEntries: (entries: RosterEntry[]) => void,
     private readonly log: (line: string) => void = () => {},
   ) {}
 
-  /** Remember the pre-join name field while it is on screen. */
-  observePreJoin(doc: ZoomDocumentLike): void {
-    const el = doc.querySelector(ZOOM_SELECTORS.preJoinName) as unknown as { value?: string } | null;
-    const value = el?.value?.trim();
-    if (value) this.localHint = value;
+  /** The local user's name, or null while no signal has established it. */
+  get localName(): string | null {
+    return this.local;
+  }
+
+  /** The local name, else the pre-join name: not proof enough for isLocal,
+   * but enough to refuse a topic that only names the user. */
+  get ownNameHint(): string | null {
+    return this.local ?? this.preJoinName;
+  }
+
+  /** Remember the pre-join name field while it is on screen, in any frame.
+   * The latest value wins, so a rejoin under another name counts. */
+  observePreJoin(docs: readonly ZoomDocumentLike[]): void {
+    for (const doc of docs) {
+      const el = doc.querySelector(ZOOM_SELECTORS.preJoinName) as unknown as { value?: string } | null;
+      const value = el?.value?.trim();
+      if (value) this.preJoinName = value;
+    }
   }
 
   poll(docs: readonly ZoomDocumentLike[]): void {
-    const scan = scanZoomRoster(docs, this.localHint);
+    // A "(me)" marker on screen beats the remembered name; failing both, the
+    // pre-join name. A marker also replaces a name the pre-join field gave.
+    const scan = scanZoomRoster(docs, this.local ?? this.preJoinName);
+    if (scan.local && (!this.local || (scan.localVia === "marker" && this.localVia !== "marker"))) {
+      this.local = scan.local;
+      this.localVia = scan.localVia === "marker" ? "marker" : "pre-join";
+    }
     const fresh = zoomRosterEntries(scan).filter((e) => {
       const known = this.sent.get(e.participantId);
       return known === undefined || (e.isLocal === true && !known);
@@ -187,7 +250,8 @@ export class ZoomRosterWatcher {
       .map(([sel, n]) => `${sel}=${n}`);
     const summary =
       `roster scan: ${scan.remote.length} remote, ${scan.local ? 1 : 0} local` +
-      ` (pre-join name ${this.localHint ? "seen" : "not seen"}); matched ${hits.length ? hits.join(" ") : "nothing"}`;
+      ` (pre-join name ${this.preJoinName ? "seen" : "not seen"}; local via ${this.localVia ?? "nothing"})` +
+      `; matched ${hits.length ? hits.join(" ") : "nothing"}`;
     if (summary !== this.lastSummary) {
       this.lastSummary = summary;
       this.log(summary);
@@ -203,40 +267,56 @@ const TITLE_SUFFIX_RE = /\s*[-–—|]\s*Zoom(?: Workplace)?$/i;
 /** Tab titles and labels that name a screen, not a meeting. */
 const GENERIC_TITLES = new Set(
   [
-    "Zoom",
-    "Zoom Meeting",
-    "Zoom Workplace",
-    "Zoom Web Client",
     "Meeting",
+    "Meeting on web",
+    "Webinar",
     "Join Meeting",
+    "Join Webinar",
+    "Join from your browser",
     "Launch Meeting",
+    "Waiting Room",
+    "Waiting for host",
     "Topic",
     "Loading",
   ].map((t) => t.toLowerCase()),
 );
 
+/** The product's own screen names: "Zoom", "Zoom Meeting", "Zoom meeting on
+ * web" (the web client's tab title, seen live 2026-10-26), "Zoom Workplace",
+ * "Zoom Web Client", "Zoom Webinar", and their combinations. */
+const GENERIC_ZOOM_TITLE_RE =
+  /^zoom(?: workplace)?(?: (?:meeting|webinar))?(?: (?:on (?:the )?web|web(?: client| app)?))?$/i;
+
 /** Zoom's auto-generated topics, which name the host rather than the meeting. */
 const DEFAULT_TOPIC_RE = /['’]s? (?:Zoom Meeting|Personal Meeting Room)$/i;
 
-/** A usable meeting topic, or null for a generic, default, or id-only value. */
-export function usableZoomTopic(raw: string | null | undefined): string | null {
+/**
+ * A usable meeting topic, or null for a generic, default, or id-only value.
+ * With `localName`, a topic that is only the local user's name is refused
+ * too: it names you, not the meeting.
+ */
+export function usableZoomTopic(raw: string | null | undefined, localName?: string | null): string | null {
   const title = (raw ?? "").replace(/\s+/g, " ").trim().replace(TITLE_SUFFIX_RE, "").trim();
   if (!title || title.length > 200) return null;
-  if (GENERIC_TITLES.has(title.toLowerCase())) return null;
+  if (GENERIC_TITLES.has(title.toLowerCase()) || GENERIC_ZOOM_TITLE_RE.test(title)) return null;
   if (DEFAULT_TOPIC_RE.test(title)) return null;
   if (/^[\d\s-]+$/.test(title)) return null; // the meeting id
+  if (localName && title.toLowerCase() === localName.trim().toLowerCase()) return null;
   return title;
 }
 
 /** The meeting topic from the tab title, else a topic element; null if none. */
-export function extractZoomMeetingTitle(docs: readonly ZoomDocumentLike[]): { title: string; via: string } | null {
+export function extractZoomMeetingTitle(
+  docs: readonly ZoomDocumentLike[],
+  localName?: string | null,
+): { title: string; via: string } | null {
   for (const doc of docs) {
-    const title = usableZoomTopic(doc.title);
+    const title = usableZoomTopic(doc.title, localName);
     if (title) return { title, via: "document.title" };
   }
   for (const doc of docs) {
     for (const el of doc.querySelectorAll(ZOOM_SELECTORS.topic)) {
-      const title = usableZoomTopic(el.textContent);
+      const title = usableZoomTopic(el.textContent, localName);
       if (title) return { title, via: ZOOM_SELECTORS.topic };
     }
   }
@@ -253,9 +333,9 @@ export class ZoomMeetingTitleWatcher {
     return this.resolved;
   }
 
-  poll(docs: readonly ZoomDocumentLike[]): void {
+  poll(docs: readonly ZoomDocumentLike[], localName?: string | null): void {
     if (this.resolved) return;
-    const found = extractZoomMeetingTitle(docs);
+    const found = extractZoomMeetingTitle(docs, localName);
     if (!found) return;
     this.resolved = found.title;
     this.onResolved(found.title, found.via);
