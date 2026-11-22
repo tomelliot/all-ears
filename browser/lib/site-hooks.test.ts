@@ -19,6 +19,10 @@ describe("matchPatternForUrl", () => {
     expect(matchPatternForUrl("https://us05web.zoom.us/wc/1/join")).toBeNull();
     expect(matchPatternForUrl("https://teams.microsoft.com/v2/")).toBeNull();
     expect(matchPatternForUrl("https://meetco.daily.co/room")).toBeNull();
+    expect(matchPatternForUrl("https://meet.jit.si/WeeklyStandup")).toBeNull();
+    expect(matchPatternForUrl("https://8x8.vc/vpaas-magic-cookie-x/room")).toBeNull();
+    // Self-hosted Jitsi is not built in: the popup enables it per site.
+    expect(matchPatternForUrl("https://jitsi.example.org/room")).toBe("https://jitsi.example.org/*");
   });
 
   it("refuses non-web schemes and garbage", () => {

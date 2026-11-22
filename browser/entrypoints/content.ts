@@ -42,6 +42,10 @@ export default defineContentScript({
     "https://teams.microsoft.com/*",
     // Daily's call frame (Cal Video and other embeds) — see identity/daily.ts.
     "https://*.daily.co/*",
+    // Hosted Jitsi Meet — see identity/jitsi.ts. Embeds of it (the IFrame API)
+    // are reached through allFrames.
+    "https://meet.jit.si/*",
+    "https://8x8.vc/*",
     ...(import.meta.env.WXT_DEV_LOCALHOST ? ["http://localhost/*", "http://127.0.0.1/*"] : []),
   ],
   runAt: "document_start",

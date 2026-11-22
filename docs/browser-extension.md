@@ -1,6 +1,6 @@
 # Browser extension
 
-The extension captures meeting audio from inside a call you've already joined — Google Meet, Zoom (web), or Teams in Chrome or Firefox — and streams each remote participant's audio to `earsd` as its own source. Because each participant arrives as a separate stream *before* the page mixes them for playback, transcripts get true per-speaker separation without diarization guesswork.
+The extension captures meeting audio from inside a call you've already joined — Google Meet, Zoom (web), Teams, or Jitsi Meet in Chrome or Firefox — and streams each remote participant's audio to `earsd` as its own source. Because each participant arrives as a separate stream *before* the page mixes them for playback, transcripts get true per-speaker separation without diarization guesswork.
 
 It does nothing else: no meeting-joining bots, no tab capture, no caption scraping, no transcription in the browser, no cloud. The user joins; the extension listens; `earsd` and the pipeline do the rest.
 
@@ -11,6 +11,9 @@ It does nothing else: no meeting-joining bots, no tab capture, no caption scrapi
 | Google Meet | One stream per remote participant | Real display names, attached from the first time each person speaks |
 | Zoom (web) | One stream per remote participant | Participant id parsed from the track itself — stable across mute/rejoin |
 | Teams | One mixed far-end stream | `Speaker N` attribution from the dominant-speaker signal — honest, but degraded |
+| Jitsi Meet (meet.jit.si, 8x8.vc) | One stream per remote participant | Endpoint id parsed from the track itself; names from the participant tiles. Not yet verified on a live call |
+
+Self-hosted Jitsi isn't matched by hostname: open the call and use the popup's **Enable hooks on this site**. Audio is captured, but the page reports as `web`, so sources stay unnamed. On a deployment that turns on the bridge's SSRC rewriting (`flags.ssrcRewritingEnabled`, which neither meet.jit.si nor 8x8.vc does), audio arrives in shared slots that don't identify the speaker, so those sources stay unnamed too.
 
 Each captured track shows up in `ears sources list` as `browser:<platform>:<track>` (an opaque per-track handle — whose voice it carries lives in the session's speaker map) and is recorded, indexed, and transcribed like any other source; `ears status` groups the tracks under the live call and marks which are carrying speech. The extension also declares the call to the daemon, which owns it as a [session](./specs/control-protocol.md#session) carrying the platform's own meeting id — capture, the attendee roster, and the end-of-call pipeline (transcribe, then cleanup and summarize) all hang off that session.
 

@@ -56,6 +56,7 @@ export function parseKeepaliveState(raw: unknown): KeepaliveState {
     r.platform === "zoom" ||
     r.platform === "teams" ||
     r.platform === "daily" ||
+    r.platform === "jitsi" ||
     r.platform === "web"
       ? (r.platform as Platform)
       : undefined;

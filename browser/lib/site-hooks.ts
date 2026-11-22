@@ -1,7 +1,8 @@
 // Hooks on sites the manifest doesn't list — the popup's "Enable hooks on this
-// site" button. Meet, Zoom and Teams get the two content scripts statically;
-// any other call site (cal.com, a Daily iframe, …) gets the same two scripts
-// registered at runtime, per origin, after the user grants that origin.
+// site" button. Meet, Zoom, Teams, Daily and hosted Jitsi get the two content
+// scripts statically; any other call site (cal.com, a self-hosted Jitsi, …)
+// gets the same two scripts registered at runtime, per origin, after the user
+// grants that origin.
 //
 // Registration only takes effect on the next load: the hook has to run at
 // document_start to wrap RTCPeerConnection before the page caches it, so the
@@ -29,7 +30,9 @@ export function isBuiltInHost(host: string): boolean {
     host.endsWith("zoom.us") ||
     host === "teams.microsoft.com" ||
     host === "daily.co" ||
-    host.endsWith(".daily.co")
+    host.endsWith(".daily.co") ||
+    host === "meet.jit.si" ||
+    host === "8x8.vc"
   );
 }
 

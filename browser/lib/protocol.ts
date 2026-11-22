@@ -15,7 +15,7 @@ export const EARS_MARKER = "__ears" as const;
  * Platform tag, mirrored into the earsd `browser:<platform>:<track-slug>` label.
  * `web` is any site the user enabled hooks on from the popup (site-hooks.ts).
  */
-export type Platform = "meet" | "zoom" | "teams" | "daily" | "web";
+export type Platform = "meet" | "zoom" | "teams" | "daily" | "jitsi" | "web";
 
 /**
  * Where a participant reference was minted. `platform` ids come from the

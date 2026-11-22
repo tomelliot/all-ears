@@ -28,6 +28,8 @@ import "../lib/identity/zoom";
 import "../lib/identity/teams";
 import "../lib/identity/daily";
 import { DailyAudioCheck, parseDailyRoom } from "../lib/identity/daily";
+import "../lib/identity/jitsi";
+import { JitsiMeetingTitleWatcher, parseJitsiRoom } from "../lib/identity/jitsi";
 import { platformForHost } from "../lib/site-hooks";
 
 // MAIN-world hook. Registered as a content script so the browser runs it at
@@ -60,6 +62,8 @@ export default defineContentScript({
     "https://*.zoom.us/*",
     "https://teams.microsoft.com/*",
     "https://*.daily.co/*",
+    "https://meet.jit.si/*",
+    "https://8x8.vc/*",
     // Dev harness (dev/); stripped unless WXT_DEV_LOCALHOST is set at build.
     ...(import.meta.env.WXT_DEV_LOCALHOST ? ["http://localhost/*", "http://127.0.0.1/*"] : []),
   ],
@@ -283,6 +287,7 @@ function startMeetingWatch(platform: Platform, onMeetingId?: (id: string) => voi
   if (platform === "zoom") return startZoomMeetingWatch(onMeetingId);
   if (platform === "teams") return startTeamsMeetingWatch(onMeetingId);
   if (platform === "daily") return startDailyMeetingWatch(onMeetingId);
+  if (platform === "jitsi") return startJitsiMeetingWatch(onMeetingId);
   if (platform !== "meet") return () => {};
 
   let spaceId: string | null = null;
@@ -429,23 +434,7 @@ function startDailyMeetingWatch(onMeetingId?: (id: string) => void): () => void 
       postToIsolated({ kind: "meeting-started", platform: "daily", externalMeetingId: room });
       console.debug(`[ears][daily] meeting declared: ${room}`);
     }
-    const elementTrackIds: string[] = [];
-    for (const el of document.querySelectorAll("audio,video")) {
-      const stream = (el as HTMLMediaElement).srcObject;
-      if (stream instanceof MediaStream) {
-        for (const t of stream.getAudioTracks()) elementTrackIds.push(t.id);
-      }
-    }
-    const { log, warn } = check.observe(
-      {
-        peerConnections: pcs,
-        hookedTrackIds: [...liveTracks().keys()].map((t) => t.id),
-        elementTrackIds,
-      },
-      Date.now(),
-    );
-    if (log) console.debug(`[ears][daily] ${log}`);
-    if (warn) console.warn(`[ears][daily] ${warn}`);
+    observeAudioCheck(check, pcs, "daily");
   };
 
   tick();
@@ -454,6 +443,99 @@ function startDailyMeetingWatch(onMeetingId?: (id: string) => void): () => void 
     clearInterval(interval);
     if (declared) {
       postToIsolated({ kind: "meeting-ended", platform: "daily", externalMeetingId: room });
+    }
+  };
+}
+
+/** Audio tracks attached to `<audio>`/`<video>` elements — what the page plays. */
+function playedAudioTrackIds(): string[] {
+  const ids: string[] = [];
+  for (const el of document.querySelectorAll("audio,video")) {
+    const stream = (el as HTMLMediaElement).srcObject;
+    if (stream instanceof MediaStream) {
+      for (const t of stream.getAudioTracks()) ids.push(t.id);
+    }
+  }
+  return ids;
+}
+
+/** One tick of the played-but-unhooked audio check, logged under `tag`. */
+function observeAudioCheck(check: DailyAudioCheck, pcs: number, tag: string): void {
+  const { log, warn } = check.observe(
+    {
+      peerConnections: pcs,
+      hookedTrackIds: [...liveTracks().keys()].map((t) => t.id),
+      elementTrackIds: playedAudioTrackIds(),
+    },
+    Date.now(),
+  );
+  if (log) console.debug(`[ears][${tag}] ${log}`);
+  if (warn) console.warn(`[ears][${tag}] ${warn}`);
+}
+
+/**
+ * Jitsi meeting start/end marking, plus the meeting name and the audio check.
+ * The room is in the URL (identity/jitsi.ts parseJitsiRoom), so this is the
+ * Zoom/Daily shape: declare only once a peer connection is live. That gate
+ * matters more here than anywhere — the pre-join screen and the lobby sit on
+ * the room's own URL, and Jicofo opens no media session while you are alone in
+ * the room, so the first connection is the first proof of an actual call.
+ *
+ * The URL is re-read each tick because Jitsi is a single-page app. The name
+ * follows Meet's early/late split: known at declare it rides on
+ * `meeting-started`, found later it goes out as `meeting-renamed`.
+ *
+ * Hanging up navigates away (close page or welcome page), so the tab-gone path
+ * ends the session; a P2P↔bridge switch replaces one connection while the
+ * other stays up, so the call never looks over in between.
+ */
+function startJitsiMeetingWatch(onMeetingId?: (id: string) => void): () => void {
+  const check = new DailyAudioCheck("Jitsi");
+  let declared: string | null = null;
+  let declaredAt = 0;
+  let title: string | null = null;
+  let titleDone = false;
+
+  const titleWatcher = new JitsiMeetingTitleWatcher((resolved) => {
+    console.debug(`[ears][jitsi] meeting name resolved: ${resolved}`);
+    title = resolved;
+    if (declared) {
+      postToIsolated({ kind: "meeting-renamed", platform: "jitsi", externalMeetingId: declared, title: resolved });
+    }
+  });
+
+  const tick = (): void => {
+    const pcs = livePeerConnections().size;
+    if (pcs > 0) {
+      if (!titleDone) titleWatcher.poll(document);
+      if (!declared) {
+        const room = parseJitsiRoom(location.href);
+        if (room) {
+          declared = room;
+          declaredAt = Date.now();
+          onMeetingId?.(room);
+          postToIsolated({
+            kind: "meeting-started",
+            platform: "jitsi",
+            externalMeetingId: room,
+            ...(title ? { title } : {}),
+          });
+          console.debug(`[ears][jitsi] meeting declared: ${room}`);
+        }
+      }
+      if (declared && (titleWatcher.title || Date.now() - declaredAt > MEETING_TITLE_WATCH_MS)) {
+        titleDone = true;
+      }
+    }
+    observeAudioCheck(check, pcs, "jitsi");
+  };
+
+  tick();
+  const interval = setInterval(tick, DAILY_CHECK_MS);
+  return () => {
+    clearInterval(interval);
+    if (declared) {
+      postToIsolated({ kind: "meeting-ended", platform: "jitsi", externalMeetingId: declared });
     }
   };
 }

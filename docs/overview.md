@@ -49,7 +49,7 @@ Built and in use:
 - The daemon-owned session lifecycle ([control protocol v2](./specs/control-protocol.md)): idempotent start, pause/resume marks, attendee roster, orphan grace, and the session-end pipeline (transcribe → cleanup → summarize) for browser calls.
 - Transcription: batch and live (`--follow`) via Parakeet/FluidAudio on the Apple Neural Engine, with VAD silence-skipping and natural-pause segmentation.
 - LLM cleanup (with validation guardrails) and preset-based summaries via a subprocess backend (the `llm` CLI by default).
-- Browser extension: per-participant capture and real-name identity on Google Meet, Zoom web; `Speaker N` attribution on Teams.
+- Browser extension: per-participant capture and real-name identity on Google Meet, Zoom web, and Jitsi Meet (Jitsi not yet live-verified); `Speaker N` attribution on Teams.
 
 Not built yet:
 
