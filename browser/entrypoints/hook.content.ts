@@ -29,7 +29,8 @@ import "../lib/identity/teams";
 import "../lib/identity/daily";
 import { DailyAudioCheck, parseDailyRoom } from "../lib/identity/daily";
 import "../lib/identity/jitsi";
-import { JitsiMeetingTitleWatcher, parseJitsiRoom } from "../lib/identity/jitsi";
+import { JitsiAdapter, JitsiMeetingTitleWatcher, parseJitsiRoom } from "../lib/identity/jitsi";
+import { describeJitsiSignal, detectJitsi, type JitsiSignal } from "../lib/identity/jitsi-detect";
 import { platformForHost } from "../lib/site-hooks";
 
 // MAIN-world hook. Registered as a content script so the browser runs it at
@@ -92,8 +93,15 @@ export default defineContentScript({
     // establishes the platform and the missing-adapter warning — the first
     // epoch replaces it.
     let adapter = selectAdapter(host);
-    const platform = platformForHost(host, adapter);
+    // Mutable for one transition only: a `web` page (a site the user enabled
+    // from the popup) that turns out to be Jitsi becomes `jitsi` — see
+    // watchForJitsi below and identity/jitsi-detect.ts.
+    let platform = platformForHost(host, adapter);
     if (!adapter) console.warn(`[ears][hook] no identity adapter for ${host} — using speaker-<n>`);
+    // The adapter for the current platform. A detected Jitsi page has no
+    // hostname match in the registry, so it is built directly.
+    const makeAdapter = (): PlatformAdapter | null =>
+      selectAdapter(host) ?? (platform === "jitsi" ? new JitsiAdapter() : null);
 
     let captureOn = false;
     let stopMeetingWatch: (() => void) | null = null;
@@ -166,6 +174,31 @@ export default defineContentScript({
       }
     };
 
+    const onMeetingId = (id: string): void => {
+      lastMeetingId = id;
+      perfTag("meeting", id);
+    };
+
+    // A `web` page that shows Jitsi's fingerprint is captured as Jitsi from
+    // then on: its own adapter (names), and a meeting watch (session declare)
+    // that `web` never runs. Detection normally lands within a second of load,
+    // long before the call's first peer connection, so restarting the epoch
+    // here hands over nothing. A late audio-only detection re-labels the
+    // tracks already captured (the epoch handoff replays them as `jitsi`).
+    const upgradeToJitsi = (signal: JitsiSignal): void => {
+      if (platform !== "web") return;
+      platform = "jitsi";
+      perfTag("platform", platform);
+      setAttributionPlatform(platform);
+      console.debug(`[ears][hook] Jitsi detected on ${host}: ${describeJitsiSignal(signal)} — capturing as jitsi`);
+      if (!captureOn) return;
+      stopMeetingWatch?.();
+      adapter = makeAdapter();
+      startEpoch(platform, adapter);
+      stopMeetingWatch = startMeetingWatch(platform, onMeetingId);
+    };
+    if (platform === "web") watchForJitsi(upgradeToJitsi);
+
     window.addEventListener("message", (event: MessageEvent) => {
       if (event.source !== window) return; // only same-window
       if (!isControlEnvelope(event.data)) return;
@@ -191,12 +224,9 @@ export default defineContentScript({
       if (captureOn) {
         // Fresh adapter for the fresh epoch — the previous epoch's teardown
         // disposed its adapter, and a disposed adapter is inert by contract.
-        adapter = selectAdapter(host);
+        adapter = makeAdapter();
         startEpoch(platform, adapter);
-        stopMeetingWatch = startMeetingWatch(platform, (id) => {
-          lastMeetingId = id;
-          perfTag("meeting", id);
-        });
+        stopMeetingWatch = startMeetingWatch(platform, onMeetingId);
         // Meet speaking-ring → per-turn device onsets for the identity
         // correlator (meet-speaking-dom.ts). Meet-only by adapter contract.
         if (platform === "meet" && adapter?.onDeviceSpeaking) {
@@ -232,13 +262,53 @@ export default defineContentScript({
         if (!captureOn) return;
         // Same per-epoch adapter rule as the real toggle path: the superseded
         // epoch's teardown disposes the adapter it was given.
-        adapter = selectAdapter(host);
+        adapter = makeAdapter();
         startEpoch(platform, adapter);
       };
       dev.__earsDevCapture = (stream, id) => __devCaptureStream(stream, id);
     }
   },
 });
+
+const JITSI_DETECT_MS = 1000;
+
+/**
+ * Poll a `web` page for Jitsi's fingerprint until it shows one. Runs only on
+ * sites the user enabled from the popup, and stops at the first signal. The
+ * checks are cheap: the page's script list, resource-timing entries since the
+ * last tick, and the hook's own live-track registry.
+ */
+function watchForJitsi(onDetected: (signal: JitsiSignal) => void): void {
+  let resourcesSeen = 0;
+  let done = false;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  const check = (): void => {
+    if (done) return;
+    try {
+      const all = performance.getEntriesByType("resource");
+      // The buffer can be cleared by the page; start over when it shrinks.
+      if (all.length < resourcesSeen) resourcesSeen = 0;
+      const fresh = all.slice(resourcesSeen).map((e) => e.name);
+      resourcesSeen = all.length;
+      const jitsiGlobal = (window as unknown as { JitsiMeetJS?: { version?: unknown } }).JitsiMeetJS;
+      const signal = detectJitsi({
+        hasJitsiMeetJSGlobal: typeof jitsiGlobal?.version === "string",
+        scriptSrcs: [...document.scripts].map((s) => s.src).filter(Boolean),
+        resourceUrls: fresh,
+        remoteAudioStreamIds: [...liveTracks().values()].map((r) => r.stream.id),
+      });
+      if (!signal) return;
+      done = true;
+      if (timer !== null) clearInterval(timer);
+      onDetected(signal);
+    } catch {
+      // Detection is best-effort: a hostile getter or a missing API leaves
+      // the page as `web`, which still captures audio.
+    }
+  };
+  document.addEventListener("DOMContentLoaded", check, { once: true });
+  timer = setInterval(check, JITSI_DETECT_MS);
+}
 
 function startEpoch(platform: Platform, adapter: PlatformAdapter | null): void {
   const epoch = claimEpoch();

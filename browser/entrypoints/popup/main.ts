@@ -11,6 +11,7 @@ import {
 import { toJsonl, type LogEntry } from "../../lib/debug-log";
 import { perfToJsonl, type PerfRecord } from "../../lib/perf";
 import type { BadgeState } from "../../lib/session-tracker";
+import { describeJitsiSignal, detectJitsi, type JitsiSignal } from "../../lib/identity/jitsi-detect";
 import {
   hostOfPattern,
   parseSiteHookPatterns,
@@ -52,12 +53,22 @@ async function loadSiteHooks(): Promise<void> {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   if (tab?.id === undefined || !tab.url) return;
   let frameUrls: string[] = [];
+  let jitsi: JitsiSignal | null = null;
   try {
+    // Self-contained: executeScript serializes the function, so it gathers
+    // raw inputs and the popup runs the detector on them.
     const [res] = await browser.scripting.executeScript({
       target: { tabId: tab.id },
-      func: () => [...document.querySelectorAll("iframe")].map((f) => f.src),
+      func: () => ({
+        frames: [...document.querySelectorAll("iframe")].map((f) => f.src),
+        scripts: [...document.scripts].map((s) => s.src).filter(Boolean),
+        resources: performance.getEntriesByType("resource").map((e) => e.name),
+      }),
     });
-    if (Array.isArray(res?.result)) frameUrls = res.result as string[];
+    const r = res?.result as { frames?: unknown; scripts?: unknown; resources?: unknown } | undefined;
+    const strings = (x: unknown): string[] => (Array.isArray(x) ? x.filter((s) => typeof s === "string") : []);
+    frameUrls = strings(r?.frames);
+    jitsi = detectJitsi({ scriptSrcs: strings(r?.scripts), resourceUrls: strings(r?.resources) });
   } catch {
     // No script access to this page — fall back to the top origin alone.
   }
@@ -66,7 +77,13 @@ async function loadSiteHooks(): Promise<void> {
   siteTab = { id: tab.id, patterns };
   const v = await browser.storage.local.get(SITE_HOOKS_KEY);
   siteStored = parseSiteHookPatterns((v as Record<string, unknown>)[SITE_HOOKS_KEY]);
-  renderSiteHooks();
+  // A Jitsi page the user hasn't enabled yet gets told so: it is the one kind
+  // of unlisted site the extension can fully capture (names and session).
+  renderSiteHooks(
+    jitsi && !siteEnabled()
+      ? `This looks like a Jitsi meeting (${describeJitsiSignal(jitsi)}). Enable hooks to record it.`
+      : undefined,
+  );
 }
 
 void loadSiteHooks().catch(() => {});
