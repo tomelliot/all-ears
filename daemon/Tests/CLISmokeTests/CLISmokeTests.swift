@@ -999,9 +999,9 @@ struct CLISmokeTests {
       confidence = "correlated"
       """,
       "attribution.jsonl": """
-      {"schema":1,"type":"admitted","t":1,"trackId":"a54dcf0b-y","participantId":"t1","generation":1}
-      {"schema":1,"type":"identity-link","t":2,"trackId":"a54dcf0b-y","captureId":"t1","participantId":"4494e60c"}
-      {"schema":1,"type":"audio-onset","t":3,"participantId":"t1","trackId":"a54dcf0b-y","state":"start","framePeak":0.1}
+      {"schema":1,"type":"admitted","t":1,"trackId":"a54dcf0b-c99f-4bce-bc67-c75eeb31ea7d","participantId":"t1","generation":1}
+      {"schema":1,"type":"identity-link","t":2,"trackId":"a54dcf0b-c99f-4bce-bc67-c75eeb31ea7d","captureId":"t1","participantId":"4494e60c"}
+      {"schema":1,"type":"audio-onset","t":3,"participantId":"t1","trackId":"a54dcf0b-c99f-4bce-bc67-c75eeb31ea7d","state":"start","framePeak":0.1}
 
       """,
       "transcript.json": """

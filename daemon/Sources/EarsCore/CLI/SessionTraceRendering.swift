@@ -7,6 +7,13 @@ import Foundation
 /// text. Words per source/label from the transcript follow as a check, and a
 /// closing `problems` section flags each broken link.
 public enum SessionTraceRendering {
+  /// A UUID track id shortened to its first block; any other id in full.
+  /// Jitsi's SSRC-rewriting slots (`remote-audio-1`, `remote-audio-2`, …)
+  /// share their first eight characters, so a blind prefix merges them.
+  static func shortTrackID(_ id: String) -> String {
+    UUID(uuidString: id) != nil ? String(id.prefix(8)) : id
+  }
+
   /// - Parameters:
   ///   - tracks: ``AttributionTrackLog/parse(jsonl:)`` of `attribution.jsonl`,
   ///     or nil when the session has no attribution log.
@@ -58,7 +65,7 @@ public enum SessionTraceRendering {
       contentsOf: table(
         chain.map { link in
           [
-            String(link.trackId.prefix(8)), "-> \(link.captureId)",
+            shortTrackID(link.trackId), "-> \(link.captureId)",
             "-> \(link.platformID ?? "?")",
             "-> \(link.platformID == nil ? "?" : quoted(link.name))",
             "-> \(link.label.map(quoted) ?? "?")  (\(link.source.rawValue))",
@@ -162,7 +169,7 @@ public enum SessionTraceRendering {
 
     for track in tracks where track.speechOnsets > 0 && track.platformIDs.isEmpty {
       found.append(
-        "track \(track.trackId.prefix(8)) (capture \(track.captureId ?? "-")) carried "
+        "track \(shortTrackID(track.trackId)) (capture \(track.captureId ?? "-")) carried "
           + "\(track.speechOnsets) speech onset\(track.speechOnsets == 1 ? "" : "s") but was never "
           + "linked to a platform id")
     }
@@ -175,7 +182,7 @@ public enum SessionTraceRendering {
       switch link.name {
       case nil:
         found.append(
-          "platform id \(platformID) (track \(link.trackId.prefix(8))) has no roster row")
+          "platform id \(platformID) (track \(shortTrackID(link.trackId))) has no roster row")
       case let name? where name.isEmpty:
         found.append("platform id \(platformID) has no display name in the roster")
       default:
@@ -232,11 +239,15 @@ public enum SessionTraceRendering {
     var note = ""
     if let reason = track.retiredReason {
       note = "(retired: \(reason))"
+    } else if track.captureId == nil && track.origin == nil {
+      // Only later events (speech onsets) reached the log: the track's
+      // appearance and admission were recorded before the session existed.
+      note = "(admission not in the log)"
     } else if track.captureId == nil {
       note = "(never admitted" + (track.deferredReason.map { ": deferred, \($0)" } ?? "") + ")"
     }
     return [
-      String(track.trackId.prefix(8)), "origin=\(track.origin ?? "-")",
+      shortTrackID(track.trackId), "origin=\(track.origin ?? "-")",
       "capture=\(track.captureId ?? "-")",
       "platform_id=\(track.platformIDs.isEmpty ? "-" : track.platformIDs.joined(separator: ","))",
       "speech_onsets=\(track.speechOnsets)", note,

@@ -11,17 +11,17 @@ struct SessionTraceRenderingTests {
   /// A one-remote Jitsi call: a muted track that was never admitted, and a
   /// track admitted as `t1` and linked to platform id `4494e60c` ('a').
   private static let jitsiLog = """
-    {"schema":1,"type":"track-appeared","t":1,"trackId":"06fd31a8-x","seam":"receiver-track","muted":true,"origin":"remote"}
-    {"schema":1,"type":"deferred","t":1,"trackId":"06fd31a8-x","seam":"receiver-track","reason":"muted at dispatch"}
-    {"schema":1,"type":"track-appeared","t":2,"trackId":"a54dcf0b-y","seam":"receiver-track","muted":true,"origin":"remote"}
-    {"schema":1,"type":"track-unmuted","t":3,"trackId":"a54dcf0b-y"}
-    {"schema":1,"type":"admitted","t":4,"trackId":"a54dcf0b-y","seam":"receiver-track","participantId":"t1","generation":1}
-    {"schema":1,"type":"identity-link","t":4,"trackId":"a54dcf0b-y","captureId":"t1","participantId":"4494e60c"}
-    {"schema":1,"type":"audio-onset","t":5,"participantId":"t1","trackId":"a54dcf0b-y","state":"start","framePeak":0.03}
-    {"schema":1,"type":"audio-onset","t":6,"participantId":"t1","trackId":"a54dcf0b-y","state":"stop","framePeak":0.001}
-    {"schema":1,"type":"audio-onset","t":7,"participantId":"t1","trackId":"a54dcf0b-y","state":"start","framePeak":0.02}
+    {"schema":1,"type":"track-appeared","t":1,"trackId":"06fd31a8-0000-4000-8000-000000000001","seam":"receiver-track","muted":true,"origin":"remote"}
+    {"schema":1,"type":"deferred","t":1,"trackId":"06fd31a8-0000-4000-8000-000000000001","seam":"receiver-track","reason":"muted at dispatch"}
+    {"schema":1,"type":"track-appeared","t":2,"trackId":"a54dcf0b-0000-4000-8000-000000000002","seam":"receiver-track","muted":true,"origin":"remote"}
+    {"schema":1,"type":"track-unmuted","t":3,"trackId":"a54dcf0b-0000-4000-8000-000000000002"}
+    {"schema":1,"type":"admitted","t":4,"trackId":"a54dcf0b-0000-4000-8000-000000000002","seam":"receiver-track","participantId":"t1","generation":1}
+    {"schema":1,"type":"identity-link","t":4,"trackId":"a54dcf0b-0000-4000-8000-000000000002","captureId":"t1","participantId":"4494e60c"}
+    {"schema":1,"type":"audio-onset","t":5,"participantId":"t1","trackId":"a54dcf0b-0000-4000-8000-000000000002","state":"start","framePeak":0.03}
+    {"schema":1,"type":"audio-onset","t":6,"participantId":"t1","trackId":"a54dcf0b-0000-4000-8000-000000000002","state":"stop","framePeak":0.001}
+    {"schema":1,"type":"audio-onset","t":7,"participantId":"t1","trackId":"a54dcf0b-0000-4000-8000-000000000002","state":"start","framePeak":0.02}
     not json
-    {"schema":2,"type":"admitted","trackId":"a54dcf0b-y","participantId":"t9"}
+    {"schema":2,"type":"admitted","trackId":"a54dcf0b-0000-4000-8000-000000000002","participantId":"t9"}
     """
 
   private func session(
@@ -46,9 +46,11 @@ struct SessionTraceRenderingTests {
     #expect(
       AttributionTrackLog.parse(jsonl: Self.jitsiLog) == [
         AttributionTrack(
-          trackId: "06fd31a8-x", origin: "remote", deferredReason: "muted at dispatch"),
+          trackId: "06fd31a8-0000-4000-8000-000000000001", origin: "remote",
+          deferredReason: "muted at dispatch"),
         AttributionTrack(
-          trackId: "a54dcf0b-y", origin: "remote", captureId: "t1", platformIDs: ["4494e60c"],
+          trackId: "a54dcf0b-0000-4000-8000-000000000002", origin: "remote", captureId: "t1",
+          platformIDs: ["4494e60c"],
           speechOnsets: 2),
       ])
   }
@@ -111,12 +113,12 @@ struct SessionTraceRenderingTests {
   @Test("each broken link in the chain is flagged")
   func flagsProblems() {
     let log = """
-      {"schema":1,"type":"admitted","t":1,"trackId":"aaaaaaaa-1","participantId":"t1","generation":1}
-      {"schema":1,"type":"identity-link","t":2,"trackId":"aaaaaaaa-1","captureId":"t1","participantId":"p-unnamed"}
-      {"schema":1,"type":"admitted","t":3,"trackId":"bbbbbbbb-2","participantId":"t2","generation":1}
-      {"schema":1,"type":"audio-onset","t":4,"participantId":"t2","trackId":"bbbbbbbb-2","state":"start","framePeak":0.1}
-      {"schema":1,"type":"admitted","t":5,"trackId":"cccccccc-3","participantId":"t3","generation":1}
-      {"schema":1,"type":"identity-link","t":6,"trackId":"cccccccc-3","captureId":"t3","participantId":"p-ghost"}
+      {"schema":1,"type":"admitted","t":1,"trackId":"aaaaaaaa-0000-4000-8000-000000000003","participantId":"t1","generation":1}
+      {"schema":1,"type":"identity-link","t":2,"trackId":"aaaaaaaa-0000-4000-8000-000000000003","captureId":"t1","participantId":"p-unnamed"}
+      {"schema":1,"type":"admitted","t":3,"trackId":"bbbbbbbb-0000-4000-8000-000000000004","participantId":"t2","generation":1}
+      {"schema":1,"type":"audio-onset","t":4,"participantId":"t2","trackId":"bbbbbbbb-0000-4000-8000-000000000004","state":"start","framePeak":0.1}
+      {"schema":1,"type":"admitted","t":5,"trackId":"cccccccc-0000-4000-8000-000000000005","participantId":"t3","generation":1}
+      {"schema":1,"type":"identity-link","t":6,"trackId":"cccccccc-0000-4000-8000-000000000005","captureId":"t3","participantId":"p-ghost"}
       """
     var session = session(
       attendees: [
@@ -155,4 +157,11 @@ struct SessionTraceRenderingTests {
         "2 words on browser:jitsi:t2 are labelled 'Speaker 2', but the speaker map says 'Bo'",
       ])
   }
+}
+
+@Test("a UUID track id is shortened; a Jitsi slot id is kept whole")
+func shortTrackIDKeepsSlotIDsDistinct() {
+  #expect(SessionTraceRendering.shortTrackID("a54dcf0b-c99f-4bce-bc67-c75eeb31ea7d") == "a54dcf0b")
+  #expect(SessionTraceRendering.shortTrackID("remote-audio-1") == "remote-audio-1")
+  #expect(SessionTraceRendering.shortTrackID("remote-audio-2") == "remote-audio-2")
 }
