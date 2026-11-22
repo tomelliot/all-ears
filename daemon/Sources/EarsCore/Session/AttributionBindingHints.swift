@@ -139,7 +139,7 @@ public enum AttributionBindingHints {
     return evidence
   }
 
-  private static func decode(_ line: Substring) -> [String: Any]? {
+  static func decode(_ line: Substring) -> [String: Any]? {
     let trimmed = line.trimmingCharacters(in: .whitespaces)
     guard !trimmed.isEmpty else { return nil }
     guard

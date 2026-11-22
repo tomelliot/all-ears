@@ -425,12 +425,13 @@ struct CaptureResumeCommand: AsyncParsableCommand {
 struct SessionCommand: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "session",
-    abstract: "Daemon-owned session lifecycle: show, start, end, pause/resume marks, rename, list.",
+    abstract:
+      "Daemon-owned session lifecycle: show, start, end, pause/resume marks, rename, list, trace.",
     subcommands: [
       SessionShowCommand.self, SessionStartCommand.self, SessionEndCommand.self,
       SessionPauseCommand.self,
       SessionResumeCommand.self, SessionRenameCommand.self, SessionListCommand.self,
-      SessionRetryCommand.self,
+      SessionRetryCommand.self, SessionTraceCommand.self,
     ]
   )
 }
@@ -656,10 +657,52 @@ struct SessionRetryCommand: AsyncParsableCommand {
   }
 }
 
-/// The scan environment `session show` and `session retry` read, or exit 1
+struct SessionTraceCommand: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    commandName: "trace",
+    abstract: "Trace how each speaker was named: track, capture, platform id, name, label.",
+    discussion: """
+      Read-only and daemon-free: reads the session's session.toml, \
+      attribution.jsonl, and transcript.json. Names come from meeting data \
+      only; transcript words per source and label follow as a check.
+      """)
+
+  @OptionGroup var configOptions: ConfigOptions
+
+  @Argument(
+    help: "A unique session-id prefix, a title fragment, or a start time HH:MM (today).")
+  var ref: String
+
+  func run() async throws {
+    let environment = try loadScanEnvironment(configFlag: configOptions.config)
+    let now = Instant(secondsSinceEpoch: Date().timeIntervalSince1970)
+    let session = try resolveSession(
+      ref, environment: environment, now: now, timeZone: TimeZone.current)
+
+    let jsonl = try? String(
+      contentsOf: SessionAttributionLog.fileURL(
+        dataRoot: environment.dataRoot, sessionID: session.id),
+      encoding: .utf8)
+    let sidecar = try? String(
+      contentsOf: DataStoreLayout.sessionTranscriptFile(
+        dataRoot: environment.dataRoot, sessionID: session.id
+      ).deletingPathExtension().appendingPathExtension("json"),
+      encoding: .utf8)
+    print(
+      SessionTraceRendering.render(
+        session: session, tracks: jsonl.map(AttributionTrackLog.parse(jsonl:)),
+        segments: sidecar.flatMap { try? TranscriptParser.parseJSONSidecar($0) }))
+  }
+}
+
+/// The scan environment `session show`, `retry`, and `trace` read, or exit 1
 /// with the config error.
 private func loadScanEnvironment(_ options: ClientOptions) throws -> ScanEnvironment {
-  switch SessionArtifactScanner.environment(configFlag: options.config) {
+  try loadScanEnvironment(configFlag: options.config)
+}
+
+private func loadScanEnvironment(configFlag: String?) throws -> ScanEnvironment {
+  switch SessionArtifactScanner.environment(configFlag: configFlag) {
   case .failure(let error):
     ControlClientRuntime.writeStderr(error.description)
     throw ExitCode(1)

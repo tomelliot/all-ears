@@ -963,6 +963,71 @@ struct CLISmokeTests {
     #expect(unknown.stderr.contains("no session matches 'zzz'"))
   }
 
+  @Test("ears session trace walks track to label from a fixture dir and writes nothing")
+  func earsSessionTraceReadsFixture() throws {
+    let temp = TempDirectory()
+    let dataRoot = temp.url.appendingPathComponent("data")
+    let configPath = temp.write("data_root = \"\(dataRoot.path)\"", named: "config.toml")
+    let id = "46aa6491-aaaa-bbbb-cccc-ddddeeeeffff"
+    let directory = dataRoot.appendingPathComponent("sessions").appendingPathComponent(id)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let files = [
+      "session.toml": """
+      schema = 3
+      id = "\(id)"
+      title = "Jitsi Room"
+      platform = "jitsi"
+      external_id = "meet.jit.si/room"
+      state = "ended"
+      started = "2026-11-22T17:00:37Z"
+      ended = "2026-11-22T17:00:59Z"
+      trigger = "browser-extension"
+      sources = ["mic", "browser:jitsi:t1"]
+      interval = []
+      warnings = []
+
+      [[attendee]]
+      id = "4494e60c"
+      display_name = "a"
+      origin = "platform"
+      self = false
+      source = "browser:jitsi:t1"
+
+      [[speaker]]
+      source = "browser:jitsi:t1"
+      name = "a"
+      confidence = "correlated"
+      """,
+      "attribution.jsonl": """
+      {"schema":1,"type":"admitted","t":1,"trackId":"a54dcf0b-y","participantId":"t1","generation":1}
+      {"schema":1,"type":"identity-link","t":2,"trackId":"a54dcf0b-y","captureId":"t1","participantId":"4494e60c"}
+      {"schema":1,"type":"audio-onset","t":3,"participantId":"t1","trackId":"a54dcf0b-y","state":"start","framePeak":0.1}
+
+      """,
+      "transcript.json": """
+      {"schema":1,"segments":[{"start":0,"end":1,"source":"browser:jitsi:t1","speaker":"a","text":"Okay. How about that?"}]}
+      """,
+    ]
+    for (name, text) in files {
+      try text.write(
+        to: directory.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+    let before = try files.keys.map { try Data(contentsOf: directory.appendingPathComponent($0)) }
+
+    let result = try Self.runEars(["session", "trace", "46aa", "--config", configPath])
+    #expect(result.exitCode == 0)
+    #expect(
+      result.stdout.contains("a54dcf0b  -> t1  -> 4494e60c  -> 'a'  -> 'a'  (browser:jitsi:t1)"))
+    #expect(result.stdout.contains("browser:jitsi:t1  a  4"))
+    #expect(result.stdout.contains("no attendee has self=true"))
+
+    let after = try files.keys.map { try Data(contentsOf: directory.appendingPathComponent($0)) }
+    #expect(before == after)
+    #expect(
+      try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
+        == files.keys.sorted())
+  }
+
   @Test("ears flush finalizes every source's in-progress chunk (a no-op against zero sources)")
   func earsFlushAgainstLiveDaemon() throws {
     let temp = TempDirectory()
