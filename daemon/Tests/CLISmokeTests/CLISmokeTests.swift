@@ -1018,7 +1018,7 @@ struct CLISmokeTests {
     #expect(result.exitCode == 0)
     #expect(
       result.stdout.contains("a54dcf0b  -> t1  -> 4494e60c  -> 'a'  -> 'a'  (browser:jitsi:t1)"))
-    #expect(result.stdout.contains("browser:jitsi:t1  a  4"))
+    #expect(result.stdout.contains("browser:jitsi:t1  'a'  4"))
     #expect(result.stdout.contains("no attendee has self=true"))
 
     let after = try files.keys.map { try Data(contentsOf: directory.appendingPathComponent($0)) }

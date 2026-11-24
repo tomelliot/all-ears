@@ -78,7 +78,7 @@ public enum SessionTraceRendering {
     if let words {
       if words.isEmpty { lines.append("  none") }
       lines.append(
-        contentsOf: table(words.map { [$0.source.rawValue, $0.label, String($0.words)] }))
+        contentsOf: table(words.map { [$0.source.rawValue, quoted($0.label), String($0.words)] }))
     } else {
       lines.append("  no transcript.json")
     }

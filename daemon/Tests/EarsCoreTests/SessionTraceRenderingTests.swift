@@ -94,7 +94,7 @@ struct SessionTraceRenderingTests {
           a54dcf0b  -> t1  -> 4494e60c  -> 'a'  -> 'a'  (browser:jitsi:t1)
 
         words per source / label (transcript.json)
-          browser:jitsi:t1  a  4
+          browser:jitsi:t1  'a'  4
 
         problems
           ⚠ no attendee has self=true — the local participant is unknown
