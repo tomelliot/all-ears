@@ -352,6 +352,44 @@ struct SummarizePipelineTests {
       })
   }
 
+  @Test("each preset logs the transcript and notes files it read, and how the notes were chosen")
+  func logsFilesRead() async throws {
+    let directory = Self.makeTempDirectory("read-log")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let transcriptURL = try Self.writeFixtureTranscript(at: directory, text: "Transcript body.")
+    let notesURL = directory.appendingPathComponent("hand.md")
+    try "- jotted".write(to: notesURL, atomically: true, encoding: .utf8)
+
+    let logs = Mutex<[String]>([])
+    let deps = SummarizePipeline.Dependencies(
+      clock: ManualClock(Instant(secondsSinceEpoch: 120)),
+      llmBackend: FakeLLMBackend(results: [
+        .success(LLMCompletionResult(text: "With notes.")),
+        .success(LLMCompletionResult(text: "Without notes.")),
+      ]),
+      log: { line in logs.withLock { $0.append(line) } },
+      writeStderr: { _ in })
+
+    _ = await SummarizePipeline.run(
+      inputs: SummarizePipeline.Inputs(
+        transcriptPaths: [transcriptURL.path],
+        presets: [SummarizePipeline.Preset(name: "meeting", promptContent: "Meeting:")],
+        out: directory.appendingPathComponent("a.md").path, notes: notesURL.path),
+      dependencies: deps)
+    _ = await SummarizePipeline.run(
+      inputs: SummarizePipeline.Inputs(
+        transcriptPaths: [transcriptURL.path],
+        presets: [SummarizePipeline.Preset(name: "brief", promptContent: "Brief:")],
+        out: directory.appendingPathComponent("b.md").path),
+      dependencies: deps)
+
+    let lines = logs.withLock { $0 }
+    #expect(
+      lines.contains(
+        "preset 'meeting': read \(transcriptURL.path); notes \(notesURL.path) (8 bytes, --notes)"))
+    #expect(lines.contains("preset 'brief': read \(transcriptURL.path); no notes configured"))
+  }
+
   @Test("--out overrides a preset's own out template, including out = {notes}")
   func explicitOutBeatsPresetOut() async throws {
     let directory = Self.makeTempDirectory("out-precedence")

@@ -129,6 +129,9 @@ enum SummarizePipeline {
 
     var transcripts: [TranscriptInput] = []
     var resolvedNames: [String] = []
+    // Every transcript-side file actually read, for the per-preset "read"
+    // log line: the transcripts and any `.json` sidecars found beside them.
+    var inputFiles: [String] = []
     for path in inputs.transcriptPaths {
       let resolvedURL = URL(fileURLWithPath: path)
       let markdown: String
@@ -141,6 +144,8 @@ enum SummarizePipeline {
       }
       let sidecarURL = resolvedURL.deletingPathExtension().appendingPathExtension("json")
       let jsonSidecar = try? String(contentsOf: sidecarURL, encoding: .utf8)
+      inputFiles.append(resolvedURL.path)
+      if jsonSidecar != nil { inputFiles.append(sidecarURL.path) }
       // A transcript that isn't an *ears* transcript still summarizes. The
       // stage's job is "summarize the transcript at this path", and a vault
       // holds plenty of Markdown transcripts this pipeline never produced —
@@ -179,8 +184,10 @@ enum SummarizePipeline {
       var locatorReason: String? = nil
       var writeBackPath: String? = nil
       let notesPath: String?
+      let notesOrigin: String?
       if let explicit = inputs.notes {
         notesPath = explicit
+        notesOrigin = "--notes"
       } else if let template = preset.notes {
         let located = NotesLocator.locate(
           locatorContext(
@@ -189,8 +196,10 @@ enum SummarizePipeline {
         switch located {
         case .exact(let path):
           notesPath = path
+          notesOrigin = "template path"
         case .matched(let path, let reason, let confident):
           notesPath = path
+          notesOrigin = "located: " + reason
           locatorReason = reason
           // A match on edit time alone supplies the notes but is not written
           // over: `{notes}` stays the template's path, so a wrong match adds
@@ -203,9 +212,11 @@ enum SummarizePipeline {
           // The template's path, still — it is what the miss is reported
           // against, and what `out = "{notes}"` would have written to.
           notesPath = template.expand(context)
+          notesOrigin = "template path; no other note matched"
         }
       } else {
         notesPath = nil
+        notesOrigin = nil
       }
       var notesContext = context
       notesContext.notes = writeBackPath ?? notesPath
@@ -213,6 +224,7 @@ enum SummarizePipeline {
       return PresetPlan(
         preset: preset,
         notesPath: notesPath,
+        notesOrigin: notesOrigin,
         locatorReason: locatorReason,
         // A configured path that doesn't resolve degrades to `""` rather than
         // `nil`: the prompt keeps the two-section shape it was written for,
@@ -262,6 +274,7 @@ enum SummarizePipeline {
           "preset '\(preset.name)': notes matched at \(notesPath) (\(reason)) rather than the "
             + "path the template constructs")
       }
+      dependencies.log(readLogLine(preset: preset.name, inputFiles: inputFiles, plan: plan))
 
       let prompt = LLMPrompt(
         stablePrefix: preset.promptContent,
@@ -444,6 +457,9 @@ enum SummarizePipeline {
     /// ``NotesLocator`` matched (or, on a miss, the template's path again, so
     /// the failure is reported against the place that was looked).
     var notesPath: String?
+    /// How ``notesPath`` was chosen (`--notes`, the template's path, or a
+    /// locator match and its reason), for the per-preset "read" log line.
+    var notesOrigin: String?
     /// Why ``notesPath`` differs from what the template constructed, when it
     /// does. `nil` for an exact hit — the ordinary case, which needs no
     /// remark.
@@ -461,6 +477,25 @@ enum SummarizePipeline {
     /// disambiguated against the other presets in this run (see
     /// ``disambiguated(_:dependencies:)``).
     var outputURL: URL
+  }
+
+  /// The per-preset line naming every file whose contents reach the prompt:
+  /// the transcripts (and sidecars), then the notes file and how it was
+  /// chosen. A run that used the wrong note is diagnosable from the log alone.
+  private static func readLogLine(preset: String, inputFiles: [String], plan: PresetPlan)
+    -> String
+  {
+    let notes: String
+    if let path = plan.notesPath {
+      let origin = plan.notesOrigin.map { ", \($0)" } ?? ""
+      notes =
+        plan.notesMissing
+        ? "notes \(path) not found\(origin)"
+        : "notes \(path) (\(plan.notes?.utf8.count ?? 0) bytes\(origin))"
+    } else {
+      notes = "no notes configured"
+    }
+    return "preset '\(preset)': read \(inputFiles.joined(separator: ", ")); \(notes)"
   }
 
   /// Gives every preset in one run its own destination.
