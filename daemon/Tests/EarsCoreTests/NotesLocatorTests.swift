@@ -61,6 +61,31 @@ struct NotesLocatorTests {
     #expect(resolution == .exact(ideal.path))
   }
 
+  /// The 2026-11-26 failure: an earlier session for the same person and day
+  /// had published a transcript-only note at the template's path, so the
+  /// later call read that as the user's notes and never found the real one.
+  @Test("a template path holding another session's note falls through to the search")
+  func foreignTemplatePathIsSearchedPast() throws {
+    let root = try Self.makeVault()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let ideal = root.appendingPathComponent("daily-notes/2026/08/33/2026-08-12 - Matt Barras.md")
+    try Self.write(ideal, modified: Self.start)
+    var context = Self.context(root, title: "2026-08-12 - Matt Barras")
+    context.claimed = [ideal.path]
+
+    guard case .matched(let path, _, let confident) = NotesLocator.locate(context) else {
+      Issue.record("expected the day-folder note")
+      return
+    }
+    #expect(path.hasSuffix("2026-08-12/2026-08-12 - Matt Barras.md"))
+    #expect(confident)
+
+    // With nothing else to find, the claimed file is reported, not used.
+    let day = root.appendingPathComponent("daily-notes/2026/08/33/2026-08-12")
+    try FileManager.default.removeItem(at: day)
+    #expect(NotesLocator.locate(context) == .foreign(ideal.path))
+  }
+
   /// The whole point: the session was titled `meet wUE9lE2sg5YB` because no
   /// meeting name ever resolved, so the template pointed at a file that never
   /// existed — and the real note was a directory deeper, under a short form of

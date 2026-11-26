@@ -185,6 +185,7 @@ enum SummarizePipeline {
       var writeBackPath: String? = nil
       let notesPath: String?
       let notesOrigin: String?
+      var foreignNotes = false
       if let explicit = inputs.notes {
         notesPath = explicit
         notesOrigin = "--notes"
@@ -213,6 +214,12 @@ enum SummarizePipeline {
           // against, and what `out = "{notes}"` would have written to.
           notesPath = template.expand(context)
           notesOrigin = "template path; no other note matched"
+        case .foreign(let path):
+          // Another call's published note: written over as before (it is
+          // backed up first), but never read as this call's jottings.
+          notesPath = path
+          notesOrigin = "template path holds another session's note, not read"
+          foreignNotes = true
         }
       } else {
         notesPath = nil
@@ -220,7 +227,9 @@ enum SummarizePipeline {
       }
       var notesContext = context
       notesContext.notes = writeBackPath ?? notesPath
-      let notesContent = notesPath.flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }
+      let notesContent =
+        foreignNotes
+        ? "" : notesPath.flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }
       return PresetPlan(
         preset: preset,
         notesPath: notesPath,

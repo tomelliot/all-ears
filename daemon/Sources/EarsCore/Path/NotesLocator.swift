@@ -56,6 +56,11 @@ public enum NotesLocator {
     case matched(String, reason: String, confident: Bool)
     /// Nothing plausible. The caller proceeds with no notes, as before.
     case notFound
+    /// The template's path exists but holds a note ears published for a
+    /// different call (claimed by another session, or linking another
+    /// transcript), and no other note matched. The caller must not read it
+    /// as this call's notes.
+    case foreign(String)
   }
 
   /// Everything the search matches against, all of it already known to
@@ -152,12 +157,23 @@ public enum NotesLocator {
   public static func locate(
     _ context: Context, fileManager: FileManager = .default
   ) -> Resolution {
+    // The template's own path wins outright, unless it is a note ears
+    // published for another call: two calls with the same person on the same
+    // day expand to the same path, and the later run used to read the earlier
+    // one's summary as the user's notes and never look for the real ones.
+    var foreignTemplate = false
     if fileManager.fileExists(atPath: context.expandedPath) {
-      return .exact(context.expandedPath)
+      let url = URL(fileURLWithPath: context.expandedPath)
+      let candidate = Candidate(
+        path: context.expandedPath, linkedTranscript: linkedTranscript(in: url))
+      guard !isEligible(candidate, context: context) else { return .exact(context.expandedPath) }
+      foreignTemplate = true
     }
     let root = URL(fileURLWithPath: context.expandedPath).deletingLastPathComponent()
     let candidates = markdownFiles(under: root, fileManager: fileManager)
-    guard let best = best(among: candidates, context: context) else { return .notFound }
+    guard let best = best(among: candidates, context: context) else {
+      return foreignTemplate ? .foreign(context.expandedPath) : .notFound
+    }
     return .matched(
       best.path, reason: reason(for: best, context: context),
       confident: nameScore(best, context: context) > 0)
