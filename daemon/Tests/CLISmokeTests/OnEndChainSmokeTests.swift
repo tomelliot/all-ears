@@ -127,6 +127,7 @@ struct OnEndChainSmokeTests {
 
       [earsd.sessions]
       on_end_stages = ["transcribe", "cleanup", "summarize"]
+      rejoin_hold_s = 0
       # `NullTranscriber` renders a wordless transcript, which the
       # empty-transcript gate would (correctly) stop the chain on. Both
       # thresholds at 0 disable the gate — the pre-gate behaviour this test
@@ -282,6 +283,7 @@ struct OnEndChainSmokeTests {
 
       [earsd.sessions]
       on_end_stages = ["transcribe", "cleanup", "summarize"]
+      rejoin_hold_s = 0
       min_words = 10
       min_speech_seconds = 5
 

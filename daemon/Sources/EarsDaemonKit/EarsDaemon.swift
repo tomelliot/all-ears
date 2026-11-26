@@ -62,6 +62,10 @@ public struct EarsDaemonConfiguration: Sendable {
   /// last ingest stream may stay closed before the daemon ends the session
   /// (`reason = "ingest-idle"`). See `SessionRegistry`'s orphan policy.
   public var sessionIngestCloseGraceSeconds: Double
+  /// `[earsd.sessions].rejoin_hold_s`: how long a browser-ended session is
+  /// held before its pipeline runs, so a rejoin of the same meeting continues
+  /// it. 0 (the default here; config resolution supplies 60) ends at once.
+  public var sessionRejoinHoldSeconds: Double
   /// `[earsd.sessions].local_sources`: locally-captured source ids (your own
   /// mic, system audio) the daemon folds into every browser-triggered session
   /// at `session.start`, so your side is transcribed alongside the extension's
@@ -103,6 +107,7 @@ public struct EarsDaemonConfiguration: Sendable {
     ingestWebSocket: IngestWebSocketConfiguration? = nil,
     controlWebSocket: ControlWebSocketConfiguration? = nil,
     sessionIngestCloseGraceSeconds: Double = 120,
+    sessionRejoinHoldSeconds: Double = 0,
     browserSessionLocalSources: [SourceID] = ["mic"],
     onEndStages: [OnEndStage] = OnEndStage.allCases,
     onEndEmptinessPolicy: TranscriptEmptinessPolicy = .defaults,
@@ -122,6 +127,7 @@ public struct EarsDaemonConfiguration: Sendable {
     self.ingestWebSocket = ingestWebSocket
     self.controlWebSocket = controlWebSocket
     self.sessionIngestCloseGraceSeconds = sessionIngestCloseGraceSeconds
+    self.sessionRejoinHoldSeconds = sessionRejoinHoldSeconds
     self.browserSessionLocalSources = browserSessionLocalSources
     self.onEndStages = onEndStages
     self.onEndEmptinessPolicy = onEndEmptinessPolicy
@@ -464,6 +470,7 @@ public actor EarsDaemon {
       clock: clock,
       bus: eventBus,
       graceSeconds: configuration.sessionIngestCloseGraceSeconds,
+      rejoinHoldSeconds: configuration.sessionRejoinHoldSeconds,
       onEnded: onSessionEnded,
       localBrowserSources: configuration.browserSessionLocalSources,
       knownSourceIDs: { [weak self] in

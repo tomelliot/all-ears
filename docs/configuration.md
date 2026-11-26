@@ -104,6 +104,10 @@ min_silence_ms = 700       # gap before declaring silence
 # daemon ends the session on its own (events.jsonl reason "ingest-idle").
 # Manual sessions are never auto-ended.
 ingest_close_grace_s = 120
+# How long a browser-ended session waits before its pipeline runs. If the same
+# meeting is declared again within it (a drop and rejoin), the session
+# continues instead of a second one starting. 0 ends at once.
+rejoin_hold_s = 60
 # Locally-captured sources folded into every browser session, so your own side
 # is transcribed alongside the extension's per-participant streams. Each id is
 # included only if the daemon is actually capturing it. Set to [] to disable.

@@ -82,6 +82,9 @@ public actor SessionRegistry {
   private let log: @Sendable (String) -> Void
   /// `[earsd.sessions].ingest_close_grace_s`.
   private let graceSeconds: Double
+  /// `[earsd.sessions].rejoin_hold_s`: how long a browser-ended session is
+  /// held paused before it really ends (see ``end(id:reason:)``). 0 disables.
+  private let rejoinHoldSeconds: Double
   /// How long a browser-triggered session with a multi-party roster may run
   /// with no `browser:*` source before the daemon logs a loud warning
   /// (`session.browser_audio_missing`). 0 disables the watchdog.
@@ -137,6 +140,11 @@ public actor SessionRegistry {
   /// Sessions with a browser-audio check already in flight, so roster churn
   /// arms at most one timer at a time.
   private var browserAudioCheckPending: Set<String> = []
+  /// Sessions a client `session.end` is holding for a rejoin, keyed to the
+  /// hold's generation: a rejoin or a real end clears the entry, so the
+  /// scheduled finish becomes a no-op.
+  private var rejoinHolds: [String: Int] = [:]
+  private var rejoinHoldGeneration = 0
 
   public init(
     dataRoot: URL,
@@ -144,6 +152,7 @@ public actor SessionRegistry {
     makeID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
     bus: EventBus? = nil,
     graceSeconds: Double = 120,
+    rejoinHoldSeconds: Double = 0,
     browserAudioWarnSeconds: Double = 120,
     sleep: @escaping @Sendable (Double) async -> Void = { seconds in
       try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
@@ -161,6 +170,7 @@ public actor SessionRegistry {
     self.makeID = makeID
     self.bus = bus
     self.graceSeconds = graceSeconds
+    self.rejoinHoldSeconds = rejoinHoldSeconds
     self.browserAudioWarnSeconds = browserAudioWarnSeconds
     self.sleep = sleep
     self.onEnded = onEnded
@@ -317,6 +327,20 @@ public actor SessionRegistry {
       var existing = sessions[existingID],
       existing.state != .ended
     {
+      if rejoinHolds.removeValue(forKey: existing.id) != nil {
+        let now = clock.now()
+        let gap =
+          existing.intervals.last?.end.map { now.secondsSinceEpoch - $0.secondsSinceEpoch } ?? 0
+        existing.intervals.append(SessionInterval(start: now))
+        existing.state = .active
+        appendEvent(existing.id, event: "interval_opened", at: now)
+        try persist(existing)
+        await publish(&existing)
+        sessions[existing.id] = existing
+        log(
+          "session.start rejoin: session=\(existing.id) identity=\(identityLabel(existing)) "
+            + "gap=\(Int(gap))s — continuing the held session")
+      }
       let merged = mergeSources(params.sources + claimPendingLinks(for: identity), into: &existing)
       if merged {
         try persist(existing)
@@ -397,6 +421,10 @@ public actor SessionRegistry {
   /// already-ended (still-known) session returns its final state.
   @discardableResult
   public func end(id: String, reason: EndReason = .client) async throws -> Session {
+    try await end(id: id, reason: reason, allowHold: true)
+  }
+
+  private func end(id: String, reason: EndReason, allowHold: Bool) async throws -> Session {
     guard var session = knownSession(id) else {
       throw SessionRegistryError.notFound(id)
     }
@@ -404,6 +432,15 @@ public actor SessionRegistry {
       return session
     }
     let now = clock.now()
+    if allowHold, reason == .client, rejoinHoldSeconds > 0,
+      session.trigger == .browserExtension, session.identity != nil
+    {
+      // A repeated end during the hold (extension reconnect churn) converges
+      // on the hold already running rather than cutting it short.
+      if rejoinHolds[id] != nil { return session }
+      return try await hold(session, at: now)
+    }
+    rejoinHolds[id] = nil
     if closeOpenInterval(of: &session, at: now) {
       appendEvent(session.id, event: "interval_closed", at: now)
     }
@@ -433,6 +470,53 @@ public actor SessionRegistry {
       await onEnded(session)
     }
     return session
+  }
+
+  /// The first half of a browser client's `session.end`: the session is
+  /// paused (interval closed, capture stopped) but not ended, and ends for
+  /// real only if no `session.start` for the same identity arrives within
+  /// ``rejoinHoldSeconds``. A Meet drop-and-rejoin re-declares the meeting
+  /// seconds later; without the hold it became a second session, and the two
+  /// wrote the same transcript and note paths, the later run reading the
+  /// earlier one's published note as the user's notes.
+  ///
+  /// The hold is a `paused` state on disk, so a daemon restart inside it
+  /// resumes the session and the orphan grace ends it through the pipeline.
+  private func hold(_ held: Session, at now: Instant) async throws -> Session {
+    var session = held
+    if closeOpenInterval(of: &session, at: now) {
+      appendEvent(session.id, event: "interval_closed", at: now)
+    }
+    session.state = .paused
+    try persist(session)
+    await publish(&session)
+    sessions[session.id] = session
+    rejoinHoldGeneration += 1
+    let generation = rejoinHoldGeneration
+    rejoinHolds[session.id] = generation
+    log(
+      "session.end held for rejoin: session=\(session.id) identity=\(identityLabel(session)) "
+        + "hold=\(Int(rejoinHoldSeconds))s")
+    await stopCapture(session.id, session.sources)
+    let wait = sleep
+    let seconds = rejoinHoldSeconds
+    let id = session.id
+    Task { [weak self] in
+      await wait(seconds)
+      await self?.finishHold(id: id, generation: generation)
+    }
+    return session
+  }
+
+  private func finishHold(id: String, generation: Int) async {
+    guard rejoinHolds[id] == generation else { return }
+    rejoinHolds[id] = nil
+    log("session.end hold expired: session=\(id) — no rejoin, ending")
+    do {
+      _ = try await end(id: id, reason: .client, allowHold: false)
+    } catch {
+      log("session \(id) end after hold failed: \(error)")
+    }
   }
 
   /// Records that this session's transcript completed **successfully** at
@@ -501,6 +585,7 @@ public actor SessionRegistry {
     guard session.state == .paused else {
       return session  // already active — converge, don't error
     }
+    rejoinHolds[id] = nil
     let now = clock.now()
     session.intervals.append(SessionInterval(start: now))
     session.state = .active

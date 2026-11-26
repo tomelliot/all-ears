@@ -39,6 +39,7 @@ public enum EarsdConfigSchema {
       ]),
       "sessions": .table([
         "ingest_close_grace_s": .int(120),
+        "rejoin_hold_s": .int(60),
         "local_sources": .array([.string("mic")]),
         "on_end_stages": .array([
           .string("transcribe"), .string("cleanup"), .string("summarize"),
@@ -162,6 +163,12 @@ public enum EarsdConfigSchema {
                     type: .int,
                     description:
                       "Grace period before a browser session's idle ingest stream auto-ends it, in seconds."
+                  ),
+                  "rejoin_hold_s": ConfigSchema.Field(
+                    type: .int,
+                    description:
+                      "How long a browser-ended session waits before its pipeline runs, in seconds. "
+                      + "A rejoin of the same meeting within it continues the session; 0 disables."
                   ),
                   "local_sources": ConfigSchema.Field(
                     type: .array,

@@ -28,6 +28,7 @@ struct SessionRegistryTests {
     clock: ManualClock,
     bus: EventBus? = nil,
     graceSeconds: Double = 120,
+    rejoinHoldSeconds: Double = 0,
     sleep: (@Sendable (Double) async -> Void)? = nil,
     onEnded: SessionRegistry.EndedHook? = nil,
     localBrowserSources: [SourceID] = [],
@@ -46,6 +47,7 @@ struct SessionRegistryTests {
       },
       bus: bus,
       graceSeconds: graceSeconds,
+      rejoinHoldSeconds: rejoinHoldSeconds,
       sleep: sleep ?? { _ in },
       onEnded: onEnded,
       localBrowserSources: localBrowserSources,
@@ -658,6 +660,84 @@ struct SessionRegistryTests {
     #expect(
       !FileManager.default.fileExists(
         atPath: sessionRoot.appendingPathComponent("sources").path))
+  }
+
+  // MARK: - rejoin hold
+
+  /// The 2026-11-26 Meet call: the extension ended the meeting and declared
+  /// it again three seconds later, which made two sessions writing the same
+  /// transcript and note paths.
+  @Test("a rejoin of the same meeting within the hold continues the session")
+  func rejoinWithinHoldContinuesSession() async throws {
+    let dataRoot = try makeDataRoot()
+    let clock = ManualClock(base)
+    let gate = SleepGate()
+    let ended = Mutex<[String]>([])
+    let registry = makeRegistry(
+      dataRoot: dataRoot, clock: clock, rejoinHoldSeconds: 60,
+      sleep: { seconds in await gate.wait(seconds) },
+      onEnded: { session in ended.withLock { $0.append(session.id) } })
+    let params = SessionStartParams(
+      platform: "meet", externalID: "efY", sources: ["browser:meet:t1"],
+      trigger: .browserExtension)
+
+    let first = try await registry.start(params)
+    let held = try await registry.end(id: first.id)
+    #expect(held.state == .paused)
+    #expect(ended.withLock { $0 }.isEmpty)
+    // A repeated end during the hold does not cut it short.
+    #expect(try await registry.end(id: first.id).state == .paused)
+
+    clock.advance(by: 3)
+    let rejoined = try await registry.start(params)
+    #expect(rejoined.id == first.id)
+    #expect(rejoined.state == .active)
+    #expect(rejoined.intervals.count == 2)
+
+    // The hold's timer firing after the rejoin is a no-op.
+    await gate.releaseAll()
+    try await Task.sleep(nanoseconds: 50_000_000)
+    #expect(try await registry.get(id: first.id).state == .active)
+    #expect(ended.withLock { $0 }.isEmpty)
+  }
+
+  @Test("with no rejoin, a held session ends when the hold expires and runs its hook once")
+  func holdExpiresWithoutRejoin() async throws {
+    let dataRoot = try makeDataRoot()
+    let gate = SleepGate()
+    let ended = Mutex<[String]>([])
+    let registry = makeRegistry(
+      dataRoot: dataRoot, clock: ManualClock(base), rejoinHoldSeconds: 60,
+      sleep: { seconds in await gate.wait(seconds) },
+      onEnded: { session in ended.withLock { $0.append(session.id) } })
+    let session = try await registry.start(
+      SessionStartParams(platform: "meet", externalID: "efY", trigger: .browserExtension))
+
+    _ = try await registry.end(id: session.id)
+    await gate.releaseAll()
+    await waitUntil { try await registry.get(id: session.id).state == .ended }
+
+    #expect(ended.withLock { $0 } == [session.id])
+    let timeline = SessionEventLog.readAll(dataRoot: dataRoot, sessionID: session.id)
+    #expect(timeline.last?.reason == "client")
+  }
+
+  @Test("a manual session, or a different meeting's start, is never held")
+  func holdOnlyForBrowserClientEnds() async throws {
+    let dataRoot = try makeDataRoot()
+    let gate = SleepGate()  // never released: the hold must not be what ends it
+    let registry = makeRegistry(
+      dataRoot: dataRoot, clock: ManualClock(base), rejoinHoldSeconds: 60,
+      sleep: { seconds in await gate.wait(seconds) })
+    let manual = try await registry.start(SessionStartParams(title: "standup"))
+    #expect(try await registry.end(id: manual.id).state == .ended)
+
+    let meet = try await registry.start(
+      SessionStartParams(platform: "meet", externalID: "a", trigger: .browserExtension))
+    _ = try await registry.end(id: meet.id)
+    _ = try await registry.start(
+      SessionStartParams(platform: "meet", externalID: "b", trigger: .browserExtension))
+    #expect(try await registry.get(id: meet.id).state == .ended)
   }
 
   // MARK: - orphan grace

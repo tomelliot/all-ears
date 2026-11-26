@@ -135,6 +135,7 @@ enum DaemonConfigResolution {
       controlWebSocket: resolveControlWebSocket(earsd),
       sessionIngestCloseGraceSeconds: Double(
         int(sessionsTable, "ingest_close_grace_s", default: 120)),
+      sessionRejoinHoldSeconds: Double(int(sessionsTable, "rejoin_hold_s", default: 60)),
       browserSessionLocalSources: browserSessionLocalSources,
       onEndStages: onEndStages,
       onEndEmptinessPolicy: onEndEmptinessPolicy,

@@ -46,6 +46,7 @@ struct EarsdConfigSchemaTests {
       "vad": vad,
       "sessions": .table([
         "ingest_close_grace_s": .int(120),
+        "rejoin_hold_s": .int(60),
         "local_sources": .array([.string("mic")]),
         "on_end_stages": .array([
           .string("transcribe"), .string("cleanup"), .string("summarize"),
