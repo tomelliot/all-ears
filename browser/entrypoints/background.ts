@@ -23,6 +23,8 @@ import {
 } from "../lib/log-store";
 import { PerfCollector, type PerfRecord } from "../lib/perf";
 import type { PortMessage } from "../lib/protocol";
+import { realTimers } from "../lib/call-gate";
+import { StartupSummary } from "../lib/startup-summary";
 import {
   composeBadgeState,
   emptyBackgroundPortState,
@@ -58,7 +60,19 @@ const DEFAULT_CONTROL_PORT = 47812;
 const CONTROL_PORT_STORAGE_KEY = "earsdControlPort";
 
 export default defineBackground(() => {
-  console.debug("[ears][bg] background loaded");
+  // Tap the console from the first line, before the debug flag is read: a
+  // worker start's own lines (and the event that woke it) arrive before the
+  // storage read resolves. They wait here and go to the ring only if debug
+  // logging turns out to be on.
+  let earlyEntries: LogEntry[] | null = [];
+  const tapSink = (e: LogEntry): void => {
+    if (earlyEntries) earlyEntries.push(e);
+    else if (debugLogging) logBatch.push(e);
+  };
+  let untap: (() => void) | null = installConsoleTap("bg", tapSink);
+
+  // One debug-log line per worker start instead of eight (startup-summary.ts).
+  const startup = new StartupSummary((line) => console.debug(line), realTimers);
 
   // ── Badge state: transport status composed with session state ─────────────
   // Transport problems win outright; otherwise the session layer's
@@ -87,12 +101,12 @@ export default defineBackground(() => {
 
   const socket = new EarsSocket(DEFAULT_PORT, (s) => {
     status = s;
-    console.debug(`[ears][bg] transport status: ${s}`);
+    if (!startup.transport("ingest", s)) console.debug(`[ears][bg] transport status: ${s}`);
     broadcastStatus();
   });
 
   const control = new ControlSocket(DEFAULT_CONTROL_PORT, (s) => {
-    console.debug(`[ears][bg] control transport status: ${s}`);
+    if (!startup.transport("control", s)) console.debug(`[ears][bg] control transport status: ${s}`);
   });
 
   const sessions = new SessionTracker(control, (s) => {
@@ -110,28 +124,37 @@ export default defineBackground(() => {
   // batched entries forwarded from the content relay and MAIN-world hook (which
   // have no IndexedDB of the extension's origin). All of it lands in a capped
   // ring the popup exports as a file. Gated on DEBUG_LOG_KEY; off by default.
+  // The console tap itself is installed at the top of this function; this
+  // flag decides whether its entries reach the ring.
   let debugLogging = false;
   const logBatch = createBatcher((entries) => void appendEntries(entries).catch(() => {}));
-  let untap: (() => void) | null = null;
 
-  function setDebugLogging(on: boolean): void {
-    if (on === debugLogging) return;
-    debugLogging = on;
-    if (on) {
-      untap = installConsoleTap("bg", (e) => logBatch.push(e));
-      console.debug("[ears][bg] debug logging enabled");
-    } else {
-      console.debug("[ears][bg] debug logging disabled");
+  /** `announce` is false for the start-up read: the worker-started summary
+   * already marks every start, and a line per start is what we're avoiding. */
+  function setDebugLogging(on: boolean, announce = true): void {
+    // The first call settles the early buffer: ship it or drop it.
+    const early = earlyEntries;
+    earlyEntries = null;
+    if (on && !untap) untap = installConsoleTap("bg", tapSink);
+    if (on && !debugLogging) {
+      debugLogging = true;
+      if (early) for (const e of early) logBatch.push(e);
+      if (announce) console.debug("[ears][bg] debug logging enabled");
+    } else if (!on && debugLogging) {
+      if (announce) console.debug("[ears][bg] debug logging disabled"); // still recorded
+      debugLogging = false;
+      logBatch.flush();
+    }
+    if (!on) {
       untap?.();
       untap = null;
-      logBatch.flush();
     }
   }
 
   browser.storage.local
     .get(DEBUG_LOG_KEY)
-    .then((v) => setDebugLogging((v as Record<string, unknown>)[DEBUG_LOG_KEY] === true))
-    .catch(() => {});
+    .then((v) => setDebugLogging((v as Record<string, unknown>)[DEBUG_LOG_KEY] === true, false))
+    .catch(() => setDebugLogging(false, false));
 
   // ── Perf: the store for every context's records, plus this one's own ──────
   // The background is the only context with IndexedDB for the extension origin,
@@ -217,8 +240,13 @@ export default defineBackground(() => {
 
   // The alarm's job is done by firing: the event resets the worker's idle
   // timer (or respawns a dead worker, whose top level then reconnects).
+  // Any alarm is logged, not only the keepalive: an alarm is one of the
+  // events that can wake the worker, and the start-up summary names it.
   browser.alarms.onAlarm.addListener((alarm) => {
+    startup.event(`alarm ${alarm.name}`);
+    if (startup.collecting) return;
     if (alarm.name === KEEPALIVE_ALARM) console.debug("[ears][bg] keepalive tick");
+    else console.debug(`[ears][bg] alarm: ${alarm.name}`);
   });
 
   // Apply the configured ports, then connect both sockets.
@@ -270,7 +298,9 @@ export default defineBackground(() => {
     const existing = await scripting.getRegisteredContentScripts({ ids });
     if (existing.length > 0) await scripting.unregisterContentScripts({ ids: existing.map((s) => s.id) });
     if (granted.length > 0) await scripting.registerContentScripts(siteHookScripts(granted));
-    console.debug(`[ears][bg] site hooks registered on ${granted.length} origin(s)`, granted);
+    if (!startup.siteHooks(granted)) {
+      console.debug(`[ears][bg] site hooks registered on ${granted.length} origin(s)`, granted);
+    }
   }
 
   function queueSiteHookSync(raw: unknown): void {
@@ -292,6 +322,7 @@ export default defineBackground(() => {
   let nextPortId = 0;
 
   browser.runtime.onConnect.addListener((port) => {
+    startup.event(`port ${port.name}`);
     if (port.name !== "pcm") return;
     const portId = `pcm-${nextPortId++}`;
     console.debug(`[ears][bg] pcm port connected (${portId})`);
@@ -321,6 +352,7 @@ export default defineBackground(() => {
       entries?: LogEntry[];
       records?: PerfRecord[];
     };
+    startup.event(`message ${m.kind ?? "(no kind)"}`);
     // Debug-log traffic: batches forwarded from the relay/hook, plus the
     // popup's export/clear requests.
     if (m.kind === "log-batch") {
