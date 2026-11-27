@@ -172,7 +172,6 @@ export class EarsSocket {
     this.ws = ws;
 
     ws.onopen = () => {
-      console.debug(`[ears][transport] ingest connected: ${this.url}`);
       this.backoff = BASE_BACKOFF_MS;
       // stream_ids are per-connection; a fresh connection re-opens lazily.
       this.resetState();

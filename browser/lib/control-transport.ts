@@ -109,7 +109,6 @@ export class ControlSocket {
     this.ws = ws;
 
     ws.onopen = () => {
-      console.debug(`[ears][control] control connected: ${this.url}`);
       this.backoff = BASE_BACKOFF_MS;
       void this.handshake();
     };

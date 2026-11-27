@@ -11,9 +11,16 @@ import {
   resolvePerfDetailState,
   resolvePerfToggleState,
 } from "../lib/capture-toggle";
-import { createBatcher, installConsoleTap } from "../lib/debug-log";
+import {
+  CallGate,
+  isCallLive,
+  isUrgentLog,
+  MAX_HELD_LOG_ENTRIES,
+  MAX_HELD_PERF_RECORDS,
+} from "../lib/call-gate";
+import { createBatcher, installConsoleTap, type LogEntry } from "../lib/debug-log";
 import { ReconnectingPort } from "../lib/pcm-port";
-import { Counter, Histogram, PerfCollector } from "../lib/perf";
+import { Counter, Histogram, PerfCollector, type PerfRecord } from "../lib/perf";
 import { isMainEnvelope, postToMain } from "../lib/protocol";
 import {
   emptyRelayState,
@@ -68,13 +75,25 @@ export default defineContentScript({
       .get(CAPTURE_ENABLED_KEY)
       .then((v) => publishToggle((v as Record<string, unknown>)[CAPTURE_ENABLED_KEY]))
       .catch(() => publishToggle(undefined)); // unreadable ⇒ default (on)
-    // Debug logging: tap this isolated world's console straight to the
-    // background store, and mirror the flag into the MAIN world (which can't
-    // read storage) so the hook taps too. Entries are batched to one message
-    // per second rather than one per line.
-    const relayLog = createBatcher((entries) =>
-      browser.runtime.sendMessage({ kind: "log-batch", entries }).catch(() => {}),
+    // Log and perf batches to the background pass the call gate (call-gate.ts):
+    // forwarded while a call is live, held in the page otherwise, so an idle
+    // meeting tab never wakes the service worker.
+    const gate = new CallGate();
+    const logOut = gate.forwarder<LogEntry>(
+      (entries) => void browser.runtime.sendMessage({ kind: "log-batch", entries }).catch(() => {}),
+      MAX_HELD_LOG_ENTRIES,
     );
+    const perfOut = gate.forwarder<PerfRecord>(
+      (records) => void browser.runtime.sendMessage({ kind: "perf-batch", records }).catch(() => {}),
+      MAX_HELD_PERF_RECORDS,
+    );
+    const forwardLog = (entries: LogEntry[]): void => logOut.push(entries, isUrgentLog(entries));
+
+    // Debug logging: tap this isolated world's console to the background store,
+    // and mirror the flag into the MAIN world (which can't read storage) so the
+    // hook taps too. Entries are batched to one message per second rather than
+    // one per line.
+    const relayLog = createBatcher(forwardLog);
     let relayUntap: (() => void) | null = null;
     const setDebugLogging = (on: boolean): void => {
       postToMain({ kind: "debug-log-state", enabled: on });
@@ -95,9 +114,7 @@ export default defineContentScript({
     // This world both relays the MAIN world's records and collects its own: the
     // base64 hop below runs here, on the same thread as the page, so its cost
     // belongs in the same picture as the capture path's.
-    const perf = new PerfCollector("relay", (records) =>
-      browser.runtime.sendMessage({ kind: "perf-batch", records }).catch(() => {}),
-    );
+    const perf = new PerfCollector("relay", (records) => perfOut.push(records));
     const relayGroup = perf.group("relay");
     const relayMetrics: RelayMetrics = {
       encode: relayGroup.histogram("encode"),
@@ -184,7 +201,10 @@ export default defineContentScript({
     // the new state, execute the effect plan against the chrome surfaces.
     const sinks: RelaySinks = {
       post: (msg) => port.post(msg),
-      sendRuntimeMessage: (msg) => void browser.runtime.sendMessage(msg).catch(() => {}),
+      sendRuntimeMessage: (msg) => {
+        if (msg.kind === "log-batch") forwardLog(msg.entries);
+        else perfOut.push(msg.records);
+      },
       tagPlatform: (platform) => perf.tag("platform", platform),
       metrics: relayMetrics,
     };
@@ -196,6 +216,9 @@ export default defineContentScript({
         now: () => performance.now(),
       });
       state = next;
+      // Open the gate before running the effects, so a call's first lines
+      // ship with the held pre-call context rather than being held themselves.
+      gate.setLive(isCallLive(state));
       runRelayEffects(effects, sinks);
     });
   },
